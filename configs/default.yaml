@@ -1,0 +1,37 @@
+paths:
+  taxonomy: configs/taxonomy/cuda.yaml
+  quotas: configs/quotas.yaml
+  personas: configs/personas.yaml
+  data_dir: data
+
+generation:
+  temperature: 1.0
+  top_p: 0.95
+  max_tokens: 16384
+  writer_concurrency: 6
+  llm_per_key_concurrency: 2
+  embed_per_key_concurrency: 2
+  embed_chunk_size: 8
+  evolver_fraction: 0.30
+  fewshot_positives: 3
+  fewshot_negatives: 8
+  sieve_min_chars: 24
+  max_parse_retries: 1
+
+review:
+  batch_size: 20
+  top_k: 8
+  semantic_dup_threshold: 0.93
+  semantic_gray_threshold: 0.88
+  template_jaccard_threshold: 0.88
+  template_gray_jaccard: 0.75
+  simhash_hamming_threshold: 3
+  simhash_gray_hamming: 8
+  kl_alert: 0.15
+  entropy_ratio_alert: 0.85
+  nn_cosine_alert: 0.80
+  max_cluster_frac_alert: 0.25
+  leaf_min_questions: 3
+  leaf_coverage_target: 0.80
+  overrep_factor: 2.0
+  llm_every_k_batches: 1

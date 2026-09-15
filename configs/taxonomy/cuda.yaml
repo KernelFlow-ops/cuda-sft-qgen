@@ -1,0 +1,286 @@
+version: 1
+name: nvidia_cuda_knowledge
+domains:
+  - id: T01
+    name: CUDA 编程模型与语法
+    children:
+      - id: qualifiers
+        name: 执行空间限定符
+        leaves:
+          - {id: glob_dev_host, claim: "__global__/__device__/__host__ 的调用方向、编译单元与不可在 host 直接取 device 函数地址", types: [syntax, conceptual, debug], difficulty: [1, 2]}
+          - {id: device_lambda, claim: "device lambda / nvstd::function 在 kernel 中的捕获限制与扩展 lambda 编译开关", types: [syntax, debug], difficulty: [2, 3]}
+      - id: launch
+        name: 执行配置与启动
+        leaves:
+          - {id: triple_chevron, claim: "<<<grid, block, dyn_smem, stream>>> 各参数语义及 dyn_smem 与静态 __shared__ 的叠加", types: [syntax, debug], difficulty: [1, 2]}
+          - {id: cooperative_launch, claim: "cudaLaunchCooperativeKernel 要求的占用、网格同步前提与普通 launch 的差别", types: [syntax, compare], difficulty: [2, 3]}
+      - id: language
+        name: CUDA C++ 方言
+        leaves:
+          - {id: template_kernel, claim: "模板 kernel 的 __global__ 实例化、不同对齐/类型特化对 occupancy 的影响", types: [syntax, optimization], difficulty: [2, 3]}
+          - {id: restrict_restrict, claim: "__restrict__ 对别名分析、向量化与错误使用导致的静默错误", types: [syntax, debug], difficulty: [2, 3]}
+      - id: cg_syntax
+        name: Cooperative Groups 语法
+        leaves:
+          - {id: tiled_partition, claim: "tiled_partition 与 coalesced_group 的活动线程集合差异及 sync 范围", types: [syntax, conceptual], difficulty: [2, 3]}
+          - {id: grid_group, claim: "grid_group.sync 只在 cooperative launch 下合法，否则未定义", types: [debug, conceptual], difficulty: [2, 3]}
+  - id: T02
+    name: 内存层次与数据移动
+    children:
+      - id: global_mem
+        name: 全局内存
+        leaves:
+          - {id: coalescing, claim: "warp 内 32 线程访问是否合并到 32B/64B/128B 事务，取决于对齐与 stride", types: [optimization, conceptual, profiling], difficulty: [1, 2, 3]}
+          - {id: vectorized_ldst, claim: "float4/int4 向量化 load/store 的对齐要求与编译器自动向量化失败原因", types: [optimization, syntax, debug], difficulty: [2, 3]}
+      - id: shared_mem
+        name: 共享内存
+        leaves:
+          - {id: bank_conflict, claim: "32-bank 下 stride=2 的 32-bit 访问产生 2-way conflict；padding 与 swizzle 的解法", types: [optimization, debug, layout], difficulty: [2, 3], hints: ["float tile[32][32] 列优先", "padding 成 33 列", "Swizzle<3,4,3> 是否消 2-way"]}
+          - {id: dyn_smem, claim: "动态共享内存声明为 extern __shared__、多数组切分与对齐", types: [syntax, debug], difficulty: [2]}
+      - id: uvm
+        name: 统一内存
+        leaves:
+          - {id: advise_prefetch, claim: "cudaMemAdvise/cudaMemPrefetchAsync 与第一次 touch 的缺页迁移", types: [optimization, compare], difficulty: [2, 3]}
+          - {id: concurrent_access, claim: "同时被 CPU 与 GPU 访问的 managed 内存在不同架构上的行为差异", types: [debug, conceptual], difficulty: [3]}
+      - id: special
+        name: 特殊存储
+        leaves:
+          - {id: constant_broadcast, claim: "constant 内存在 warp 广播 vs 分叉索引时的序列化", types: [optimization, conceptual], difficulty: [2]}
+          - {id: local_spill, claim: "local memory 来自寄存器溢出或大数组，Nsight 中 local 流量的解读", types: [profiling, debug], difficulty: [2, 3]}
+  - id: T03
+    name: Warp、Occupancy 与发射模型
+    children:
+      - id: warp
+        name: Warp 执行
+        leaves:
+          - {id: divergence, claim: "warp 内 divergence 的 reconvergence 与独立线程调度（ITS）下的差异", types: [conceptual, optimization, debug], difficulty: [2, 3]}
+          - {id: shuffle_reduce, claim: "__shfl_down_sync 的 mask、width 与未参与线程的正确用法", types: [syntax, debug, code_complete], difficulty: [2, 3]}
+      - id: occupancy
+        name: Occupancy
+        leaves:
+          - {id: reg_smem_limit, claim: "occupancy 同时受寄存器、共享内存、warp 数上限约束，提高 occupancy 不一定更快", types: [optimization, profiling, compare], difficulty: [2, 3]}
+          - {id: launch_bounds, claim: "__launch_bounds__ 对寄存器分配与编译失败/occupancy 下限的影响", types: [syntax, optimization], difficulty: [2, 3]}
+      - id: ilp_tlp
+        name: ILP 与 TLP
+        leaves:
+          - {id: latency_hiding, claim: "用更多独立访存（ILP）还是更多 warp（TLP）隐藏 DRAM 延迟的选择条件", types: [optimization, compare], difficulty: [3]}
+  - id: T04
+    name: 同步与并发
+    children:
+      - id: barriers
+        name: 块内与 warp 同步
+        leaves:
+          - {id: syncthreads, claim: "__syncthreads 必须被块内所有线程到达，条件分支中调用会导致死锁", types: [debug, conceptual], difficulty: [1, 2], hints: ["threadIdx.x < 64 时才 __syncthreads", "if (tid==0) __syncthreads", "循环内部分线程提前 return 再 sync"]}
+          - {id: syncwarp, claim: "__syncwarp(mask) 与 __syncthreads 的范围差异，以及 mask 不等于 full 时的陷阱", types: [debug, compare], difficulty: [2, 3]}
+      - id: atomics
+        name: 原子与内存序
+        leaves:
+          - {id: atomicadd_conflict, claim: "同一地址 atomicAdd 的串行化与 shared vs global 原子吞吐差异", types: [optimization, conceptual], difficulty: [2]}
+          - {id: system_scope, claim: "cuda::atomic 的 thread/block/device/system scope 选错导致的可见性 bug", types: [debug, syntax], difficulty: [3]}
+      - id: async_copy
+        name: 异步拷贝
+        leaves:
+          - {id: cp_async, claim: "cp.async + commit/wait 组与 pipeline 深度选择，以及未 wait 就读的数据竞争", types: [optimization, debug, code_complete], difficulty: [3]}
+  - id: T05
+    name: 性能优化方法论
+    children:
+      - id: access
+        name: 访存优化
+        leaves:
+          - {id: soa_aos, claim: "AoS vs SoA 对 coalescing 的影响及结构体对齐填充", types: [optimization, compare], difficulty: [2]}
+          - {id: swizzle_smem, claim: "shared memory swizzle 消除 bank conflict 与 2D tile 转置的实现", types: [optimization, layout, code_complete], difficulty: [3]}
+      - id: fusion
+        name: 融合与持久化
+        leaves:
+          - {id: kernel_fusion, claim: "elementwise fusion 减少 global 往返，但会升高寄存器压力压低 occupancy", types: [optimization, compare], difficulty: [2, 3]}
+          - {id: persistent_kernel, claim: "persistent kernel + work queue 摊销 launch 与在图调度下的适用边界", types: [optimization, compare], difficulty: [3, 4]}
+      - id: roofline
+        name: Roofline 与瓶颈
+        leaves:
+          - {id: arithmetic_intensity, claim: "用算术强度判断 compute-bound vs memory-bound，以及错误用 FLOP/s 优化访存核", types: [profiling, compare], difficulty: [2, 3]}
+          - {id: unroll_prefetch, claim: "#pragma unroll 与软件预取在指令缓存/寄存器之间的权衡", types: [optimization, debug], difficulty: [3]}
+  - id: T06
+    name: Tensor Core、MMA 与精度
+    children:
+      - id: wmma_mma
+        name: WMMA 与 MMA
+        leaves:
+          - {id: wmma_fragment, claim: "wmma fragment 的矩阵形状（m16n16k16 等）与 layout::row/col 约束", types: [syntax, conceptual], difficulty: [2, 3]}
+          - {id: mma_sync_ptx, claim: "mma.sync PTX 的 shape、dtype、saturate 与寄存器映射", types: [syntax, code_complete], difficulty: [3]}
+      - id: wgmma
+        name: WGMMA
+        leaves:
+          - {id: wgmma_sm90, claim: "Hopper wgmma.mma_async 需要 warp-group、desc 与 smem 对齐，不能当普通 mma 用", types: [syntax, conceptual, debug], difficulty: [3, 4]}
+      - id: precision
+        name: 混合精度
+        leaves:
+          - {id: tf32_fp16_acc, claim: "TF32 输入 + FP32 累加 vs FP16 累加的数值与 Tensor Core 吞吐差异", types: [compare, conceptual, debug], difficulty: [2, 3]}
+          - {id: fp8_fp4, claim: "FP8/FP4 Tensor Core 的 scaling（UE8M0 等）与累加器精度选择", types: [conceptual, optimization], difficulty: [3, 4]}
+  - id: T07
+    name: CUTLASS 与 CuTe 布局
+    children:
+      - id: layout_algebra
+        name: Layout 代数
+        leaves:
+          - {id: shape_stride, claim: "CuTe Layout 是 Shape 与 Stride 的配对；逻辑坐标到线性偏移的求值", types: [layout, conceptual, code_complete], difficulty: [2, 3]}
+          - {id: composition, claim: "composition(A, B) 的坐标变换含义及 stride 如何合成", types: [layout, conceptual], difficulty: [3, 4], hints: ["composition(make_layout(Shape<_16,_8>, Stride<_8,_1>), tiler)", "inner layout 是 swizzle 后再 composition", "求合成后的 stride 是否仍 128B 对齐"]}
+          - {id: complement, claim: "complement(layout, N) 构造剩余空间的 layout，常用于把 CTA tiler 补成问题形状", types: [layout, conceptual], difficulty: [3, 4]}
+          - {id: logical_divide, claim: "logical_divide / logical_product 切分线程与数据坐标的方式", types: [layout, code_complete], difficulty: [3, 4]}
+      - id: swizzle_atom
+        name: Swizzle 与 atom
+        leaves:
+          - {id: swizzle_layout, claim: "Swizzle<B,M,S> 对 smem 地址的异或变换如何消除 bank conflict / 满足 TMA 对齐", types: [layout, optimization], difficulty: [3, 4]}
+          - {id: copy_atom, claim: "Copy_Atom 与 TiledCopy 的线程-值映射，错误 atom 导致的向量宽度不匹配", types: [layout, debug, syntax], difficulty: [3]}
+      - id: tiled
+        name: TiledCopy / TiledMMA
+        leaves:
+          - {id: tiled_mma, claim: "TiledMMA 把 atom MMA 铺成 CTA 级 tile，partition_fragment 的源/目坐标", types: [layout, conceptual], difficulty: [3, 4]}
+          - {id: tensor_partition, claim: "cute::Tensor 的 partition / inner_partition 与 predication 处理越界", types: [layout, debug, code_complete], difficulty: [3]}
+      - id: cutlass_kernel
+        name: CUTLASS 内核结构
+        leaves:
+          - {id: mainloop_epilogue, claim: "CUTLASS 3.x mainloop 与 epilogue 分离，fusion 在 epilogue visitor 中完成", types: [conceptual, compare], difficulty: [3]}
+          - {id: cluster_shape, claim: "Sm90 cluster shape 与 multicast TMA 对 GEMM 分块的约束", types: [layout, optimization], difficulty: [3, 4]}
+  - id: T08
+    name: Hopper 与 Blackwell 新硬件
+    children:
+      - id: tma
+        name: TMA
+        leaves:
+          - {id: tma_desc, claim: "TMA descriptor 的 box size、stride、OOB fill 与 128B 对齐要求", types: [syntax, debug, conceptual], difficulty: [3, 4], hints: ["box size 与 global stride 不一致", "OOB fill 为 zero 时越界读", "128B 对齐失败时 TMA 是否能发"]}
+          - {id: tma_multicast, claim: "cluster 内 TMA multicast 到多个 CTA 的共享内存，以及 mbarrier 完成信号", types: [optimization, conceptual], difficulty: [4]}
+      - id: cluster
+        name: Thread Block Cluster
+        leaves:
+          - {id: dsmem, claim: "distributed shared memory 跨 CTA 访问的映射、延迟与死锁风险", types: [conceptual, debug], difficulty: [3, 4]}
+          - {id: cluster_launch, claim: "cluster launch 维度必须整除、与 cooperative/grid 同步的关系", types: [syntax, debug], difficulty: [3]}
+      - id: warp_spec
+        name: Warp specialization
+        leaves:
+          - {id: producer_consumer, claim: "producer warp 做 TMA、consumer warp 做 MMA 的角色划分与 barrier 协议", types: [optimization, conceptual, code_complete], difficulty: [3, 4], hints: ["mbarrier arrive/wait 配对", "producer 未 wait 就让 consumer MMA", "warp-group 4+4 角色划分"]}
+      - id: blackwell
+        name: Blackwell TMEM / UMMA
+        leaves:
+          - {id: tmem, claim: "Tensor Memory (TMEM) 作为 MMA 累加器存储层次，不能当通用 smem 用", types: [conceptual, compare], difficulty: [4]}
+          - {id: umma, claim: "UMMA 指令与 TMEM 操作数、相对 Hopper WGMMA 的编程模型变化", types: [conceptual, compare], difficulty: [4]}
+  - id: T09
+    name: 编译、PTX 与工具链
+    children:
+      - id: nvcc
+        name: nvcc / ptxas
+        leaves:
+          - {id: ptxas_opt, claim: "-Xptxas -O3/-v 看寄存器与 spill，-lineinfo 对 Nsight 的意义", types: [profiling, conceptual], difficulty: [2]}
+          - {id: relocatable, claim: "relocatable device code、device 链接与 __device__ 跨 TU 调用", types: [syntax, debug], difficulty: [2, 3]}
+      - id: ptx_sass
+        name: PTX 与 SASS
+        leaves:
+          - {id: inline_ptx, claim: "asm volatile PTX 的约束、clobber 与编译器重排导致的错误", types: [syntax, debug], difficulty: [3]}
+          - {id: sass_read, claim: "从 SASS 识别 LDG.128、LDSM、HMMA/QGMMA 判断编译器是否打到预期指令", types: [profiling, compare], difficulty: [3, 4]}
+  - id: T10
+    name: 多 GPU 与通信
+    children:
+      - id: p2p
+        name: P2P 与 NVLink
+        leaves:
+          - {id: enable_p2p, claim: "cudaDeviceEnablePeerAccess 的条件、拓扑查询与走 PCIe 时的性能陷阱", types: [debug, conceptual], difficulty: [2, 3]}
+          - {id: nvlink_vs_pcie, claim: "NVLink/NVSwitch 带宽与 P2P copy 引擎 vs kernel 直接访问", types: [compare, optimization], difficulty: [2, 3]}
+      - id: nccl
+        name: NCCL 与 MPI
+        leaves:
+          - {id: nccl_stream, claim: "NCCL collective 与用户 kernel 的 stream 顺序、以及 in-place allreduce 约束", types: [debug, syntax], difficulty: [2, 3]}
+          - {id: cuda_aware_mpi, claim: "CUDA-aware MPI 直接传 device pointer 的前提与隐藏同步", types: [conceptual, debug], difficulty: [3]}
+      - id: isolation
+        name: MIG / MPS
+        leaves:
+          - {id: mps_mig, claim: "MPS 与 MIG 对上下文、内存隔离和 occupancy 的不同切分方式", types: [compare, conceptual], difficulty: [2, 3]}
+  - id: T11
+    name: CUDA 库生态
+    children:
+      - id: cublas
+        name: cuBLAS / cuBLASLt
+        leaves:
+          - {id: cublaslt_epilogue, claim: "cuBLASLt epilogue fusion（bias/gelu）与 layout、pointer mode 的匹配", types: [syntax, optimization], difficulty: [2, 3]}
+      - id: cub_cccl
+        name: CUB / CCCL / Thrust
+        leaves:
+          - {id: cub_device_reduce, claim: "CUB DeviceReduce 临时存储两阶段调用与别名规则", types: [syntax, debug], difficulty: [2]}
+          - {id: thrust_policy, claim: "Thrust execution policy 与自定义分配器在 device 上的生命周期", types: [syntax, debug], difficulty: [2, 3]}
+      - id: others
+        name: 其他库
+        leaves:
+          - {id: cudnn_attn, claim: "cuDNN fused attention / conv 选择算法与 workspace、确定性", types: [compare, optimization], difficulty: [3]}
+          - {id: cufft_plan, claim: "cuFFT plan 的 batch、stride 与 real-to-complex 布局", types: [syntax, conceptual], difficulty: [2]}
+  - id: T12
+    name: 调试、剖析与正确性
+    children:
+      - id: ncu
+        name: Nsight Compute
+        leaves:
+          - {id: ncu_roofline, claim: "NCU roofline 与 SOL 管道（l1tex、dram、tensor）解读谁是瓶颈", types: [profiling, evaluate], difficulty: [2, 3]}
+          - {id: warp_stall, claim: "stall reason（long scoreboard、barrier、mio throttle）对应的代码改法", types: [profiling, optimization], difficulty: [3]}
+      - id: nsys
+        name: Nsight Systems
+        leaves:
+          - {id: gpu_idle, claim: "时间线上 GPU idle 来自同步、小 kernel launch 或 CPU 喂不饱", types: [profiling, debug], difficulty: [2, 3]}
+      - id: sanitizer
+        name: 正确性工具
+        leaves:
+          - {id: compute_sanitizer, claim: "memcheck/racecheck/synccheck/initcheck 各自能抓的错误类别", types: [debug, compare], difficulty: [2]}
+          - {id: silent_error, claim: "未对齐向量访问、错误 __restrict__、未同步的 async copy 如何造成静默错误", types: [debug, counterfactual], difficulty: [3]}
+  - id: T13
+    name: 算法核
+    children:
+      - id: gemm
+        name: GEMM
+        leaves:
+          - {id: gemm_tiling, claim: "BM/BN/BK tile、K 流水深度与 smem 容量/寄存器的权衡", types: [optimization, layout], difficulty: [3]}
+          - {id: gemm_epilogue, claim: "epilogue 里 bias/activation 融合与边界 predication", types: [optimization, code_complete], difficulty: [3]}
+      - id: reduce_scan
+        name: Reduction / Scan
+        leaves:
+          - {id: warp_block_reduce, claim: "warp shuffle reduce + block 共享内存归约的两级结构与 bank conflict", types: [code_complete, optimization], difficulty: [2, 3]}
+          - {id: decoupled_lookback, claim: "device-wide scan 的 decoupled look-back 与单 CTA 扫的差异", types: [conceptual, compare], difficulty: [3, 4]}
+      - id: attn
+        name: Softmax / Attention
+        leaves:
+          - {id: online_softmax, claim: "online softmax 的 running max/sum 数值稳定与 warp 级实现", types: [conceptual, code_complete], difficulty: [3]}
+          - {id: flash_attn_tiling, claim: "FlashAttention SRAM tiling、不物化 S 矩阵与 causal mask 的 tile 边界", types: [optimization, layout], difficulty: [3, 4]}
+      - id: conv_sparse
+        name: Conv 与稀疏
+        leaves:
+          - {id: implicit_gemm, claim: "implicit GEMM conv 的 NHWC 布局、tile 与 im2col 物化的差别", types: [compare, layout], difficulty: [3]}
+          - {id: structured_sparse, claim: "Sparse Tensor Core 2:4 结构稀疏的剪枝约束与 mma.sp", types: [conceptual, syntax], difficulty: [3, 4]}
+  - id: T14
+    name: Runtime、Driver 与 Graphs
+    children:
+      - id: stream_event
+        name: Stream 与 Event
+        leaves:
+          - {id: stream_order, claim: "同一 stream 有序、不同 stream 默认并发；错误 cudaDeviceSynchronize 的危害", types: [conceptual, debug], difficulty: [1, 2]}
+          - {id: event_cross, claim: "cudaStreamWaitEvent 跨 stream 依赖与 event 的 timing 标志开销", types: [syntax, optimization], difficulty: [2]}
+      - id: graphs
+        name: CUDA Graphs
+        leaves:
+          - {id: graph_capture, claim: "stream capture 的禁止操作、thread-local 捕获与 update 参数的限制", types: [debug, conceptual], difficulty: [3]}
+          - {id: graph_update, claim: "exec graph 可更新的 kernel 参数 vs 必须重建的拓扑变化", types: [compare, syntax], difficulty: [3]}
+      - id: memory_api
+        name: 内存与驱动 API
+        leaves:
+          - {id: mempool, claim: "异步分配 cudaMallocAsync 与 mempool 在流序中的复用", types: [optimization, syntax], difficulty: [2, 3]}
+          - {id: driver_vs_runtime, claim: "Driver API 上下文管理 vs Runtime 隐式上下文，混用时的注意点", types: [compare, conceptual], difficulty: [2, 3]}
+  - id: T15
+    name: 数值、数学与随机
+    children:
+      - id: math
+        name: 数学函数
+        leaves:
+          - {id: fast_math, claim: "--use_fast_math 把 __sinf 等换成近似硬件指令的误差与加速", types: [compare, conceptual], difficulty: [1, 2]}
+          - {id: fma_assoc, claim: "FMA 与浮点结合律在并行归约中导致的非确定性", types: [debug, conceptual], difficulty: [2, 3]}
+      - id: rng
+        name: 随机数
+        leaves:
+          - {id: curand_philox, claim: "Philox 计数器模式按 thread 拆分 vs 状态拷贝导致的相关样本", types: [debug, conceptual], difficulty: [2, 3]}
+      - id: numeric_tc
+        name: Tensor Core 数值
+        leaves:
+          - {id: acc_loss, claim: "FP16 累加器在大 K GEMM 中的溢出/精度丢失与分块补偿", types: [debug, counterfactual], difficulty: [3]}

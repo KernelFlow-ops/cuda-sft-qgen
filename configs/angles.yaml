@@ -1,0 +1,39 @@
+# 每个 question_type 的问法。Planner 抽一条写入 brief.angle，Writer 必须按该 angle 出题。
+angles:
+  debug:
+    - 发散死锁：同步或分支只被部分线程走到，问会怎样、为什么
+    - 未定义行为：错误 mask / 错误 launch / 错误 scope，问是否 UB
+    - 静默错误：结果看起来能跑但数值或访存已错，问根因
+    - 竞态：async copy 未 wait、缺 barrier，问数据何时可见
+  syntax:
+    - 哪条能编译：给 2～3 个片段，指出合法/非法
+    - 缺限定符：少写 __device__/__global__/__restrict__ 的后果
+    - launch 参数：<<<>>> 或 cluster 维度某个参数的精确含义
+  code_complete:
+    - 补一行同步：barrier / mbarrier / __syncwarp
+    - 补 TMA wait：commit_group 与 wait_group 配对
+    - 补 partition：TiledCopy/TiledMMA 缺的那一次 partition
+  layout:
+    - 求 composition 后的 Shape/Stride
+    - 画出或说明 shared memory bank 映射
+    - 判断给定 stride 是否满足 TMA/向量化对齐
+  optimization:
+    - 选 ILP 还是 TLP：给出占用与延迟，问该加独立访存还是加 warp
+    - 算合并事务次数：给 warp 访问模式，问 32B/128B 事务数
+    - 融合副作用：kernel fusion 对寄存器/occupancy 的影响
+  profiling:
+    - 哪个 stall reason 会上升，代码该怎么改
+    - 哪条 SOL 管道（l1tex/dram/tensor）是瓶颈
+    - occupancy 升高是否一定更快，用指标说明
+  compare:
+    - 两个 API 的语义差（如 syncthreads vs syncwarp）
+    - 两代硬件同一算法的编程模型差
+    - WMMA / mma.sync / WGMMA / UMMA 谁适用
+  counterfactual:
+    - 只改 stride，问 coalescing 或 TMA 是否仍合法
+    - 只改 dtype，问 Tensor Core 形状与累加精度
+    - 去掉 cooperative launch，问 grid sync 是否仍合法
+  conceptual:
+    - 机制因果：A 导致 B 的硬件/执行模型理由（禁止名词解释）
+    - 约束从哪来：为什么必须 128B / 32-bank / warp-group
+    - 可见性：内存在哪一层、谁能看到这次写

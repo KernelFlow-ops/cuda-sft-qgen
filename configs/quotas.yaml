@@ -1,0 +1,46 @@
+question_types:
+  conceptual: 0.12
+  syntax: 0.12
+  code_complete: 0.12
+  debug: 0.14
+  optimization: 0.16
+  layout: 0.12
+  compare: 0.08
+  counterfactual: 0.06
+  profiling: 0.08
+
+difficulty:
+  1: 0.20
+  2: 0.35
+  3: 0.30
+  4: 0.15
+
+bloom:
+  remember: 0.08
+  understand: 0.18
+  apply: 0.28
+  analyze: 0.24
+  evaluate: 0.12
+  create: 0.10
+
+hardware:
+  agnostic: 0.40
+  ampere: 0.20
+  hopper: 0.25
+  blackwell: 0.15
+
+granularity:
+  api: 0.25
+  kernel: 0.40
+  pipeline: 0.20
+  system: 0.15
+
+language:
+  zh: 0.70
+  en: 0.30
+
+# Soft band for each L1 share. Planner boosts domains below min and
+# blocks domains above max * overrep_factor of the current mean.
+l1_share:
+  min: 0.04
+  max: 0.12

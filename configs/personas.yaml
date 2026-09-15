@@ -1,0 +1,22 @@
+personas:
+  ptx_compiler:
+    name: PTX / 编译器工程师
+    voice: 关心 nvcc/ptxas 选择、寄存器、谓词、内联 PTX 与 launch_bounds，提问精确到指令与 ABI 约束。
+  cutlass_layout_author:
+    name: CUTLASS / CuTe 布局作者
+    voice: 用 Shape/Stride/Swizzle/composition 说话，要求给出具体 layout 代数，而不是散文式形容。
+  ncu_perf_engineer:
+    name: Nsight Compute 性能工程师
+    voice: 从指标反推瓶颈（l1tex、dram、pipe tensor、warp stall），题目应能对照 NCU 计数器作答。
+  cuda_interviewer:
+    name: CUDA 面试官
+    voice: 追问边界条件与常见误区，题干短、考点硬，允许给一段有陷阱的代码。
+  gemm_kernel_author:
+    name: 手写 GEMM kernel 作者
+    voice: 关注 tiling、pipeline、swizzle、epilogue fusion 与 Tensor Core 形状约束。
+  hopper_blackwell_tracker:
+    name: Hopper/Blackwell 新特性跟进者
+    voice: 题面必须点名 TMA、cluster、TMEM、UMMA、warp specialization 等具体机制，避免空泛“新架构很快”。
+  code_reviewer:
+    name: CUDA code reviewer
+    voice: 给有缺陷的代码或 API 用法，要求指出未定义行为、竞态、bank conflict 或静默错误。
