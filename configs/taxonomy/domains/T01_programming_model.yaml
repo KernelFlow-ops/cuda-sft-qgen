@@ -130,7 +130,8 @@ children:
     - 2
     kind: api
   - id: launch_invalid_config
-    claim: block 线程数超过 cudaDevAttrMaxThreadsPerBlock（通常 1024）时 launch 失败，错误是 cudaErrorInvalidConfiguration 而非静默截断
+    claim: block 线程数超过 cudaDevAttrMaxThreadsPerBlock（通常 1024）时 launch 失败，错误是 cudaErrorInvalidConfiguration
+      而非静默截断
     types:
     - debug
     - syntax
@@ -202,7 +203,7 @@ children:
     - 3
     kind: mechanism
   - id: language_cuda_arch
-    claim: __CUDA_ARCH__ 只在 device 编译路径定义，值为 sm 乘 10（sm_80 ⇒ 800）；host 路径用它分支会走到 #else
+    claim: __CUDA_ARCH__ 只在 device 编译路径定义，值为 sm 乘 10（sm_80 ⇒ 800）；host 路径用它分支会走到
     types:
     - syntax
     - conceptual
@@ -227,7 +228,7 @@ children:
     - 3
     kind: failure
   - id: language_host_stl
-    claim: '标准 host STL 容器不可在 __device__/__global__ 里用；device 侧应改 cuda::std 或手工数组，否则编译失败'
+    claim: 标准 host STL 容器不可在 __device__/__global__ 里用；device 侧应改 cuda::std 或手工数组，否则编译失败
     types:
     - syntax
     - compare
@@ -280,7 +281,8 @@ children:
     - 3
     kind: failure
   - id: cg_syntax_this_grid
-    claim: this_grid() 只在 cudaLaunchCooperativeKernel 启动的 kernel 里合法；普通 <<<>>> 里构造 grid_group 再 sync 是 UB
+    claim: this_grid() 只在 cudaLaunchCooperativeKernel 启动的 kernel 里合法；普通 <<<>>> 里构造 grid_group 再 sync 是
+      UB
     types:
     - syntax
     - debug
@@ -333,7 +335,8 @@ children:
     - 2
     kind: formula
   - id: hierarchy_linear_block
-    claim: blockId = blockIdx.z * gridDim.y * gridDim.x + blockIdx.y * gridDim.x + blockIdx.x，与 row-major 线性化一致
+    claim: blockId = blockIdx.z * gridDim.y * gridDim.x + blockIdx.y * gridDim.x + blockIdx.x，与 row-major
+      线性化一致
     types:
     - conceptual
     difficulty:
@@ -357,7 +360,8 @@ children:
     - 2
     kind: failure
   - id: hierarchy_tid_2d
-    claim: 2D 线性 tid = (blockIdx.y*gridDim.x+blockIdx.x)*(blockDim.x*blockDim.y) + threadIdx.y*blockDim.x + threadIdx.x
+    claim: 2D 线性 tid = (blockIdx.y*gridDim.x+blockIdx.x)*(blockDim.x*blockDim.y) + threadIdx.y*blockDim.x
+      + threadIdx.x
     types:
     - conceptual
     - debug
@@ -365,7 +369,8 @@ children:
     - 2
     kind: formula
   - id: hierarchy_nthreads_cta
-    claim: CTA 线程数 = blockDim.x * blockDim.y * blockDim.z，必须 <= MaxThreadsPerBlock；只检查 blockDim.x<=1024 会漏掉 32x32x2=2048
+    claim: CTA 线程数 = blockDim.x * blockDim.y * blockDim.z，必须 <= MaxThreadsPerBlock；只检查 blockDim.x<=1024
+      会漏掉 32x32x2=2048
     types:
     - debug
     - syntax
@@ -382,7 +387,8 @@ children:
     - 2
     kind: formula
   - id: hierarchy_3d_thread
-    claim: 3D threadIdx 线性化 = tz*blockDim.y*blockDim.x + ty*blockDim.x + tx；shuffle 源 lane 必须用这个线性 id 取模 32
+    claim: 3D threadIdx 线性化 = tz*blockDim.y*blockDim.x + ty*blockDim.x + tx；shuffle 源 lane 必须用这个线性 id
+      取模 32
     types:
     - layout
     - debug
@@ -513,7 +519,8 @@ children:
     - 3
     kind: api
   - id: grid_constant_cuda121
-    claim: CUDA 12.1+ 在 sm_70+ 把 kernel 参数上限从 4096B 提到 32764B；更老 toolkit 仍按 4KB 报 Formal parameter space overflowed
+    claim: CUDA 12.1+ 在 sm_70+ 把 kernel 参数上限从 4096B 提到 32764B；更老 toolkit 仍按 4KB 报 Formal parameter space
+      overflowed
     types:
     - syntax
     - conceptual
@@ -566,7 +573,8 @@ children:
     - 3
     kind: api
   - id: launch_api_ex_cluster
-    claim: cudaLaunchKernelEx 通过 cudaLaunchAttributeClusterDimension 设置 cluster 维，仅 sm_90+；用它在 sm_80 上 launch 失败
+    claim: cudaLaunchKernelEx 通过 cudaLaunchAttributeClusterDimension 设置 cluster 维，仅 sm_90+；用它在 sm_80 上
+      launch 失败
     types:
     - syntax
     - debug
@@ -598,7 +606,8 @@ children:
     - 3
     kind: failure
   - id: launch_api_coop_ex
-    claim: cudaLaunchCooperativeKernelEx 可同时带 cluster 与 cooperative 属性；缺 cooperative 属性时 this_grid().sync() 仍非法
+    claim: cudaLaunchCooperativeKernelEx 可同时带 cluster 与 cooperative 属性；缺 cooperative 属性时 this_grid().sync()
+      仍非法
     types:
     - syntax
     - compare
@@ -607,7 +616,8 @@ children:
     - 4
     kind: api
   - id: launch_api_dynamic_smem_attr
-    claim: cudaFuncAttributeMaxDynamicSharedMemorySize 只抬动态 smem 上限；静态 __shared__ 仍计入总量，二者之和超 arch 上限则 launch 失败
+    claim: cudaFuncAttributeMaxDynamicSharedMemorySize 只抬动态 smem 上限；静态 __shared__ 仍计入总量，二者之和超 arch 上限则
+      launch 失败
     types:
     - debug
     - optimization
@@ -741,7 +751,8 @@ children:
     - 2
     kind: api
   - id: kernel_symbol_attributes
-    claim: cudaFuncGetAttributes 的 numRegs/sharedSizeBytes 来自编译结果；动态 smem 不在 sharedSizeBytes 里，要另加 launch 第三参数
+    claim: cudaFuncGetAttributes 的 numRegs/sharedSizeBytes 来自编译结果；动态 smem 不在 sharedSizeBytes 里，要另加 launch
+      第三参数
     types:
     - profiling
     - conceptual
@@ -829,7 +840,8 @@ children:
   name: 网格与块维上限公式
   leaves:
   - id: dim_limits_block_product
-    claim: blockDim.x*blockDim.y*blockDim.z <= MaxThreadsPerBlock（通常 1024）；32x32x2=2048 非法，32x32x1=1024 合法
+    claim: blockDim.x*blockDim.y*blockDim.z <= MaxThreadsPerBlock（通常 1024）；32x32x2=2048 非法，32x32x1=1024
+      合法
     types:
     - conceptual
     - debug
@@ -906,7 +918,7 @@ children:
     - 2
     kind: feature
   - id: cxx_dialect_cuda_std
-    claim: 'cuda::std 是 libcu++ 设备可用子集；用 std::atomic 代替 cuda::std::atomic 在 device 上要么编不过要么没有 GPU 内存序'
+    claim: cuda::std 是 libcu++ 设备可用子集；用 std::atomic 代替 cuda::std::atomic 在 device 上要么编不过要么没有 GPU 内存序
     types:
     - syntax
     - compare
@@ -956,7 +968,8 @@ children:
     - 2
     kind: api
   - id: cxx_dialect_nvstd_function
-    claim: nvstd::function 可保存 device lambda 但不能跨 host/device 传递可调用对象；host 构造的 std::function 拷到 device 后调用非法
+    claim: nvstd::function 可保存 device lambda 但不能跨 host/device 传递可调用对象；host 构造的 std::function 拷到 device
+      后调用非法
     types:
     - syntax
     - debug

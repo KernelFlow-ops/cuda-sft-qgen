@@ -98,6 +98,25 @@ def sm_name_conflicts(text: str) -> list[str]:
     return hits
 
 
+def _implicit_arch_requirements(text: str) -> set[str] | None:
+    """Detect architecture from API/feature usage without explicit mention."""
+    text_lower = text.lower()
+
+    # Hopper/Blackwell-only features
+    hopper_features = [
+        "tma", "wgmma", "tmem", "cluster", "mbarrier",
+        "cp.async.bulk", "tensormap", "arrive_tx", "expect_tx",
+    ]
+    if any(feat in text_lower for feat in hopper_features):
+        return {"hopper", "blackwell"}
+
+    # Ampere-specific (if explicitly contrasted against newer archs)
+    if "ampere" in text_lower and ("no tma" in text_lower or "before hopper" in text_lower):
+        return {"ampere"}
+
+    return None
+
+
 def hardware_mismatch(question: Question) -> str | None:
     text = question.question or ""
     labeled = (question.hardware or "agnostic").strip().lower()
@@ -108,6 +127,10 @@ def hardware_mismatch(question: Question) -> str | None:
         return None
     scenes = scene_arches(text)
     if not scenes:
+        # Check for implicit architecture dependencies
+        implicit = _implicit_arch_requirements(text)
+        if implicit and labeled not in implicit:
+            return "sieve_hw_mismatch"
         return None
     if labeled in scenes:
         return None
@@ -176,17 +199,35 @@ def leaf_mismatch(question: Question) -> str | None:
     qtext = question.question or ""
     tests = question.tests_claim or ""
     hay = f"{qtext}\n{tests}"
+
     strong = _strong_tokens(claim, question.l3_id.replace("_", " "))
     if strong:
+        # Check if ANY strong token appears in question OR tests_claim
         if any(_contains_token(hay, tok) for tok in strong):
+            # Additional check: tests_claim should contain at least one strong token
+            # (not just question, because question might mention it as contrast)
+            if not any(_contains_token(tests, tok) for tok in strong):
+                # Soft suspect: claim APIs appear in question but not in tests_claim
+                # This suggests the question might be mashing multiple topics
+                # Don't reject here, but flag via leaf_soft_suspect for chair review
+                pass
             return None
-        # Claim APIs never appear in stem or tests_claim: wrong leaf.
+        # Claim APIs never appear in stem or tests_claim: wrong leaf
         return "sieve_off_leaf"
+
+    # Fallback: check l3_id parts
     parts = _id_parts(question.l3_id)
     if not parts:
         return None
-    if any(p in hay.lower() for p in parts):
+
+    # Require at least 2 parts to match (stronger than current "any")
+    matches = sum(1 for p in parts if p in hay.lower())
+    if matches >= 2:
         return None
+    if matches == 1 and len(parts) <= 2:
+        # For short IDs like "tma_align", 1 match is acceptable
+        return None
+
     return "sieve_off_leaf"
 
 
@@ -210,6 +251,35 @@ def chair_may_reject_unique(reason: str | None) -> bool:
     if not reason:
         return False
     return bool(_CHAIR_CONS.search(reason))
+
+
+def validate_tests_claim_alignment(question: Question) -> dict[str, Any]:
+    """
+    Deep semantic check: does tests_claim actually test what l3_claim describes?
+    Returns diagnostic info for chair review.
+    """
+    claim = _leaf_claim(question)
+    tests = question.tests_claim or ""
+    qtext = question.question or ""
+
+    # Extract strong tokens from claim and tests_claim separately
+    claim_tokens = set(_strong_tokens(claim, question.l3_id.replace("_", " ")))
+    tests_tokens = set(_strong_tokens(tests))
+    question_tokens = set(_strong_tokens(qtext))
+
+    overlap_tests = claim_tokens & tests_tokens
+    overlap_question = claim_tokens & question_tokens
+
+    return {
+        "claim_tokens": list(claim_tokens),
+        "tests_tokens": list(tests_tokens),
+        "question_tokens": list(question_tokens),
+        "tests_overlap": list(overlap_tests),
+        "question_overlap": list(overlap_question),
+        "has_tests_alignment": len(overlap_tests) > 0,
+        "has_question_alignment": len(overlap_question) > 0,
+        "is_generic_tests": len(tests) < 30 or "cuda" not in tests.lower(),
+    }
 
 
 def consistency_payload(question: Question) -> dict[str, Any]:

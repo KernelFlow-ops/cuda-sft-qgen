@@ -57,7 +57,8 @@ children:
     - 3
     kind: failure
   - id: wmma_mma_sm70_shapes
-    claim: sm_70 硬件 WMMA 形状只有 m16n16k16 / m8n32k16 / m32n8k16 的 f16；在 Volta 上发 m16n8k16 mma.sync 不是同一条 ISA
+    claim: sm_70 硬件 WMMA 形状只有 m16n16k16 / m8n32k16 / m32n8k16 的 f16；在 Volta 上发 m16n8k16 mma.sync 不是同一条
+      ISA
     types:
     - compare
     - conceptual
@@ -492,7 +493,8 @@ children:
     - 3
     kind: api
   - id: ldmatrix_stmatrix
-    claim: stmatrix 是 ldmatrix 的反向，把 fragment 按 MMA 布局写回 smem；用普通 st.shared 写 fragment 不会得到 ldmatrix 可读的 8×8 排列
+    claim: stmatrix 是 ldmatrix 的反向，把 fragment 按 MMA 布局写回 smem；用普通 st.shared 写 fragment 不会得到 ldmatrix 可读的
+      8×8 排列
     types:
     - layout
     - compare
@@ -678,7 +680,8 @@ children:
     - 3
     kind: formula
   - id: tc_flops_not_cuda_core
-    claim: NCU 的 sm__ops_path_tensor 与 sm__sass_thread_inst_executed_op_fadd 不是同一通路；FFMA 高而 HMMA 低说明没打到 TC
+    claim: NCU 的 sm__ops_path_tensor 与 sm__sass_thread_inst_executed_op_fadd 不是同一通路；FFMA 高而 HMMA 低说明没打到
+      TC
     types:
     - profiling
     - compare

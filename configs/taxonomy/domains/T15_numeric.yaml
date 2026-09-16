@@ -5,7 +5,7 @@ children:
   name: 数学函数
   leaves:
   - id: fast_math
-    claim: "--use_fast_math 把 __sinf 等换成近似硬件指令的误差与加速"
+    claim: --use_fast_math 把 __sinf 等换成近似硬件指令的误差与加速
     types:
     - compare
     - conceptual
@@ -22,7 +22,7 @@ children:
     - 2
     - 3
   - id: math_sinf_ulp
-    claim: "--use_fast_math 把 __sinf 换成 SFU 近似，最大误差以 ULP 计远大于 IEEE 库函数，不是“稍微快一点的同一实现”"
+    claim: --use_fast_math 把 __sinf 换成 SFU 近似，最大误差以 ULP 计远大于 IEEE 库函数，不是“稍微快一点的同一实现”
     types:
     - compare
     - conceptual
@@ -40,7 +40,7 @@ children:
     - 3
     kind: mechanism
   - id: math_cosf_sfu
-    claim: "--use_fast_math 把 __cosf/__expf 等打到 SFU 近似；最大误差以 ULP 计远大于 libdevice 精确版"
+    claim: --use_fast_math 把 __cosf/__expf 等打到 SFU 近似；最大误差以 ULP 计远大于 libdevice 精确版
     types:
     - compare
     - conceptual
@@ -447,7 +447,7 @@ children:
     - 3
     kind: mechanism
   - id: assoc_error_fast_math_reassoc
-    claim: "--fmad=true 与快速再结合允许编译器重排 a+b+c；关闭后 bitwise 可变但仍都在舍入模型内"
+    claim: --fmad=true 与快速再结合允许编译器重排 a+b+c；关闭后 bitwise 可变但仍都在舍入模型内
     types:
     - syntax
     - debug
@@ -622,7 +622,7 @@ children:
     - 2
     kind: formula
   - id: fma_round_contract_flag
-    claim: "--fmad=false 禁止把 a*b+c 收成 fma；默认可能收缩，导致与主机 -ffp-contract=off 对拍失败"
+    claim: --fmad=false 禁止把 a*b+c 收成 fma；默认可能收缩，导致与主机 -ffp-contract=off 对拍失败
     types:
     - syntax
     - debug

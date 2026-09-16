@@ -197,6 +197,8 @@ def plan_briefs(
     persona_ids = list(personas.keys()) or ["cuda_interviewer"]
     leaves_by_l1: dict[str, list[Leaf]] = {}
     for leaf in taxonomy.leaves:
+        if leaf.retired:
+            continue
         l2_key = f"{leaf.domain_id}.{leaf.l2_id}"
         if l2_key in blocked_l2:
             continue
@@ -205,6 +207,8 @@ def plan_briefs(
     if not usable_l1:
         leaves_by_l1 = {}
         for leaf in taxonomy.leaves:
+            if leaf.retired:
+                continue
             leaves_by_l1.setdefault(leaf.domain_id, []).append(leaf)
         usable_l1 = list(leaves_by_l1)
 
@@ -274,6 +278,20 @@ def plan_briefs(
             angle = str(card.get("ask") or angle)
         used_l3.add(leaf.l3_id)
         used_pair.add((leaf.l3_id, angle))
+
+        # Breadth vs depth signal
+        leaf_questions = [q for q in accepted if q.l3_id == leaf.l3_id]
+        n_leaf = len(leaf_questions)
+        if n_leaf < 3:
+            breadth_signal = "BREADTH"
+            breadth_guidance = f"This leaf has only {n_leaf} questions; explore different facets of the claim"
+        elif n_leaf < 8:
+            breadth_signal = "DEPTH"
+            breadth_guidance = f"This leaf has {n_leaf} questions; go deeper with harder constraints on one facet"
+        else:
+            breadth_signal = "DEPTH"
+            breadth_guidance = f"This leaf is well-covered ({n_leaf} questions); challenge with edge cases"
+
         guide_parts: list[str] = []
         if card.get("must_have"):
             guide_parts.append(
@@ -315,6 +333,7 @@ def plan_briefs(
                 role=role,  # type: ignore[arg-type]
                 seed_question=seed_q,
                 seed_id=seed_id,
+                breadth_or_depth=breadth_signal,
             )
         )
         # Light recency penalty so a batch does not collapse onto one L1.

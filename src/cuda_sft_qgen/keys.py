@@ -16,6 +16,7 @@ PRI_WRITER = 0
 PRI_SALVAGE = 1
 PRI_CHAIR = 2
 PRI_SIEVE = 3
+PRI_TAXONOMY = 4
 
 
 def parse_api_keys(

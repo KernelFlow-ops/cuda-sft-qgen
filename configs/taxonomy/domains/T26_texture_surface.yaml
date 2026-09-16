@@ -1,562 +1,948 @@
 id: T26
 name: 纹理/表面/只读路径
 children:
-  - id: texture_object
-    name: 纹理对象
-    leaves:
-      - id: texture_object_linear_fetch
-        claim: "绑定线性设备内存的 cudaTextureObject_t 只能用 tex1Dfetch 取整型坐标，tex1D 浮点坐标专供 CUDA array，混用返回未定义值。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: texture_object_max_1d_linear
-        claim: "线性纹理元素个数不能超过 cudaDeviceProp.maxTexture1DLinear，该上限为 2^27=134217728 个 texel，超限 cudaCreateTextureObject 失败。"
-        types: [debug, conceptual]
-        difficulty: [2, 3]
-        kind: formula
-      - id: texture_object_filter_float
-        claim: "cudaFilterModeLinear 只对浮点通道或 cudaReadModeNormalizedFloat 的 8/16-bit 整数合法；对 cudaReadModeElementType 的 int 纹理创建失败。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: failure
-      - id: texture_object_alignment
-        claim: "线性资源的 devPtr 必须按 cudaDeviceProp.textureAlignment 对齐（当代 GPU 为 512B），未对齐时创建对象返回 cudaErrorInvalidValue。"
-        types: [layout, debug]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: texture_object_create
-        claim: "cudaCreateTextureObject(&tex, &resDesc, &texDesc, viewDesc) 中 viewDesc 可为 NULL；resDesc.resType 必须与绑定资源一致，否则返回 cudaErrorInvalidValue。"
-        types: [syntax, debug]
-        difficulty: [2]
-        kind: api
-      - id: texture_object_pitch2d
-        claim: "cudaResourceTypePitch2D 的 pitchInBytes 必须是 texturePitchAlignment 的倍数（通常 32B），且 width×elemSize ≤ pitch，否则创建失败。"
-        types: [layout, syntax]
-        difficulty: [2, 3]
-        kind: failure
-      - id: texture_object_channel
-        claim: "cudaCreateChannelDesc<float4>() 的 x/y/z/w 位宽必须与底层 CUDA array 通道一致；把 8-bit RGBA array 按 float 通道描述创建对象会失败。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: failure
-      - id: texture_object_tex2d
-        claim: "绑定 2D CUDA array 后应使用 tex2D(tex, x, y)；对该对象调用 tex3D 或 tex1Dfetch 坐标语义不匹配，读出值未定义。"
-        types: [syntax, debug]
-        difficulty: [2]
-        kind: api
-  - id: surface_object
-    name: 表面对象
-    leaves:
-      - id: surface_object_array_only
-        claim: "cudaSurfaceObject_t 只能绑定 CUDA array，不能绑定线性 cudaMalloc 缓冲；对线性指针调用 cudaCreateSurfaceObject 失败。"
-        types: [syntax, debug]
-        difficulty: [2]
-        kind: api
-      - id: surface_object_byte_addr
-        claim: "surf2Dwrite 的 x 是字节坐标：写 float 必须传 x=tid.x*sizeof(float)，若按 texel 传 tid.x 会写到错误地址或触发 trap。"
-        types: [debug, layout, code_complete]
-        difficulty: [2, 3]
-        kind: formula
-      - id: surface_object_boundary_trap
-        claim: "默认 cudaBoundaryModeTrap 下越界 surf2Dread/write 使 kernel 失败；cudaBoundaryModeZero 越界读 0、写忽略，与纹理的 addressModeClamp 不同。"
-        types: [compare, debug]
-        difficulty: [2, 3]
-        kind: failure
-      - id: surface_object_coherence
-        claim: "同一 kernel 内对同一 CUDA array 既 tex2D 又 surf2Dwrite 不保证看到自己的写，必须结束 kernel 或做设备侧表面同步后才能再当纹理读。"
-        types: [debug, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: surface_object_loadstore_flag
-        claim: "供表面绑定的 CUDA array 创建时必须带 cudaArraySurfaceLoadStore；仅 cudaMallocArray 默认标志的 array 不能 cudaCreateSurfaceObject。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: failure
-      - id: surface_object_surf1d
-        claim: "surf1Dread 的 x 同样是字节偏移；对 16-bit 元素应 x=idx*2，不是 idx。y/z 参数不存在于 1D 表面 API。"
-        types: [syntax, layout]
-        difficulty: [2, 3]
-        kind: formula
-      - id: surface_object_create
-        claim: "cudaCreateSurfaceObject(&surf, &resDesc) 只接受 cudaResourceTypeArray；传入 Pitch2D 或 Linear 返回错误。"
-        types: [syntax, debug]
-        difficulty: [2]
-        kind: api
-      - id: surface_object_no_filter
-        claim: "表面读写没有 filterMode 或 normalized coords：坐标总是整型字节/层索引，不能对 surf2Dread 做线性插值。"
-        types: [compare, conceptual]
-        difficulty: [2]
-        kind: mechanism
-  - id: ldg_readonly
-    name: __ldg 只读路径
-    leaves:
-      - id: ldg_readonly_cc35
-        claim: "__ldg 在 compute capability 3.5 起可用，把全局加载送到只读/纹理路径；在 sm_30 上编译该 intrinsic 不合法。"
-        types: [syntax, conceptual]
-        difficulty: [2]
-        kind: feature
-      - id: ldg_readonly_const_restrict
-        claim: "const T* __restrict__ 只是提示编译器可选择 LDG，不保证生成；要强制只读缓存必须写 __ldg(ptr)。"
-        types: [compare, optimization]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: ldg_readonly_no_write
-        claim: "__ldg 要求该地址在整个 kernel 生命周期只读；对刚 atomicAdd 过的同一全局地址再 __ldg 可读到陈旧值，因为只读路径不监听 L1 脏行。"
-        types: [debug, counterfactual]
-        difficulty: [3]
-        kind: failure
-      - id: ldg_readonly_types
-        claim: "__ldg 的 T 限于标量与 2/4 向量（如 float4、int4、double2）；对 3 元 float3 或自定义 12B 结构体调用无法匹配 overload。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: ldg_readonly_ptx_nc
-        claim: "__ldg 降低为 PTX ld.global.nc；Ampere 起 .nc 仍进统一 L1，但相干性按只读处理，与 ld.global.ca 的写后读语义不同。"
-        types: [conceptual, compare]
-        difficulty: [3]
-        kind: feature
-      - id: ldg_readonly_align
-        claim: "__ldg(float4*) 要求 16B 对齐，否则可能拆成多次标量只读加载或产生 misaligned 访问，失去向量化收益。"
-        types: [layout, optimization]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: ldg_readonly_ldca
-        claim: "__ldca 是缓存常驻全局加载，__ldcg 绕过 L1，__ldg/ld.nc 走只读路径；三者都不是表面或纹理对象采样。"
-        types: [compare, syntax]
-        difficulty: [2, 3]
-        kind: api
-      - id: ldg_readonly_vs_tex
-        claim: "__ldg 用普通设备指针，不做坐标归一化、过滤或越界 clamp；需要插值或 addressMode 必须改用 cudaTextureObject_t。"
-        types: [compare, conceptual]
-        difficulty: [2]
-        kind: mechanism
-  - id: bindless
-    name: Bindless 句柄
-    leaves:
-      - id: bindless_vs_reference
-        claim: "CUDA 5.0 引入的纹理/表面对象是 64-bit bindless 句柄，作为 kernel 参数或结构体成员传递，不再占用已弃用的 texture reference 槽。"
-        types: [compare, conceptual]
-        difficulty: [2]
-        kind: feature
-      - id: bindless_kernel_arg
-        claim: "cudaTextureObject_t 按值传入 __global__ 即可采样，无需 cudaBindTexture；在 device 上改写该句柄不会创建新绑定。"
-        types: [syntax, code_complete]
-        difficulty: [2]
-        kind: api
-      - id: bindless_destroy_lifetime
-        claim: "cudaDestroyTextureObject 后仍在飞行中的 kernel 继续用该句柄是 use-after-destroy；必须 cudaDeviceSynchronize 或 stream 同步后再销毁。"
-        types: [debug, conceptual]
-        difficulty: [2, 3]
-        kind: failure
-      - id: bindless_view_desc
-        claim: "cudaResourceViewDesc 可在对象层把 16-bit 整数 CUDA array 重解释为归一化浮点视图，但 format 宽度必须覆盖底层通道，否则创建失败。"
-        types: [layout, syntax]
-        difficulty: [3]
-        kind: mechanism
-      - id: bindless_array_of_tex
-        claim: "CUDA 5.0 起可以把 cudaTextureObject_t 数组放在常量或全局内存里由 kernel 按索引选取；texture reference 时代每个绑定占一个模块槽，无法同等做动态索引。"
-        types: [compare, syntax]
-        difficulty: [2, 3]
-        kind: feature
-      - id: bindless_zero_handle
-        claim: "值为 0 的 cudaTextureObject_t 不是合法绑定，tex2D 该句柄结果未定义；必须先 cudaCreateTextureObject 成功。"
-        types: [debug, conceptual]
-        difficulty: [2]
-        kind: failure
-      - id: bindless_surface_handle
-        claim: "cudaSurfaceObject_t 同样是 64-bit bindless 句柄，按值传入后 surf2Dwrite，不需要 cudaBindSurfaceToArray。"
-        types: [syntax, compare]
-        difficulty: [2]
-        kind: api
-      - id: bindless_ref_deprecated
-        claim: "texture<float, cudaTextureType2D> 引用式 API 在 CUDA 12 起弃用，新代码应只用 cudaTextureObject_t；两者不能对同一 tex 符号混绑。"
-        types: [syntax, conceptual]
-        difficulty: [2, 3]
-        kind: feature
-  - id: l1_tex_cache
-    name: L1/纹理缓存
-    leaves:
-      - id: l1_tex_cache_ampere_default
-        claim: "Ampere sm_80 默认把普通 ld.global 缓存在统一 L1/Tex（.ca）；Kepler 3.5 的独立 48 KB 只读缓存已并入该统一 L1。"
-        types: [conceptual, compare]
-        difficulty: [2, 3]
-        kind: feature
-      - id: l1_tex_cache_dlcm_cg
-        claim: "-Xptxas -dlcm=cg 使默认全局加载旁路 L1 只进 L2；与 __ldcg 等价，用于避免写后读别名时读到 L1 旧数据。"
-        types: [profiling, optimization]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: l1_tex_cache_constant_vs_tex
-        claim: "常量缓存要求整个 warp 同一地址才广播，分叉索引会串行化；L1/Tex 只读路径允许每线程不同地址且不要求 64 KB 上限。"
-        types: [compare, optimization]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: l1_tex_cache_ldcs
-        claim: "__ldcs 标记流式一次加载，提示逐出优先于 __ldca 的缓存常驻数据；在访存流式拷贝核中减少对工作集 L1 行的污染。"
-        types: [optimization, profiling]
-        difficulty: [3]
-        kind: api
-      - id: l1_tex_cache_size_ampere
-        claim: "sm_80 统一 L1/Tex/smem 共 192 KB，其中 smem 最多 164 KB，L1 容量 = 192-smem_KB；把 smem 拉到 164 KB 会把 L1 压到 28 KB。"
-        types: [layout, optimization]
-        difficulty: [2, 3]
-        kind: formula
-      - id: l1_tex_cache_tex_hit
-        claim: "tex2D 走纹理过滤单元再进 L1/Tex，坐标邻近的 warp 命中同一 cache line；完全随机 texel 使命中率≈line/(footprint)。"
-        types: [optimization, profiling]
-        difficulty: [3]
-        kind: mechanism
-      - id: l1_tex_cache_ldlu
-        claim: "__ldlu（last use）提示该 L1 行可立即逐出；与 __ldca 相反，适合每个元素只读一次的流。"
-        types: [optimization, syntax]
-        difficulty: [3]
-        kind: api
-      - id: l1_tex_cache_coherent
-        claim: "统一 L1 对普通 .ca 加载在同 SM 写后读上比 Kepler 只读缓存更相干，但跨 SM 仍需 __threadfence 或原子才能看见写。"
-        types: [conceptual, debug]
-        difficulty: [3]
-        kind: mechanism
-  - id: tex_normalized
-    name: 归一化坐标
-    leaves:
-      - id: tex_normalized_flag
-        claim: "cudaTextureDesc.normalizedCoords=1 时 tex2D 的 x/y 落在 [0,1) 对应整幅图像；=0 时非归一化坐标范围是 [0,width)×[0,height)。"
-        types: [syntax, conceptual]
-        difficulty: [2]
-        kind: formula
-      - id: tex_normalized_wrap
-        claim: "cudaAddressModeWrap 与 Mirror 只在 normalizedCoords=1 时合法；非归一化坐标创建 Wrap 纹理会失败或回退。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: failure
-      - id: tex_normalized_readmode
-        claim: "cudaReadModeNormalizedFloat 把 8-bit 无符号 texel 映射到 [0,1] 的 float，与坐标 normalizedCoords 是独立的两套归一化。"
-        types: [compare, conceptual]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: tex_normalized_int_coord
-        claim: "非归一化下 texel 中心坐标 x = i+0.5；要对 (i,j) 像素做点采样应 tex2D(tex, i+0.5f, j+0.5f)，传 i 会在线性过滤时混到左邻。"
-        types: [debug, layout]
-        difficulty: [2, 3]
-        kind: formula
-      - id: tex_normalized_dim_change
-        claim: "同一 [0,1] 坐标在 256 宽与 1024 宽 array 上采样不同 texel；归一化坐标不携带像素索引，换分辨率必须改资源或改非归一化。"
-        types: [conceptual, counterfactual]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: tex_normalized_1dlinear
-        claim: "线性内存纹理 tex1Dfetch 只用整数下标，忽略 normalizedCoords 与 filterMode；对该对象设归一化坐标不会变成 tex1D。"
-        types: [compare, syntax]
-        difficulty: [2, 3]
-        kind: api
-      - id: tex_normalized_border
-        claim: "归一化坐标 <0 或 ≥1 时 addressModeBorder 返回 borderColor，Clamp 夹到边沿 texel；两者都要求在 texDesc 里显式设置。"
-        types: [conceptual, compare]
-        difficulty: [2]
-        kind: mechanism
-      - id: tex_normalized_signed8
-        claim: "cudaReadModeNormalizedFloat 对 8-bit unsigned 映射 float = v/255 ∈ [0,1]，signed 映射到 [-1,1]；cudaReadModeElementType 则返回原始整数。"
-        types: [syntax, conceptual]
-        difficulty: [2, 3]
-        kind: formula
-  - id: tex_mipmap
-    name: Mipmap 采样
-    leaves:
-      - id: tex_mipmap_alloc
-        claim: "cudaMallocMipmappedArray 按 nLevels 分配金字塔；nLevels=0 表示一直分到 1×1。普通 cudaMallocArray 没有 mip 层。"
-        types: [syntax, conceptual]
-        difficulty: [2, 3]
-        kind: api
-      - id: tex_mipmap_level
-        claim: "cudaGetMipmappedArrayLevel(&levelArray, mip, level) 取出单层 CUDA array 才能绑定表面或做 cudaMemcpy2DToArray。"
-        types: [syntax, code_complete]
-        difficulty: [2, 3]
-        kind: api
-      - id: tex_mipmap_lod
-        claim: "tex2DLod(tex, x, y, lod) 的 lod=0 是最细层，lod=1 是半分辨率层；lod 必须在 [0, nLevels) 内，越界按 mipmap 滤波模式夹紧。"
-        types: [syntax, conceptual]
-        difficulty: [2, 3]
-        kind: formula
-      - id: tex_mipmap_grad
-        claim: "tex2DGrad 用 dPdx/dPdy 估计 LOD；在非图形核里若传 0 梯度会固定 lod=0，不会自动下采样。"
-        types: [conceptual, debug]
-        difficulty: [3]
-        kind: mechanism
-      - id: tex_mipmap_filter
-        claim: "cudaTextureDesc.mipmapFilterMode 控制层间过滤：Point 选一层，Linear 在相邻两层间插值；与 texDesc.filterMode 的层内过滤独立。"
-        types: [syntax, compare]
-        difficulty: [3]
-        kind: api
-      - id: tex_mipmap_view
-        claim: "cudaResourceViewDesc.minMipmapLevelClamp/maxMipmapLevelClamp 可裁剪可见层；clamp 区间必须落在实际 nLevels 内否则创建失败。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: failure
-      - id: tex_mipmap_surface
-        claim: "表面对象绑定的是单一 CUDA array 层，不能对整个 mipmapped array 做 surf2Dwrite；必须先 GetMipmappedArrayLevel。"
-        types: [compare, syntax]
-        difficulty: [2, 3]
-        kind: api
-      - id: tex_mipmap_size
-        claim: "第 L 层宽高约为 floor(width/2^L)×floor(height/2^L)，至少为 1；L=3 且 width=256 → 32，不是 256-3。"
-        types: [layout, conceptual]
-        difficulty: [2]
-        kind: formula
-  - id: tex_layer
-    name: Layered 与 Cubemap
-    leaves:
-      - id: tex_layer_extent
-        claim: "cudaMalloc3DArray 的 extent.depth 在 cudaArrayLayered 下表示层数不是 Z 体素；2D layered 的每层是 width×height。"
-        types: [layout, syntax]
-        difficulty: [2, 3]
-        kind: api
-      - id: tex_layer_tex2d
-        claim: "tex2DLayered(tex, x, y, layer) 的 layer 是整型层索引；用 tex2D 采样 layered 对象缺少层参数，值未定义。"
-        types: [syntax, debug]
-        difficulty: [2]
-        kind: api
-      - id: tex_layer_1d
-        claim: "1D layered 用 tex1DLayered(tex, x, layer)；cudaArray 创建时 flags 含 cudaArrayLayered 且 extent.height=0、depth=层数。"
-        types: [syntax, layout]
-        difficulty: [3]
-        kind: api
-      - id: tex_layer_cubemap
-        claim: "cudaArrayCubemap 要求 6 张正方形面，texCubemap(tex, x, y, z) 用方向向量选面；层数不是 6 的普通 layered 不能当 cubemap 采样。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: failure
-      - id: tex_layer_cubemap_layered
-        claim: "cudaArrayCubemap|cudaArrayLayered 形成 cubemap array，texCubemapLayered 额外接收 layer；缺少 Layered 标志时该 intrinsic 不匹配。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-      - id: tex_layer_index_range
-        claim: "layer 必须满足 0 ≤ layer < depth；越界层在纹理 addressMode 下不按 Wrap 绕回层维，结果未定义或夹到有效层取决于硬件。"
-        types: [debug, conceptual]
-        difficulty: [3]
-        kind: failure
-      - id: tex_layer_memcpy
-        claim: "cudaMemcpy3DParms 的 extent.depth 拷贝层数，dstPos.z 选起始层；用 cudaMemcpy2DToArray 无法一次填满多层。"
-        types: [syntax, layout]
-        difficulty: [2, 3]
-        kind: api
-      - id: tex_layer_surface
-        claim: "surf2DLayeredwrite 的 x 仍是字节坐标：写 float 时 x = idx*sizeof(float)，layer 是层索引；把 layer 写进 y 会破坏层隔离。"
-        types: [debug, layout]
-        difficulty: [2, 3]
-        kind: formula
-  - id: tex_address_filter
-    name: 寻址与过滤模式
-    leaves:
-      - id: tex_address_filter_point
-        claim: "cudaFilterModePoint 返回最近 texel，不做插值；整数纹理在 ElementType 读模式下只能用 Point，不能 Linear。"
-        types: [syntax, conceptual]
-        difficulty: [2]
-        kind: api
-      - id: tex_address_filter_linear
-        claim: "cudaFilterModeLinear 在 2D 上取 2×2 邻域加权，输出一定是 float；即使底层是 8-bit array 也要 ReadModeNormalizedFloat 或浮点通道。"
-        types: [conceptual, syntax]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: tex_address_filter_clamp
-        claim: "cudaAddressModeClamp 把越界坐标夹到边缘 texel，不 trap；与表面 cudaBoundaryModeTrap 不同，纹理越界默认不让核失败。"
-        types: [compare, conceptual]
-        difficulty: [2]
-        kind: mechanism
-      - id: tex_address_filter_border
-        claim: "cudaAddressModeBorder 越界返回 texDesc.borderColor[4]；未设置时默认 0。Border 不要求归一化坐标。"
-        types: [syntax, conceptual]
-        difficulty: [2, 3]
-        kind: api
-      - id: tex_address_filter_mirror
-        claim: "cudaAddressModeMirror 在归一化坐标下按偶数块正向、奇数块镜像；非归一化不能用 Mirror。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: failure
-      - id: tex_address_filter_per_dim
-        claim: "texDesc.addressMode[0/1/2] 分别对应 x/y/z，可以 x=Wrap 且 y=Clamp；漏设的维默认 Clamp 而不是继承 x。"
-        types: [syntax, conceptual]
-        difficulty: [2, 3]
-        kind: api
-      - id: tex_address_filter_srgb
-        claim: "cudaTextureDesc.sRGB=1 时 8-bit 无符号纹理在过滤前做 sRGB→linear 转换，需要 NormalizedFloat 读模式；ElementType 整数路径不会做 sRGB。"
-        types: [conceptual, syntax]
-        difficulty: [3]
-        kind: mechanism
-      - id: tex_address_filter_aniso
-        claim: "maxAnisotropy>1 才启用各向异性过滤，且需要 mipmap 与 Grad/隐式 LOD；纯 tex2D 无梯度的计算核上各向异性不会自动生效。"
-        types: [optimization, conceptual]
-        difficulty: [3]
-        kind: mechanism
-  - id: cuda_array
-    name: CUDA Array 布局
-    leaves:
-      - id: cuda_array_malloc
-        claim: "cudaMallocArray(&arr, &ch, width, height) 分配不透明 2D array，不能把 arr 当线性指针做算术或 cudaMemcpy。"
-        types: [syntax, debug]
-        difficulty: [2]
-        kind: api
-      - id: cuda_array_memcpy
-        claim: "主机/设备线性缓冲与 array 之间必须用 cudaMemcpy2DToArray/FromArray 或 cudaMemcpy3D，普通 cudaMemcpy 不接受 cudaArray_t。"
-        types: [syntax, debug]
-        difficulty: [2]
-        kind: failure
-      - id: cuda_array_3d
-        claim: "cudaMalloc3DArray 的 extent 以元素计不是字节；float array 的 width=128 表示 128 个 texel 而非 512 字节。"
-        types: [layout, conceptual]
-        difficulty: [2]
-        kind: formula
-      - id: cuda_array_block_linear
-        claim: "CUDA array 在设备上是 block-linear/tiled 布局，不是 row-pitch 线性；直接用 surf 以外的全局指针解读其存储是未定义。"
-        types: [layout, conceptual]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: cuda_array_channel_desc
-        claim: "cudaChannelFormatDesc 的 x+y+z+w 位宽之和必须为 8/16/32/64/128 之一；float3 的 96-bit 通道描述不能创建 array。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: failure
-      - id: cuda_array_max2d
-        claim: "2D array 边长必须满足 width <= maxTexture2D[0] 且 height <= maxTexture2D[1]（当代 GPU 常见 131072×65536）；超限 malloc 失败。"
-        types: [debug, conceptual]
-        difficulty: [2, 3]
-        kind: formula
-      - id: cuda_array_free
-        claim: "cudaFreeArray 之后仍持有的 texture/surface object 变成悬空句柄；应先 DestroyTextureObject 再 FreeArray。"
-        types: [debug, conceptual]
-        difficulty: [2, 3]
-        kind: failure
-      - id: cuda_array_hostalloc
-        claim: "cudaHostAlloc 的指针不能直接当 CUDA array 绑定纹理对象的 array 资源；必须先拷进 cudaMallocArray 或改用 Linear/Pitch2D 资源类型。"
-        types: [compare, syntax]
-        difficulty: [2]
-        kind: api
-  - id: tex_vs_global
-    name: 纹理 vs 表面 vs 全局
-    leaves:
-      - id: tex_vs_global_interpolation
-        claim: "纹理路径提供硬件线性过滤与 addressMode，全局 ld.global/__ldg 只读对齐标量/向量，不能在 load 时做 2×2 插值。"
-        types: [compare, conceptual]
-        difficulty: [2]
-        kind: mechanism
-      - id: tex_vs_global_oob
-        claim: "全局越界是 illegal address；纹理 Clamp/Border 把越界变成合法采样。把 tex 的坐标习惯用到 raw 指针会立刻 trap。"
-        types: [compare, debug]
-        difficulty: [2, 3]
-        kind: failure
-      - id: tex_vs_global_write
-        claim: "纹理对象只读；要就地改 texel 必须走表面或先写全局再重建纹理。同一 kernel 写全局再 tex2D 同一数据不保证可见。"
-        types: [compare, conceptual]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: tex_vs_global_coalesce
-        claim: "全局合并以 32 线程连续 128B 为最优；纹理缓存按 2D 空间局部性组织，转置坐标的图像核用 tex 往往优于未合并的列优先全局读。"
-        types: [optimization, compare]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: tex_vs_global_surface_rw
-        claim: "表面提供 array 上的读写但不过滤；全局提供线性地址算术。需要过滤读+随机写时应读走纹理、写走表面并分核。"
-        types: [compare, layout]
-        difficulty: [3]
-        kind: mechanism
-      - id: tex_vs_global_ldg_alias
-        claim: "__ldg 与 tex1Dfetch(线性纹理) 都走只读路径，但后者有 maxTexture1DLinear 与对齐约束，前者只要普通设备指针。"
-        types: [compare, optimization]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: tex_vs_global_format
-        claim: "纹理可在采样时把 8-bit 归一化成 float，全局必须手动 * (1/255.0f)；filterModeLinear 还包含邻域加权，不是单点缩放。"
-        types: [compare, conceptual]
-        difficulty: [2]
-        kind: mechanism
-      - id: tex_vs_global_smem
-        claim: "共享内存 bank 模型不适用于纹理缓存；把 tex2D 结果写入 smem 后冲突分析只对这次 smem 写/读成立，与 texel 布局无关。"
-        types: [compare, layout]
-        difficulty: [2, 3]
-        kind: mechanism
-  - id: tex_gather
-    name: Texture gather 与多点
-    leaves:
-      - id: tex_gather_tex2dgather
-        claim: "tex2Dgather 一次返回 2×2 邻域某一通道的 float4，坐标仍是浮点；它不是 surf 的字节寻址，也不是 4 次独立 tex2D 的简单宏。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: api
-      - id: tex_gather_channel
-        claim: "tex2Dgather 的 comp 选择 r/g/b/a 通道；对单通道 array 只能 gather 通道 0，comp=1 结果未定义。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: failure
-      - id: tex_gather_flag
-        claim: "供 gather 的 CUDA array 建议带 cudaArrayTextureGather；缺少该能力的格式上 tex2Dgather 可能创建成功但采样未定义。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: api
-      - id: tex_gather_vs_linear
-        claim: "gather 返回未加权的四邻域样本，调用者自己做双线性；filterModeLinear 的 tex2D 已经完成加权，不能把 gather 的 float4 再当已经插值的颜色。"
-        types: [compare, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: tex_gather_not_1d
-        claim: "gather 只对 2D（及部分 cubemap）纹理定义，没有 tex1Dgather；对线性 1D 纹理调用 2D gather 不合法。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: failure
-      - id: tex_gather_offset
-        claim: "带整型偏移的 tex2Dgather 变体在硬件偏移范围内（通常 ±8 texel）取邻域；超出范围的立即数偏移不能编译为 gather。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: api
-      - id: tex_gather_surface_no
-        claim: "表面没有 gather：要从 array 读 2×2 必须四次 surf2Dread 并自己换算字节坐标，或改绑纹理对象。"
-        types: [compare, layout]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: tex_gather_return
-        claim: "tex2Dgather 返回 float4，即使底层是 8-bit 归一化纹理；按 int4 接收会编译失败或读错寄存器布局。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-  - id: tex_coord
-    name: 1D/2D/3D 坐标与采样
-    leaves:
-      - id: tex_coord_tex3d
-        claim: "3D CUDA array 必须用 tex3D(tex, x, y, z)；对该对象调用 tex2D 缺少 z，读到的切片未定义。"
-        types: [syntax, debug]
-        difficulty: [2]
-        kind: api
-      - id: tex_coord_tex1d_array
-        claim: "绑定 1D CUDA array 用 tex1D 浮点坐标；tex1Dfetch 只对 cudaResourceTypeLinear 合法，对 array 资源调用 fetch 未定义。"
-        types: [syntax, compare]
-        difficulty: [2, 3]
-        kind: api
-      - id: tex_coord_integer
-        claim: "tex2D(float) 的坐标是 float；用整数 tid.x 隐式转换成 float 后仍按非归一化 texel 空间解释，不会自动变成 tex1Dfetch 的元素下标。"
-        types: [conceptual, debug]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: tex_coord_layer_not_z
-        claim: "2D layered 的第三维是 layer 索引走 tex2DLayered，不是 tex3D 的连续 z；把 layered array 当 3D 体积采样坐标错一层。"
-        types: [compare, debug]
-        difficulty: [2, 3]
-        kind: failure
-      - id: tex_coord_offset
-        claim: "tex2Doffset 的整型偏移加在非归一化 texel 网格上，通常范围 ±8；归一化 [0,1] 坐标不能靠 offset 代替缩放。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: api
-      - id: tex_coord_msaa
-        claim: "cudaArrayTextureGather 与普通 2D array 都不是 MSAA 表面；CUDA 计算侧没有 tex2Dms，多重采样颜色需先 resolve 进普通 array。"
-        types: [conceptual, compare]
-        difficulty: [3]
-        kind: mechanism
-      - id: tex_coord_promotefloat
-        claim: "8-bit 通道加 cudaReadModeNormalizedFloat 后 tex2D 返回 float4，硬件插值在 float 域；ElementType 的 uchar4 点采样不提升精度。"
-        types: [compare, conceptual]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: tex_coord_dim_prop
-        claim: "maxTexture1D / maxTexture2D / maxTexture3D 是采样维度上限，与 maxSurface2D 独立；表面写还受 maxSurface 限制，不能只用纹理上限判断 surf2Dwrite。"
-        types: [compare, debug]
-        difficulty: [3]
-        kind: api
+- id: texture_object
+  name: 纹理对象
+  leaves:
+  - id: texture_object_linear_fetch
+    claim: 绑定线性设备内存的 cudaTextureObject_t 只能用 tex1Dfetch 取整型坐标，tex1D 浮点坐标专供 CUDA array，混用返回未定义值。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: texture_object_max_1d_linear
+    claim: 线性纹理元素个数不能超过 cudaDeviceProp.maxTexture1DLinear，该上限为 2^27=134217728 个 texel，超限 cudaCreateTextureObject
+      失败。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: texture_object_filter_float
+    claim: cudaFilterModeLinear 只对浮点通道或 cudaReadModeNormalizedFloat 的 8/16-bit 整数合法；对 cudaReadModeElementType
+      的 int 纹理创建失败。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: texture_object_alignment
+    claim: 线性资源的 devPtr 必须按 cudaDeviceProp.textureAlignment 对齐（当代 GPU 为 512B），未对齐时创建对象返回 cudaErrorInvalidValue。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: texture_object_create
+    claim: cudaCreateTextureObject(&tex, &resDesc, &texDesc, viewDesc) 中 viewDesc 可为 NULL；resDesc.resType
+      必须与绑定资源一致，否则返回 cudaErrorInvalidValue。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: texture_object_pitch2d
+    claim: cudaResourceTypePitch2D 的 pitchInBytes 必须是 texturePitchAlignment 的倍数（通常 32B），且 width×elemSize
+      ≤ pitch，否则创建失败。
+    types:
+    - layout
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: texture_object_channel
+    claim: cudaCreateChannelDesc<float4>() 的 x/y/z/w 位宽必须与底层 CUDA array 通道一致；把 8-bit RGBA array 按 float
+      通道描述创建对象会失败。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: texture_object_tex2d
+    claim: 绑定 2D CUDA array 后应使用 tex2D(tex, x, y)；对该对象调用 tex3D 或 tex1Dfetch 坐标语义不匹配，读出值未定义。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+- id: surface_object
+  name: 表面对象
+  leaves:
+  - id: surface_object_array_only
+    claim: cudaSurfaceObject_t 只能绑定 CUDA array，不能绑定线性 cudaMalloc 缓冲；对线性指针调用 cudaCreateSurfaceObject 失败。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: surface_object_byte_addr
+    claim: surf2Dwrite 的 x 是字节坐标：写 float 必须传 x=tid.x*sizeof(float)，若按 texel 传 tid.x 会写到错误地址或触发 trap。
+    types:
+    - debug
+    - layout
+    - code_complete
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: surface_object_boundary_trap
+    claim: 默认 cudaBoundaryModeTrap 下越界 surf2Dread/write 使 kernel 失败；cudaBoundaryModeZero 越界读 0、写忽略，与纹理的
+      addressModeClamp 不同。
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: surface_object_coherence
+    claim: 同一 kernel 内对同一 CUDA array 既 tex2D 又 surf2Dwrite 不保证看到自己的写，必须结束 kernel 或做设备侧表面同步后才能再当纹理读。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: surface_object_loadstore_flag
+    claim: 供表面绑定的 CUDA array 创建时必须带 cudaArraySurfaceLoadStore；仅 cudaMallocArray 默认标志的 array 不能 cudaCreateSurfaceObject。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: surface_object_surf1d
+    claim: surf1Dread 的 x 同样是字节偏移；对 16-bit 元素应 x=idx*2，不是 idx。y/z 参数不存在于 1D 表面 API。
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: surface_object_create
+    claim: cudaCreateSurfaceObject(&surf, &resDesc) 只接受 cudaResourceTypeArray；传入 Pitch2D 或 Linear 返回错误。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: surface_object_no_filter
+    claim: 表面读写没有 filterMode 或 normalized coords：坐标总是整型字节/层索引，不能对 surf2Dread 做线性插值。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    kind: mechanism
+- id: ldg_readonly
+  name: __ldg 只读路径
+  leaves:
+  - id: ldg_readonly_cc35
+    claim: __ldg 在 compute capability 3.5 起可用，把全局加载送到只读/纹理路径；在 sm_30 上编译该 intrinsic 不合法。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: feature
+  - id: ldg_readonly_const_restrict
+    claim: const T* __restrict__ 只是提示编译器可选择 LDG，不保证生成；要强制只读缓存必须写 __ldg(ptr)。
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: ldg_readonly_no_write
+    claim: __ldg 要求该地址在整个 kernel 生命周期只读；对刚 atomicAdd 过的同一全局地址再 __ldg 可读到陈旧值，因为只读路径不监听 L1 脏行。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    kind: failure
+  - id: ldg_readonly_types
+    claim: __ldg 的 T 限于标量与 2/4 向量（如 float4、int4、double2）；对 3 元 float3 或自定义 12B 结构体调用无法匹配 overload。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: ldg_readonly_ptx_nc
+    claim: __ldg 降低为 PTX ld.global.nc；Ampere 起 .nc 仍进统一 L1，但相干性按只读处理，与 ld.global.ca 的写后读语义不同。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: ldg_readonly_align
+    claim: __ldg(float4*) 要求 16B 对齐，否则可能拆成多次标量只读加载或产生 misaligned 访问，失去向量化收益。
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: ldg_readonly_ldca
+    claim: __ldca 是缓存常驻全局加载，__ldcg 绕过 L1，__ldg/ld.nc 走只读路径；三者都不是表面或纹理对象采样。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: ldg_readonly_vs_tex
+    claim: __ldg 用普通设备指针，不做坐标归一化、过滤或越界 clamp；需要插值或 addressMode 必须改用 cudaTextureObject_t。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    kind: mechanism
+- id: bindless
+  name: Bindless 句柄
+  leaves:
+  - id: bindless_vs_reference
+    claim: CUDA 5.0 引入的纹理/表面对象是 64-bit bindless 句柄，作为 kernel 参数或结构体成员传递，不再占用已弃用的 texture reference 槽。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    kind: feature
+  - id: bindless_kernel_arg
+    claim: cudaTextureObject_t 按值传入 __global__ 即可采样，无需 cudaBindTexture；在 device 上改写该句柄不会创建新绑定。
+    types:
+    - syntax
+    - code_complete
+    difficulty:
+    - 2
+    kind: api
+  - id: bindless_destroy_lifetime
+    claim: cudaDestroyTextureObject 后仍在飞行中的 kernel 继续用该句柄是 use-after-destroy；必须 cudaDeviceSynchronize
+      或 stream 同步后再销毁。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: bindless_view_desc
+    claim: cudaResourceViewDesc 可在对象层把 16-bit 整数 CUDA array 重解释为归一化浮点视图，但 format 宽度必须覆盖底层通道，否则创建失败。
+    types:
+    - layout
+    - syntax
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: bindless_array_of_tex
+    claim: CUDA 5.0 起可以把 cudaTextureObject_t 数组放在常量或全局内存里由 kernel 按索引选取；texture reference 时代每个绑定占一个模块槽，无法同等做动态索引。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: bindless_zero_handle
+    claim: 值为 0 的 cudaTextureObject_t 不是合法绑定，tex2D 该句柄结果未定义；必须先 cudaCreateTextureObject 成功。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    kind: failure
+  - id: bindless_surface_handle
+    claim: cudaSurfaceObject_t 同样是 64-bit bindless 句柄，按值传入后 surf2Dwrite，不需要 cudaBindSurfaceToArray。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    kind: api
+  - id: bindless_ref_deprecated
+    claim: texture<float, cudaTextureType2D> 引用式 API 在 CUDA 12 起弃用，新代码应只用 cudaTextureObject_t；两者不能对同一
+      tex 符号混绑。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+- id: l1_tex_cache
+  name: L1/纹理缓存
+  leaves:
+  - id: l1_tex_cache_ampere_default
+    claim: Ampere sm_80 默认把普通 ld.global 缓存在统一 L1/Tex（.ca）；Kepler 3.5 的独立 48 KB 只读缓存已并入该统一 L1。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: l1_tex_cache_dlcm_cg
+    claim: -Xptxas -dlcm=cg 使默认全局加载旁路 L1 只进 L2；与 __ldcg 等价，用于避免写后读别名时读到 L1 旧数据。
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: l1_tex_cache_constant_vs_tex
+    claim: 常量缓存要求整个 warp 同一地址才广播，分叉索引会串行化；L1/Tex 只读路径允许每线程不同地址且不要求 64 KB 上限。
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: l1_tex_cache_ldcs
+    claim: __ldcs 标记流式一次加载，提示逐出优先于 __ldca 的缓存常驻数据；在访存流式拷贝核中减少对工作集 L1 行的污染。
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: api
+  - id: l1_tex_cache_size_ampere
+    claim: sm_80 统一 L1/Tex/smem 共 192 KB，其中 smem 最多 164 KB，L1 容量 = 192-smem_KB；把 smem 拉到 164 KB 会把 L1
+      压到 28 KB。
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: l1_tex_cache_tex_hit
+    claim: tex2D 走纹理过滤单元再进 L1/Tex，坐标邻近的 warp 命中同一 cache line；完全随机 texel 使命中率≈line/(footprint)。
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: l1_tex_cache_ldlu
+    claim: __ldlu（last use）提示该 L1 行可立即逐出；与 __ldca 相反，适合每个元素只读一次的流。
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: l1_tex_cache_coherent
+    claim: 统一 L1 对普通 .ca 加载在同 SM 写后读上比 Kepler 只读缓存更相干，但跨 SM 仍需 __threadfence 或原子才能看见写。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+- id: tex_normalized
+  name: 归一化坐标
+  leaves:
+  - id: tex_normalized_flag
+    claim: cudaTextureDesc.normalizedCoords=1 时 tex2D 的 x/y 落在 [0,1) 对应整幅图像；=0 时非归一化坐标范围是 [0,width)×[0,height)。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+  - id: tex_normalized_wrap
+    claim: cudaAddressModeWrap 与 Mirror 只在 normalizedCoords=1 时合法；非归一化坐标创建 Wrap 纹理会失败或回退。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: tex_normalized_readmode
+    claim: cudaReadModeNormalizedFloat 把 8-bit 无符号 texel 映射到 [0,1] 的 float，与坐标 normalizedCoords 是独立的两套归一化。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: tex_normalized_int_coord
+    claim: 非归一化下 texel 中心坐标 x = i+0.5；要对 (i,j) 像素做点采样应 tex2D(tex, i+0.5f, j+0.5f)，传 i 会在线性过滤时混到左邻。
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: tex_normalized_dim_change
+    claim: 同一 [0,1] 坐标在 256 宽与 1024 宽 array 上采样不同 texel；归一化坐标不携带像素索引，换分辨率必须改资源或改非归一化。
+    types:
+    - conceptual
+    - counterfactual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: tex_normalized_1dlinear
+    claim: 线性内存纹理 tex1Dfetch 只用整数下标，忽略 normalizedCoords 与 filterMode；对该对象设归一化坐标不会变成 tex1D。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: tex_normalized_border
+    claim: 归一化坐标 <0 或 ≥1 时 addressModeBorder 返回 borderColor，Clamp 夹到边沿 texel；两者都要求在 texDesc 里显式设置。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: tex_normalized_signed8
+    claim: cudaReadModeNormalizedFloat 对 8-bit unsigned 映射 float = v/255 ∈ [0,1]，signed 映射到 [-1,1]；cudaReadModeElementType
+      则返回原始整数。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+- id: tex_mipmap
+  name: Mipmap 采样
+  leaves:
+  - id: tex_mipmap_alloc
+    claim: cudaMallocMipmappedArray 按 nLevels 分配金字塔；nLevels=0 表示一直分到 1×1。普通 cudaMallocArray 没有 mip 层。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: tex_mipmap_level
+    claim: cudaGetMipmappedArrayLevel(&levelArray, mip, level) 取出单层 CUDA array 才能绑定表面或做 cudaMemcpy2DToArray。
+    types:
+    - syntax
+    - code_complete
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: tex_mipmap_lod
+    claim: tex2DLod(tex, x, y, lod) 的 lod=0 是最细层，lod=1 是半分辨率层；lod 必须在 [0, nLevels) 内，越界按 mipmap 滤波模式夹紧。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: tex_mipmap_grad
+    claim: tex2DGrad 用 dPdx/dPdy 估计 LOD；在非图形核里若传 0 梯度会固定 lod=0，不会自动下采样。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: tex_mipmap_filter
+    claim: cudaTextureDesc.mipmapFilterMode 控制层间过滤：Point 选一层，Linear 在相邻两层间插值；与 texDesc.filterMode 的层内过滤独立。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: api
+  - id: tex_mipmap_view
+    claim: cudaResourceViewDesc.minMipmapLevelClamp/maxMipmapLevelClamp 可裁剪可见层；clamp 区间必须落在实际 nLevels
+      内否则创建失败。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: tex_mipmap_surface
+    claim: 表面对象绑定的是单一 CUDA array 层，不能对整个 mipmapped array 做 surf2Dwrite；必须先 GetMipmappedArrayLevel。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: tex_mipmap_size
+    claim: 第 L 层宽高约为 floor(width/2^L)×floor(height/2^L)，至少为 1；L=3 且 width=256 → 32，不是 256-3。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+- id: tex_layer
+  name: Layered 与 Cubemap
+  leaves:
+  - id: tex_layer_extent
+    claim: cudaMalloc3DArray 的 extent.depth 在 cudaArrayLayered 下表示层数不是 Z 体素；2D layered 的每层是 width×height。
+    types:
+    - layout
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: tex_layer_tex2d
+    claim: tex2DLayered(tex, x, y, layer) 的 layer 是整型层索引；用 tex2D 采样 layered 对象缺少层参数，值未定义。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: tex_layer_1d
+    claim: 1D layered 用 tex1DLayered(tex, x, layer)；cudaArray 创建时 flags 含 cudaArrayLayered 且 extent.height=0、depth=层数。
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    kind: api
+  - id: tex_layer_cubemap
+    claim: cudaArrayCubemap 要求 6 张正方形面，texCubemap(tex, x, y, z) 用方向向量选面；层数不是 6 的普通 layered 不能当 cubemap
+      采样。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: tex_layer_cubemap_layered
+    claim: cudaArrayCubemap|cudaArrayLayered 形成 cubemap array，texCubemapLayered 额外接收 layer；缺少 Layered
+      标志时该 intrinsic 不匹配。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: tex_layer_index_range
+    claim: layer 必须满足 0 ≤ layer < depth；越界层在纹理 addressMode 下不按 Wrap 绕回层维，结果未定义或夹到有效层取决于硬件。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: tex_layer_memcpy
+    claim: cudaMemcpy3DParms 的 extent.depth 拷贝层数，dstPos.z 选起始层；用 cudaMemcpy2DToArray 无法一次填满多层。
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: tex_layer_surface
+    claim: surf2DLayeredwrite 的 x 仍是字节坐标：写 float 时 x = idx*sizeof(float)，layer 是层索引；把 layer 写进 y 会破坏层隔离。
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+- id: tex_address_filter
+  name: 寻址与过滤模式
+  leaves:
+  - id: tex_address_filter_point
+    claim: cudaFilterModePoint 返回最近 texel，不做插值；整数纹理在 ElementType 读模式下只能用 Point，不能 Linear。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: tex_address_filter_linear
+    claim: cudaFilterModeLinear 在 2D 上取 2×2 邻域加权，输出一定是 float；即使底层是 8-bit array 也要 ReadModeNormalizedFloat
+      或浮点通道。
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: tex_address_filter_clamp
+    claim: cudaAddressModeClamp 把越界坐标夹到边缘 texel，不 trap；与表面 cudaBoundaryModeTrap 不同，纹理越界默认不让核失败。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: tex_address_filter_border
+    claim: cudaAddressModeBorder 越界返回 texDesc.borderColor[4]；未设置时默认 0。Border 不要求归一化坐标。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: tex_address_filter_mirror
+    claim: cudaAddressModeMirror 在归一化坐标下按偶数块正向、奇数块镜像；非归一化不能用 Mirror。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: tex_address_filter_per_dim
+    claim: texDesc.addressMode[0/1/2] 分别对应 x/y/z，可以 x=Wrap 且 y=Clamp；漏设的维默认 Clamp 而不是继承 x。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: tex_address_filter_srgb
+    claim: cudaTextureDesc.sRGB=1 时 8-bit 无符号纹理在过滤前做 sRGB→linear 转换，需要 NormalizedFloat 读模式；ElementType
+      整数路径不会做 sRGB。
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: tex_address_filter_aniso
+    claim: maxAnisotropy>1 才启用各向异性过滤，且需要 mipmap 与 Grad/隐式 LOD；纯 tex2D 无梯度的计算核上各向异性不会自动生效。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+- id: cuda_array
+  name: CUDA Array 布局
+  leaves:
+  - id: cuda_array_malloc
+    claim: cudaMallocArray(&arr, &ch, width, height) 分配不透明 2D array，不能把 arr 当线性指针做算术或 cudaMemcpy。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: cuda_array_memcpy
+    claim: 主机/设备线性缓冲与 array 之间必须用 cudaMemcpy2DToArray/FromArray 或 cudaMemcpy3D，普通 cudaMemcpy 不接受 cudaArray_t。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: failure
+  - id: cuda_array_3d
+    claim: cudaMalloc3DArray 的 extent 以元素计不是字节；float array 的 width=128 表示 128 个 texel 而非 512 字节。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+  - id: cuda_array_block_linear
+    claim: CUDA array 在设备上是 block-linear/tiled 布局，不是 row-pitch 线性；直接用 surf 以外的全局指针解读其存储是未定义。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: cuda_array_channel_desc
+    claim: cudaChannelFormatDesc 的 x+y+z+w 位宽之和必须为 8/16/32/64/128 之一；float3 的 96-bit 通道描述不能创建 array。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cuda_array_max2d
+    claim: 2D array 边长必须满足 width <= maxTexture2D[0] 且 height <= maxTexture2D[1]（当代 GPU 常见 131072×65536）；超限
+      malloc 失败。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: cuda_array_free
+    claim: cudaFreeArray 之后仍持有的 texture/surface object 变成悬空句柄；应先 DestroyTextureObject 再 FreeArray。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cuda_array_hostalloc
+    claim: cudaHostAlloc 的指针不能直接当 CUDA array 绑定纹理对象的 array 资源；必须先拷进 cudaMallocArray 或改用 Linear/Pitch2D
+      资源类型。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 2
+    kind: api
+- id: tex_vs_global
+  name: 纹理 vs 表面 vs 全局
+  leaves:
+  - id: tex_vs_global_interpolation
+    claim: 纹理路径提供硬件线性过滤与 addressMode，全局 ld.global/__ldg 只读对齐标量/向量，不能在 load 时做 2×2 插值。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: tex_vs_global_oob
+    claim: 全局越界是 illegal address；纹理 Clamp/Border 把越界变成合法采样。把 tex 的坐标习惯用到 raw 指针会立刻 trap。
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: tex_vs_global_write
+    claim: 纹理对象只读；要就地改 texel 必须走表面或先写全局再重建纹理。同一 kernel 写全局再 tex2D 同一数据不保证可见。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: tex_vs_global_coalesce
+    claim: 全局合并以 32 线程连续 128B 为最优；纹理缓存按 2D 空间局部性组织，转置坐标的图像核用 tex 往往优于未合并的列优先全局读。
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: tex_vs_global_surface_rw
+    claim: 表面提供 array 上的读写但不过滤；全局提供线性地址算术。需要过滤读+随机写时应读走纹理、写走表面并分核。
+    types:
+    - compare
+    - layout
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: tex_vs_global_ldg_alias
+    claim: __ldg 与 tex1Dfetch(线性纹理) 都走只读路径，但后者有 maxTexture1DLinear 与对齐约束，前者只要普通设备指针。
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: tex_vs_global_format
+    claim: 纹理可在采样时把 8-bit 归一化成 float，全局必须手动 * (1/255.0f)；filterModeLinear 还包含邻域加权，不是单点缩放。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: tex_vs_global_smem
+    claim: 共享内存 bank 模型不适用于纹理缓存；把 tex2D 结果写入 smem 后冲突分析只对这次 smem 写/读成立，与 texel 布局无关。
+    types:
+    - compare
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+- id: tex_gather
+  name: Texture gather 与多点
+  leaves:
+  - id: tex_gather_tex2dgather
+    claim: tex2Dgather 一次返回 2×2 邻域某一通道的 float4，坐标仍是浮点；它不是 surf 的字节寻址，也不是 4 次独立 tex2D 的简单宏。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: tex_gather_channel
+    claim: tex2Dgather 的 comp 选择 r/g/b/a 通道；对单通道 array 只能 gather 通道 0，comp=1 结果未定义。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: tex_gather_flag
+    claim: 供 gather 的 CUDA array 建议带 cudaArrayTextureGather；缺少该能力的格式上 tex2Dgather 可能创建成功但采样未定义。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: tex_gather_vs_linear
+    claim: gather 返回未加权的四邻域样本，调用者自己做双线性；filterModeLinear 的 tex2D 已经完成加权，不能把 gather 的 float4 再当已经插值的颜色。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: tex_gather_not_1d
+    claim: gather 只对 2D（及部分 cubemap）纹理定义，没有 tex1Dgather；对线性 1D 纹理调用 2D gather 不合法。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: tex_gather_offset
+    claim: 带整型偏移的 tex2Dgather 变体在硬件偏移范围内（通常 ±8 texel）取邻域；超出范围的立即数偏移不能编译为 gather。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: tex_gather_surface_no
+    claim: 表面没有 gather：要从 array 读 2×2 必须四次 surf2Dread 并自己换算字节坐标，或改绑纹理对象。
+    types:
+    - compare
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: tex_gather_return
+    claim: tex2Dgather 返回 float4，即使底层是 8-bit 归一化纹理；按 int4 接收会编译失败或读错寄存器布局。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+- id: tex_coord
+  name: 1D/2D/3D 坐标与采样
+  leaves:
+  - id: tex_coord_tex3d
+    claim: 3D CUDA array 必须用 tex3D(tex, x, y, z)；对该对象调用 tex2D 缺少 z，读到的切片未定义。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: tex_coord_tex1d_array
+    claim: 绑定 1D CUDA array 用 tex1D 浮点坐标；tex1Dfetch 只对 cudaResourceTypeLinear 合法，对 array 资源调用 fetch 未定义。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: tex_coord_integer
+    claim: tex2D(float) 的坐标是 float；用整数 tid.x 隐式转换成 float 后仍按非归一化 texel 空间解释，不会自动变成 tex1Dfetch 的元素下标。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: tex_coord_layer_not_z
+    claim: 2D layered 的第三维是 layer 索引走 tex2DLayered，不是 tex3D 的连续 z；把 layered array 当 3D 体积采样坐标错一层。
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: tex_coord_offset
+    claim: tex2Doffset 的整型偏移加在非归一化 texel 网格上，通常范围 ±8；归一化 [0,1] 坐标不能靠 offset 代替缩放。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: tex_coord_msaa
+    claim: cudaArrayTextureGather 与普通 2D array 都不是 MSAA 表面；CUDA 计算侧没有 tex2Dms，多重采样颜色需先 resolve 进普通 array。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: tex_coord_promotefloat
+    claim: 8-bit 通道加 cudaReadModeNormalizedFloat 后 tex2D 返回 float4，硬件插值在 float 域；ElementType 的 uchar4
+      点采样不提升精度。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: tex_coord_dim_prop
+    claim: maxTexture1D / maxTexture2D / maxTexture3D 是采样维度上限，与 maxSurface2D 独立；表面写还受 maxSurface 限制，不能只用纹理上限判断
+      surf2Dwrite。
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    kind: api

@@ -1,544 +1,904 @@
 id: T27
 name: 设备 launch 与 CDP
 children:
-  - id: nesting_depth
-    name: 嵌套深度
-    leaves:
-      - id: nesting_depth_hw24
-        claim: "CUDA Dynamic Parallelism 硬件最大嵌套深度 max_depth=24（host launch 为第 0 层），第 25 层 device launch 失败。"
-        types: [conceptual, debug]
-        difficulty: [2, 3]
-        kind: formula
-      - id: nesting_depth_sync_default
-        claim: "CDP1 默认 cudaLimitDevRuntimeSyncDepth 为 2（含 host 层），更深的 cudaDeviceSynchronize 返回错误且不会合子网格。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: nesting_depth_cdp2_no_dsync
-        claim: "CUDA 11.6 起 device 侧 cudaDeviceSynchronize 已弃用，对 compute_90+（Hopper）编译直接删除，CDP2 禁止父块同步子网格。"
-        types: [syntax, compare]
-        difficulty: [3]
-        kind: feature
-      - id: nesting_depth_memcpy_counts
-        claim: "设备侧 cudaMemcpyAsync 可能再产生一次隐式 kernel launch 并计入嵌套深度，在已接近 24 层时会让看似无 launch 的拷贝失败。"
-        types: [debug, counterfactual]
-        difficulty: [3]
-        kind: failure
-      - id: nesting_depth_sync_set_host
-        claim: "cudaDeviceSetLimit(cudaLimitDevRuntimeSyncDepth, d) 必须在 host 于顶层 kernel 发射前调用；设 d=1 时父核内 cudaDeviceSynchronize 立即失败。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: nesting_depth_sync_mem
-        claim: "CDP1 每把 cudaLimitDevRuntimeSyncDepth 加 1 就为该层预留同步状态内存；从默认 2 提到 24 会显著增加设备侧预留，而非只改计数器。"
-        types: [optimization, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: nesting_depth_launch_beyond_sync
-        claim: "子网格 launch 可以深于 cudaLimitDevRuntimeSyncDepth，但超过该深度再调 cudaDeviceSynchronize → cudaErrorLaunchMaxDepthExceeded，子网格不会因此被等待。"
-        types: [debug, counterfactual]
-        difficulty: [3]
-        kind: failure
-      - id: nesting_depth_parent_complete
-        claim: "CDP1 中父网格在其发起的全部非 fire-and-forget 子网格完成前不算完成，host 对该父核所在流的同步会等到这些子网格。"
-        types: [conceptual, compare]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: nesting_depth_cdp2_unsupported_limit
-        claim: "CDP2 或 Hopper sm_90+ 上查询/设置 cudaLimitDevRuntimeSyncDepth 返回 cudaErrorUnsupportedLimit，因为设备侧同步深度已不存在。"
-        types: [syntax, compare]
-        difficulty: [3]
-        kind: feature
-  - id: pending_launch
-    name: 待发射池
-    leaves:
-      - id: pending_launch_default_2048
-        claim: "待发射子网格池默认 pending_count=2048，超过后 cudaGetLastError=cudaErrorLaunchPendingCountExceeded，可用 cudaLimitDevRuntimePendingLaunchCount 扩大。"
-        types: [debug, conceptual]
-        difficulty: [2, 3]
-        kind: formula
-      - id: pending_launch_virtualized
-        claim: "待发射计数超过预留池后运行时坠入虚拟化队列，延迟数量级高于硬件槽，即使未报错也会把细粒度 CDP 打成串行。"
-        types: [profiling, optimization]
-        difficulty: [3]
-        kind: mechanism
-      - id: pending_launch_set_before
-        claim: "cudaDeviceSetLimit(cudaLimitDevRuntimePendingLaunchCount, N) 必须在 host 发射顶层 kernel 之前设置，kernel 运行中再改对该次嵌套无效。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: pending_launch_one_thread_flood
-        claim: "父网格每个线程各 launch 一个 1×1 子核时，256 线程×8 block=2048 恰好打满默认池，再多一个 launch 即 pending overflow。"
-        types: [debug, counterfactual]
-        difficulty: [2, 3]
-        kind: formula
-      - id: pending_launch_cdp2_no_virtual
-        claim: "CUDA 12 CDP2 取消虚拟化 pending 池：固定槽满后不会降级排队，必须把 cudaLimitDevRuntimePendingLaunchCount 设到覆盖峰值未完成 launch。"
-        types: [compare, conceptual]
-        difficulty: [3]
-        kind: feature
-      - id: pending_launch_cdp2_oor
-        claim: "CDP2 固定池满时设备 launch 失败，线程 last error 为 cudaErrorLaunchOutOfResources（事件槽耗尽则为 cudaErrorMemoryAllocation），子核不会入队。"
-        types: [debug, syntax]
-        difficulty: [3]
-        kind: failure
-      - id: pending_launch_events_twice
-        claim: "CDP2 同时存活的设备事件上限 = 2 × pending_launch_count；事件在对应 launch 完成后才销毁，提前 cudaEventCreate 打满会让后续 launch 失败。"
-        types: [debug, conceptual]
-        difficulty: [3, 4]
-        kind: formula
-      - id: pending_launch_get_limit
-        claim: "实际槽数以 cudaDeviceGetLimit(cudaLimitDevRuntimePendingLaunchCount) 为准；默认 2048，但先前 SetLimit 或驱动改写后不能再假设 2048。"
-        types: [syntax, debug]
-        difficulty: [2]
-        kind: api
-      - id: pending_launch_device_wide
-        claim: "pending launch 池按整设备而不是按流计：两条设备命名流上未完成子核之和超过 N 同样溢出，不能靠换流句柄规避。"
-        types: [conceptual, counterfactual]
-        difficulty: [3]
-        kind: mechanism
-  - id: cdp2_streams
-    name: Fire-and-forget 与尾发射
-    leaves:
-      - id: cdp2_streams_fire_forget
-        claim: "cudaStreamFireAndForget 上的子网格与父网格并发、互不等待，父 kernel 退出不蕴含子核完成，不能在父核返回后立即在 host 读子核输出。"
-        types: [debug, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: cdp2_streams_tail_launch
-        claim: "cudaStreamTailLaunch 等到该父网格发起的所有普通/fire-and-forget 子工作完成后才启动，且仍在父网格完成事件上报之前执行。"
-        types: [conceptual, compare]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: cdp2_streams_named_stream
-        claim: "设备侧 cudaStreamCreate 出的命名流上的子核彼此按流序，但与 fire-and-forget 无边；跨这两种流的数据依赖必须改用 tail launch 或 host 同步。"
-        types: [debug, compare]
-        difficulty: [3]
-        kind: api
-      - id: cdp2_streams_graph_device
-        claim: "CUDA 12 设备侧 cudaGraphLaunch 只能发射已在 host 用设备发射标志实例化的 cudaGraphExec_t，否则 launch 失败。"
-        types: [syntax, debug]
-        difficulty: [3, 4]
-        kind: feature
-      - id: cdp2_streams_null_per_block
-        claim: "设备运行时隐式 NULL 流按 thread block 共享：同 block 向 NULL 流的 launch 保序，不同 block 的 NULL 流之间不插入 host legacy 那种隐式依赖。"
-        types: [conceptual, compare]
-        difficulty: [3]
-        kind: mechanism
-      - id: cdp2_streams_no_stream_sync
-        claim: "设备运行时不提供 cudaStreamSynchronize/cudaStreamQuery；CDP2 要在父网格内等待子核，只能把后续工作放到 cudaStreamTailLaunch。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-      - id: cdp2_streams_create_host_only
-        claim: "CUDA 12 CDP2 下 cudaStreamCreate() 是 host-only API，设备代码编译失败；设备侧只能使用 FireAndForget、TailLaunch 或从 host 传入的流句柄。"
-        types: [syntax, compare]
-        difficulty: [3]
-        kind: feature
-      - id: cdp2_streams_ff_host_join
-        claim: "host 对父核所在流 cudaStreamSynchronize 也不等待 cudaStreamFireAndForget 子核；要在 host 读 FF 输出必须另用事件/图/显式依赖，否则数据竞争。"
-        types: [debug, counterfactual]
-        difficulty: [3, 4]
-        kind: failure
-      - id: cdp2_streams_tail_serial
-        claim: "同一父网格多次 cudaStreamTailLaunch 彼此串行；第二次 tail 子核在第一次 tail 完成之后才启动，不能指望两条 tail 流并发。"
-        types: [conceptual, compare]
-        difficulty: [3, 4]
-        kind: mechanism
-  - id: device_malloc
-    name: 设备堆与参数缓冲
-    leaves:
-      - id: device_malloc_heap_limit
-        claim: "kernel 内 cudaMalloc 从 cudaLimitMallocHeapSize 堆分配，默认堆远小于整卡显存，耗尽返回空指针且不自动增长。"
-        types: [debug, conceptual]
-        difficulty: [2, 3]
-        kind: api
-      - id: device_malloc_free_side
-        claim: "设备 cudaMalloc 的指针必须在设备侧 cudaFree，host cudaFree 该指针非法；反之 kernel 不得 cudaFree host 分配的指针。"
-        types: [debug, syntax]
-        difficulty: [2]
-        kind: failure
-      - id: device_malloc_param_buffer
-        claim: "CDP1 cudaGetParameterBuffer 返回的参数缓冲必须按调用约定对齐并在同一线程随后 cudaLaunchDevice，跨线程传递该缓冲未定义。"
-        types: [syntax, code_complete]
-        difficulty: [3]
-        kind: api
-      - id: device_malloc_no_zerocopy
-        claim: "设备运行时不能分配零拷贝/mapped host 内存，cudaHostAlloc 类 API 在 __device__ 不可用，子核也不能把父核 host 指针当 device 指针解引用。"
-        types: [conceptual, debug]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: device_malloc_default_8mb
-        claim: "默认 cudaLimitMallocHeapSize=8×2^20=8388608B；设备侧累计 cudaMalloc 超过 8MB 且未 SetLimit 时返回 nullptr。"
-        types: [debug, conceptual]
-        difficulty: [2]
-        kind: formula
-      - id: device_malloc_set_host_only
-        claim: "扩大设备堆必须在 host 调用 cudaDeviceSetLimit(cudaLimitMallocHeapSize, n) 且发生在任何使用设备 malloc 的 kernel 之前，运行中再改对该堆无效。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: device_malloc_align256
-        claim: "设备 cudaMalloc 返回指针 alignment=256B（与 host cudaMalloc 相同）；把返回值当作 16B 对齐合法，但不能假设 alignment=512B。"
-        types: [layout, conceptual]
-        difficulty: [2]
-        kind: formula
-      - id: device_malloc_new_same_heap
-        claim: "device 代码 ::operator new / new[] 走同一 cudaLimitMallocHeapSize 堆，耗尽时 new 失败路径与 cudaMalloc 返回空指针同源，不会改走 host 堆。"
-        types: [debug, compare]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: device_malloc_survives_parent
-        claim: "父核 cudaMalloc 的全局指针在父网格退出后仍有效，子核与后续 host kernel 都可使用，直到某一侧按归属规则 cudaFree。"
-        types: [conceptual, debug]
-        difficulty: [2, 3]
-        kind: mechanism
-  - id: parent_child
-    name: 父子可见性与资源
-    leaves:
-      - id: parent_child_visibility
-        claim: "CDP1 中父线程必须 cudaDeviceSynchronize 之后才能看见子网格对全局内存的写；未同步就读是数据竞争。"
-        types: [debug, conceptual]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: parent_child_no_peer_gpu
-        claim: "设备 launch 不能指定另一张 GPU，子网格固定在父网格同一 device 上执行，device 参数被忽略或报错。"
-        types: [conceptual, debug]
-        difficulty: [2]
-        kind: failure
-      - id: parent_child_smem_not_inherited_size
-        claim: "子核的动态共享内存字节数必须在 <<<grid,block,dyn_smem>>> 显式给出，不会从父核的动态 smem 继承；省略则子核 dyn_smem=0。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: parent_child_rdc_link
-        claim: "含设备 launch 的翻译单元必须 -rdc=true 并链接 libcudadevrt；只编译 sm_90a 而不链 cudadevrt 会在设备 launch 符号处链接失败。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: feature
-      - id: parent_child_smem_invisible
-        claim: "父 block 的 __shared__ 对子网格不可见；把父 smem 指针传入子核再解引用是非法地址，不能当快速通道。"
-        types: [debug, conceptual]
-        difficulty: [2, 3]
-        kind: failure
-      - id: parent_child_local_invisible
-        claim: "父线程 local memory / 栈地址对子网格不可见；把 &stack_var 传给子核解引用未定义。"
-        types: [debug, counterfactual]
-        difficulty: [2, 3]
-        kind: failure
-      - id: parent_child_launch_hb
-        claim: "父线程在发起子 launch 之前对全局内存的写对该子网格可见（launch 对该线程构成 happens-before），无需再 __threadfence。"
-        types: [conceptual, compare]
-        difficulty: [3]
-        kind: mechanism
-      - id: parent_child_const_tex_shared
-        claim: "子网格与父网格共享同一 constant 与 texture/surface 对象绑定；host 必须在发射父核之前完成绑定，父核运行中 host 改绑定对子核不可见。"
-        types: [conceptual, debug]
-        difficulty: [3]
-        kind: mechanism
-      - id: parent_child_syncthreads_no_child
-        claim: "父核 __syncthreads 只同步本 block 线程，不等待任何子网格；用它代替 cudaDeviceSynchronize/tail launch 读子核输出是数据竞争。"
-        types: [debug, counterfactual]
-        difficulty: [2, 3]
-        kind: failure
-  - id: device_dsync
-    name: 设备侧 cudaDeviceSynchronize
-    leaves:
-      - id: device_dsync_grid_wide
-        claim: "CDP1 设备侧 cudaDeviceSynchronize 等待的是本父网格所有线程发起的子网格，而不是仅调用线程自己的子核。"
-        types: [conceptual, debug]
-        difficulty: [3]
-        kind: mechanism
-      - id: device_dsync_cuda116
-        claim: "CUDA 11.6 起设备侧 cudaDeviceSynchronize 弃用；继续在 CDP1 目标上调用会告警，迁移路径是 stream 序或 cudaStreamTailLaunch。"
-        types: [syntax, compare]
-        difficulty: [2, 3]
-        kind: feature
-      - id: device_dsync_sm90_removed
-        claim: "对 compute_90/sm_90a（Hopper）及更高编译时，设备侧 cudaDeviceSynchronize 被删除，源码里调用会编译失败。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: feature
-      - id: device_dsync_max_depth_err
-        claim: "调用深度超过 cudaLimitDevRuntimeSyncDepth 时 cudaDeviceSynchronize → cudaErrorLaunchMaxDepthExceeded，且该次调用不会等待子网格。"
-        types: [debug, syntax]
-        difficulty: [2, 3]
-        kind: failure
-      - id: device_dsync_not_stream
-        claim: "设备侧 cudaDeviceSynchronize 不是按流等待：即使子核发到命名流，它仍等待父网格全部子工作（CDP1），不能当 cudaStreamSynchronize 用。"
-        types: [compare, conceptual]
-        difficulty: [3]
-        kind: api
-      - id: device_dsync_host_still_joins
-        claim: "CDP2 去掉设备侧 dsync 后，host 的 cudaDeviceSynchronize 仍等待该设备上全部工作，包括嵌套子核（fire-and-forget 除外的隐式完成规则以当前运行时为准）。"
-        types: [compare, debug]
-        difficulty: [3]
-        kind: mechanism
-      - id: device_dsync_tail_replacement
-        claim: "CDP2 要把「子核完成后继续父逻辑」写成：把后续逻辑放到新的 <<<..., cudaStreamTailLaunch>>> kernel，而不是在父核里 dsync 再往下执行。"
-        types: [code_complete, conceptual]
-        difficulty: [3]
-        kind: api
-      - id: device_dsync_one_thread_blocks_grid
-        claim: "CDP1 中哪怕只有一条父线程调用 cudaDeviceSynchronize，整个父网格进度也会在该同步点耦合，容易把占用从并发打成近串行。"
-        types: [profiling, optimization]
-        difficulty: [3]
-        kind: mechanism
-  - id: nested_launch_cfg
-    name: 嵌套执行配置
-    leaves:
-      - id: nested_launch_cfg_triple
-        claim: "设备侧 <<<grid, block, dynSmem, stream>>> 四元组语义与 host 相同；省略 stream 则进入该 block 的隐式 NULL 流。"
-        types: [syntax, code_complete]
-        difficulty: [2]
-        kind: api
-      - id: nested_launch_cfg_block_1024
-        claim: "子核 block 线程数上限 max_threads=1024：<<<1, 1025>>> 在设备侧同步失败，错误不进入 sticky illegal address。"
-        types: [syntax, debug]
-        difficulty: [2]
-        kind: formula
-      - id: nested_launch_cfg_grid_yz
-        claim: "子网格 gridDim.y 与 gridDim.z 上限各为 65535，与 host 相同；gridDim.y=65536 的设备 launch 立即失败。"
-        types: [syntax, debug]
-        difficulty: [2]
-        kind: formula
-      - id: nested_launch_cfg_occupancy
-        claim: "子核占用按自身寄存器/smem 独立计算，不继承父核 launch_bounds；父核高占用不能保证子核也能同时驻留。"
-        types: [optimization, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: nested_launch_cfg_func_ptr
-        claim: "设备 launch 的函数必须是本编译单元可见的 __global__（或通过 -rdc 链接的 __global__），不能对普通 __device__ 函数使用三重尖括号。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: nested_launch_cfg_dyn_smem_optin
-        claim: "子核动态 smem 超过默认 48KB 时必须在 host 对该 __global__ 先 cudaFuncSetAttribute(..., MaxDynamicSharedMemorySize)，设备 launch 自身不能完成 opt-in。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-      - id: nested_launch_cfg_template_inst
-        claim: "模板 __global__ 的设备 launch 必须在父核编译时已实例化该特化；运行时按函数指针跳到未实例化特化会链接缺失。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: failure
-      - id: nested_launch_cfg_same_cc
-        claim: "子核与父核在同一 CUDA 二进制/同一 sm 目标上执行，不能从 sm_80 父核发射只含 sm_90a WGMMA 的子入口。"
-        types: [compare, conceptual]
-        difficulty: [3]
-        kind: feature
-  - id: device_stream_api
-    name: 设备流 API
-    leaves:
-      - id: device_stream_api_create_nb
-        claim: "CDP1 设备侧创建命名流必须 cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking)；默认阻塞流标志在设备运行时非法。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: device_stream_api_destroy_device
-        claim: "设备 cudaStreamCreateWithFlags 得到的流必须在设备侧 cudaStreamDestroy；host 销毁该句柄非法。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: failure
-      - id: device_stream_api_wait_event
-        claim: "设备运行时支持 cudaEventRecord 与 cudaStreamWaitEvent 来跨流加边；不支持 cudaEventSynchronize（那会阻塞设备线程）。"
-        types: [syntax, compare]
-        difficulty: [3]
-        kind: api
-      - id: device_stream_api_event_no_timing
-        claim: "设备侧 cudaEventCreateWithFlags 必须带 cudaEventDisableTiming；带计时标志的事件创建失败。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: device_stream_api_named_order
-        claim: "同一设备命名流上的子核按发射顺序执行；不同命名流默认并发，跨流数据依赖必须 WaitEvent 或改用同一流。"
-        types: [conceptual, debug]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: device_stream_api_pass_from_host
-        claim: "host 创建的 cudaStream_t 可作为 kernel 参数传入，设备线程可向该流发射子核，并与 host 后续提交到同一流的工作保序。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: api
-      - id: device_stream_api_per_thread
-        claim: "设备代码使用 cudaStreamPerThread 时，每个父线程有独立隐式流；两线程各 launch 到 PerThread 不互相保序。"
-        types: [compare, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: device_stream_api_destroy_before_complete
-        claim: "子核仍在飞行时设备侧 cudaStreamDestroy 该流是未定义行为；必须先保证流上工作完成（CDP1 dsync 或 CDP2 tail/host join）。"
-        types: [debug, counterfactual]
-        difficulty: [3]
-        kind: failure
-  - id: cdp_compile_limits
-    name: 编译与设备限制
-    leaves:
-      - id: cdp_compile_limits_cc35
-        claim: "设备 launch 要求编译目标 ≥ sm_35；对 sm_30 目标使用三重尖括号发射 __global__ 不合法。"
-        types: [syntax, conceptual]
-        difficulty: [2]
-        kind: feature
-      - id: cdp_compile_limits_rdc
-        claim: "sm_35+ 设备 launch 要求 nvcc -rdc=true（或 -dc）并在最终链接加 -lcudadevrt，否则设备 launch 符号未定义。"
-        types: [syntax, debug]
-        difficulty: [2]
-        kind: feature
-      - id: cdp_compile_limits_separate_compile
-        claim: "父核与子核分翻译单元时两边都要可重定位编译，最后一次设备链接生成嵌套可调用的 cubin；只对父单元 -rdc 不够。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: mechanism
-      - id: cdp_compile_limits_stack
-        claim: "深递归 CDP 会叠加每层线程栈；cudaLimitStackSize 过小导致子核栈溢出 sticky fault，过大则减少 occupancy。"
-        types: [optimization, debug]
-        difficulty: [3]
-        kind: failure
-      - id: cdp_compile_limits_printf_fifo
-        claim: "设备 printf 缓冲默认 cudaLimitPrintfFifoSize=1×2^20=1048576B，CDP 多层 printf 打满后后续输出丢弃，不自动扩容。"
-        types: [debug, conceptual]
-        difficulty: [2]
-        kind: formula
-      - id: cdp_compile_limits_no_virtual
-        claim: "作为设备 launch 目标的 __global__ 不能是虚函数，也不能通过 host 函数指针在设备上间接发射未实例化入口。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-      - id: cdp_compile_limits_mps
-        claim: "同一设备上 MPS 客户端使用 CDP 时仍共享 pending/heap 限制的设备级池，一个客户端打满 2048 pending 会拖垮同设备其他客户端的设备 launch。"
-        types: [profiling, conceptual]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: cdp_compile_limits_cuda_arch
-        claim: "设备代码里用 #if __CUDA_ARCH__ >= 350（sm_35）守卫 CDP 路径；host 编译通道 __CUDA_ARCH__ 未定义，不能在 host 侧用该宏裁剪 libcudadevrt 链接。"
-        types: [syntax, counterfactual]
-        difficulty: [2, 3]
-        kind: feature
-  - id: param_launch_api
-    name: 参数缓冲与 launch API
-    leaves:
-      - id: param_launch_api_get_buffer_align
-        claim: "cudaGetParameterBuffer(alignment, size) 的 alignment 必须是 2 的幂且覆盖参数结构对齐；alignment=0 或小于成员对齐则缓冲无效。"
-        types: [syntax, layout]
-        difficulty: [3]
-        kind: api
-      - id: param_launch_api_same_thread
-        claim: "cudaGetParameterBuffer 与随后的 cudaLaunchDevice 必须是同一设备线程；线程 A 取缓冲、线程 B launch 未定义。"
-        types: [debug, code_complete]
-        difficulty: [3]
-        kind: failure
-      - id: param_launch_api_kernel_arg_4k
-        claim: "子核参数块上限与 host 相同 max_param=4096B；cudaGetParameterBuffer 请求 size>4096 或三重尖括号传超 4KB 捕获对象失败。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: formula
-      - id: param_launch_api_by_value
-        claim: "设备 launch 的 __global__ 参数按值拷进参数缓冲；传指针只拷地址不拷对象，大结构体必须先放到全局堆再传指针。"
-        types: [conceptual, layout]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: param_launch_api_launch_device
-        claim: "cudaLaunchDevice(func, buf, grid, block, dynSmem, stream) 是 CDP1 显式发射；func 必须是 __global__ 入口地址，dynSmem 单位为字节。"
-        types: [syntax, code_complete]
-        difficulty: [3]
-        kind: api
-      - id: param_launch_api_triple_preferred
-        claim: "CUDA 11+ 设备侧优先用三重尖括号或 cudaLaunchKernel，cudaGetParameterBuffer 路径仅在手写参数布局时需要，混用两套 API 对同一发射未定义。"
-        types: [compare, syntax]
-        difficulty: [3]
-        kind: api
-      - id: param_launch_api_no_pack_overlap
-        claim: "参数缓冲在 cudaLaunchDevice 返回前属于该线程；launch 返回后运行时拥有该槽，线程再写入原缓冲会破坏后续参数。"
-        types: [debug, counterfactual]
-        difficulty: [3]
-        kind: failure
-      - id: param_launch_api_grid_dim3
-        claim: "设备 launch 的 grid/block 是 dim3，各维为 unsigned int；用有符号负数维度会被转换成超大 uint 并触发 launch 配置非法。"
-        types: [debug, syntax]
-        difficulty: [2]
-        kind: failure
-  - id: cdp_event_graph
-    name: 设备事件与图发射
-    leaves:
-      - id: cdp_event_graph_device_launch_flag
-        claim: "CUDA 12 要在设备上 cudaGraphLaunch，实例化时必须设置设备发射标志（cudaGraphInstantiateFlagDeviceLaunch），缺标志的 exec 图在设备 launch 失败。"
-        types: [syntax, debug]
-        difficulty: [3, 4]
-        kind: feature
-      - id: cdp_event_graph_no_host_node
-        claim: "供设备发射的图不能含 host 节点、等待外部信号的节点或需 host 回调的边；含 host 节点的图实例化 DeviceLaunch 失败。"
-        types: [syntax, compare]
-        difficulty: [3, 4]
-        kind: failure
-      - id: cdp_event_graph_one_device_at_a_time
-        claim: "同一 cudaGraphExec_t 在设备上重入发射前必须保证上次设备 launch 已完成；未完成就再次 cudaGraphLaunch 同一 exec 非法。"
-        types: [debug, conceptual]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: cdp_event_graph_update_host
-        claim: "设备发射用的 exec 图参数更新仍在 host 做（cudaGraphExecUpdate/SetParams）；设备核内不能改图拓扑。"
-        types: [compare, syntax]
-        difficulty: [3]
-        kind: api
-      - id: cdp_event_graph_event_record
-        claim: "CDP1 设备 cudaEventRecord(ev, stream) 把事件插入该设备流；随后其他设备流 cudaStreamWaitEvent 可建立跨流边，但不能从设备 cudaEventSynchronize。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-      - id: cdp_event_graph_event_pool
-        claim: "CDP2 事件与 pending launch 共享配额：同时存在事件数 ≤ 2×pending_count，创建超出上限的事件返回内存/资源错误。"
-        types: [debug, conceptual]
-        difficulty: [3, 4]
-        kind: formula
-      - id: cdp_event_graph_tail_after_graph
-        claim: "设备图 launch 若走普通流，随后的 cudaStreamTailLaunch kernel 会等到该图完成；若图走 FireAndForget，tail 仍等待它，host 完成事件则不等 FF。"
-        types: [compare, conceptual]
-        difficulty: [4]
-        kind: mechanism
-      - id: cdp_event_graph_capture_from_device
-        claim: "stream capture 不能在设备线程上开始；cudaStreamBeginCapture 是 host API，设备侧调用不编译或失败。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-  - id: child_mem_model
-    name: 子网格内存模型
-    leaves:
-      - id: child_mem_model_d2d_async
-        claim: "设备运行时允许 cudaMemcpyAsync 做 D2D；同步 cudaMemcpy 不在设备 API 集内，在 __device__ 调用不会变成合法的阻塞拷贝。"
-        types: [syntax, compare]
-        difficulty: [2, 3]
-        kind: api
-      - id: child_mem_model_memset_async
-        claim: "设备侧 cudaMemsetAsync 合法且可能占用 pending launch 槽；在深度 24 附近与隐式 launch 一样可能触发深度或 pending 失败。"
-        types: [debug, conceptual]
-        difficulty: [3]
-        kind: failure
-      - id: child_mem_model_no_host_ptr
-        claim: "子核不能解引用 host malloc/cudaMallocHost 指针；即便 UVA 在 host kernel 里可用，设备 runtime 也不把 host 页映射给子网格。"
-        types: [debug, conceptual]
-        difficulty: [2, 3]
-        kind: failure
-      - id: child_mem_model_managed
-        claim: "cudaMallocManaged 缓冲可被子核访问，但父核未同步就让 host 同时碰同一 managed 页仍遵循并发托管规则，CDP 不额外放宽。"
-        types: [compare, debug]
-        difficulty: [3]
-        kind: mechanism
-      - id: child_mem_model_peer_illegal
-        claim: "子核不能 cudaMemcpyAsync 到另一 GPU 的 peer 指针并指望设备 runtime 完成跨卡拷贝；设备 launch 固定本卡，跨卡必须 host 侧。"
-        types: [debug, counterfactual]
-        difficulty: [3]
-        kind: failure
-      - id: child_mem_model_const_size
-        claim: "constant 内存仍是设备级 size=64KB 池，子核与父核争用同一 __constant__ 镜像；父核运行中 host cudaMemcpyToSymbol 对已发射子核不可见。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: formula
-      - id: child_mem_model_texture_object
-        claim: "host 创建的 cudaTextureObject_t 按值传入父核再传给子核可以采样；在设备上改写该 64-bit 句柄不会创建新绑定。"
-        types: [syntax, conceptual]
-        difficulty: [2, 3]
-        kind: api
-      - id: child_mem_model_cdp2_see_child_writes
-        claim: "CDP2 父核不能 dsync，因此父线程直接读子核全局写是数据竞争；要把读侧放到 cudaStreamTailLaunch 或 host join 之后。"
-        types: [debug, code_complete]
-        difficulty: [3]
-        kind: mechanism
+- id: nesting_depth
+  name: 嵌套深度
+  leaves:
+  - id: nesting_depth_hw24
+    claim: CUDA Dynamic Parallelism 硬件最大嵌套深度 max_depth=24（host launch 为第 0 层），第 25 层 device launch 失败。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: nesting_depth_sync_default
+    claim: CDP1 默认 cudaLimitDevRuntimeSyncDepth 为 2（含 host 层），更深的 cudaDeviceSynchronize 返回错误且不会合子网格。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: nesting_depth_cdp2_no_dsync
+    claim: CUDA 11.6 起 device 侧 cudaDeviceSynchronize 已弃用，对 compute_90+（Hopper）编译直接删除，CDP2 禁止父块同步子网格。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: nesting_depth_memcpy_counts
+    claim: 设备侧 cudaMemcpyAsync 可能再产生一次隐式 kernel launch 并计入嵌套深度，在已接近 24 层时会让看似无 launch 的拷贝失败。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    kind: failure
+  - id: nesting_depth_sync_set_host
+    claim: cudaDeviceSetLimit(cudaLimitDevRuntimeSyncDepth, d) 必须在 host 于顶层 kernel 发射前调用；设 d=1 时父核内 cudaDeviceSynchronize
+      立即失败。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: nesting_depth_sync_mem
+    claim: CDP1 每把 cudaLimitDevRuntimeSyncDepth 加 1 就为该层预留同步状态内存；从默认 2 提到 24 会显著增加设备侧预留，而非只改计数器。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: nesting_depth_launch_beyond_sync
+    claim: 子网格 launch 可以深于 cudaLimitDevRuntimeSyncDepth，但超过该深度再调 cudaDeviceSynchronize → cudaErrorLaunchMaxDepthExceeded，子网格不会因此被等待。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    kind: failure
+  - id: nesting_depth_parent_complete
+    claim: CDP1 中父网格在其发起的全部非 fire-and-forget 子网格完成前不算完成，host 对该父核所在流的同步会等到这些子网格。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: nesting_depth_cdp2_unsupported_limit
+    claim: CDP2 或 Hopper sm_90+ 上查询/设置 cudaLimitDevRuntimeSyncDepth 返回 cudaErrorUnsupportedLimit，因为设备侧同步深度已不存在。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+- id: pending_launch
+  name: 待发射池
+  leaves:
+  - id: pending_launch_default_2048
+    claim: 待发射子网格池默认 pending_count=2048，超过后 cudaGetLastError=cudaErrorLaunchPendingCountExceeded，可用 cudaLimitDevRuntimePendingLaunchCount
+      扩大。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: pending_launch_virtualized
+    claim: 待发射计数超过预留池后运行时坠入虚拟化队列，延迟数量级高于硬件槽，即使未报错也会把细粒度 CDP 打成串行。
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: pending_launch_set_before
+    claim: cudaDeviceSetLimit(cudaLimitDevRuntimePendingLaunchCount, N) 必须在 host 发射顶层 kernel 之前设置，kernel
+      运行中再改对该次嵌套无效。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: pending_launch_one_thread_flood
+    claim: 父网格每个线程各 launch 一个 1×1 子核时，256 线程×8 block=2048 恰好打满默认池，再多一个 launch 即 pending overflow。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: pending_launch_cdp2_no_virtual
+    claim: CUDA 12 CDP2 取消虚拟化 pending 池：固定槽满后不会降级排队，必须把 cudaLimitDevRuntimePendingLaunchCount 设到覆盖峰值未完成
+      launch。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: pending_launch_cdp2_oor
+    claim: CDP2 固定池满时设备 launch 失败，线程 last error 为 cudaErrorLaunchOutOfResources（事件槽耗尽则为 cudaErrorMemoryAllocation），子核不会入队。
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+  - id: pending_launch_events_twice
+    claim: CDP2 同时存活的设备事件上限 = 2 × pending_launch_count；事件在对应 launch 完成后才销毁，提前 cudaEventCreate 打满会让后续 launch
+      失败。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: pending_launch_get_limit
+    claim: 实际槽数以 cudaDeviceGetLimit(cudaLimitDevRuntimePendingLaunchCount) 为准；默认 2048，但先前 SetLimit 或驱动改写后不能再假设
+      2048。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: pending_launch_device_wide
+    claim: pending launch 池按整设备而不是按流计：两条设备命名流上未完成子核之和超过 N 同样溢出，不能靠换流句柄规避。
+    types:
+    - conceptual
+    - counterfactual
+    difficulty:
+    - 3
+    kind: mechanism
+- id: cdp2_streams
+  name: Fire-and-forget 与尾发射
+  leaves:
+  - id: cdp2_streams_fire_forget
+    claim: cudaStreamFireAndForget 上的子网格与父网格并发、互不等待，父 kernel 退出不蕴含子核完成，不能在父核返回后立即在 host 读子核输出。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cdp2_streams_tail_launch
+    claim: cudaStreamTailLaunch 等到该父网格发起的所有普通/fire-and-forget 子工作完成后才启动，且仍在父网格完成事件上报之前执行。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: cdp2_streams_named_stream
+    claim: 设备侧 cudaStreamCreate 出的命名流上的子核彼此按流序，但与 fire-and-forget 无边；跨这两种流的数据依赖必须改用 tail launch 或 host
+      同步。
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 3
+    kind: api
+  - id: cdp2_streams_graph_device
+    claim: CUDA 12 设备侧 cudaGraphLaunch 只能发射已在 host 用设备发射标志实例化的 cudaGraphExec_t，否则 launch 失败。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: cdp2_streams_null_per_block
+    claim: 设备运行时隐式 NULL 流按 thread block 共享：同 block 向 NULL 流的 launch 保序，不同 block 的 NULL 流之间不插入 host legacy
+      那种隐式依赖。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cdp2_streams_no_stream_sync
+    claim: 设备运行时不提供 cudaStreamSynchronize/cudaStreamQuery；CDP2 要在父网格内等待子核，只能把后续工作放到 cudaStreamTailLaunch。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: cdp2_streams_create_host_only
+    claim: CUDA 12 CDP2 下 cudaStreamCreate() 是 host-only API，设备代码编译失败；设备侧只能使用 FireAndForget、TailLaunch
+      或从 host 传入的流句柄。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: cdp2_streams_ff_host_join
+    claim: host 对父核所在流 cudaStreamSynchronize 也不等待 cudaStreamFireAndForget 子核；要在 host 读 FF 输出必须另用事件/图/显式依赖，否则数据竞争。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: cdp2_streams_tail_serial
+    claim: 同一父网格多次 cudaStreamTailLaunch 彼此串行；第二次 tail 子核在第一次 tail 完成之后才启动，不能指望两条 tail 流并发。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+- id: device_malloc
+  name: 设备堆与参数缓冲
+  leaves:
+  - id: device_malloc_heap_limit
+    claim: kernel 内 cudaMalloc 从 cudaLimitMallocHeapSize 堆分配，默认堆远小于整卡显存，耗尽返回空指针且不自动增长。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: device_malloc_free_side
+    claim: 设备 cudaMalloc 的指针必须在设备侧 cudaFree，host cudaFree 该指针非法；反之 kernel 不得 cudaFree host 分配的指针。
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    kind: failure
+  - id: device_malloc_param_buffer
+    claim: CDP1 cudaGetParameterBuffer 返回的参数缓冲必须按调用约定对齐并在同一线程随后 cudaLaunchDevice，跨线程传递该缓冲未定义。
+    types:
+    - syntax
+    - code_complete
+    difficulty:
+    - 3
+    kind: api
+  - id: device_malloc_no_zerocopy
+    claim: 设备运行时不能分配零拷贝/mapped host 内存，cudaHostAlloc 类 API 在 __device__ 不可用，子核也不能把父核 host 指针当 device 指针解引用。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: device_malloc_default_8mb
+    claim: 默认 cudaLimitMallocHeapSize=8×2^20=8388608B；设备侧累计 cudaMalloc 超过 8MB 且未 SetLimit 时返回 nullptr。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+  - id: device_malloc_set_host_only
+    claim: 扩大设备堆必须在 host 调用 cudaDeviceSetLimit(cudaLimitMallocHeapSize, n) 且发生在任何使用设备 malloc 的 kernel
+      之前，运行中再改对该堆无效。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: device_malloc_align256
+    claim: 设备 cudaMalloc 返回指针 alignment=256B（与 host cudaMalloc 相同）；把返回值当作 16B 对齐合法，但不能假设 alignment=512B。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+  - id: device_malloc_new_same_heap
+    claim: device 代码 ::operator new / new[] 走同一 cudaLimitMallocHeapSize 堆，耗尽时 new 失败路径与 cudaMalloc 返回空指针同源，不会改走
+      host 堆。
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: device_malloc_survives_parent
+    claim: 父核 cudaMalloc 的全局指针在父网格退出后仍有效，子核与后续 host kernel 都可使用，直到某一侧按归属规则 cudaFree。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+- id: parent_child
+  name: 父子可见性与资源
+  leaves:
+  - id: parent_child_visibility
+    claim: CDP1 中父线程必须 cudaDeviceSynchronize 之后才能看见子网格对全局内存的写；未同步就读是数据竞争。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: parent_child_no_peer_gpu
+    claim: 设备 launch 不能指定另一张 GPU，子网格固定在父网格同一 device 上执行，device 参数被忽略或报错。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    kind: failure
+  - id: parent_child_smem_not_inherited_size
+    claim: 子核的动态共享内存字节数必须在 <<<grid,block,dyn_smem>>> 显式给出，不会从父核的动态 smem 继承；省略则子核 dyn_smem=0。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: parent_child_rdc_link
+    claim: 含设备 launch 的翻译单元必须 -rdc=true 并链接 libcudadevrt；只编译 sm_90a 而不链 cudadevrt 会在设备 launch 符号处链接失败。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: parent_child_smem_invisible
+    claim: 父 block 的 __shared__ 对子网格不可见；把父 smem 指针传入子核再解引用是非法地址，不能当快速通道。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: parent_child_local_invisible
+    claim: 父线程 local memory / 栈地址对子网格不可见；把 &stack_var 传给子核解引用未定义。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: parent_child_launch_hb
+    claim: 父线程在发起子 launch 之前对全局内存的写对该子网格可见（launch 对该线程构成 happens-before），无需再 __threadfence。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: parent_child_const_tex_shared
+    claim: 子网格与父网格共享同一 constant 与 texture/surface 对象绑定；host 必须在发射父核之前完成绑定，父核运行中 host 改绑定对子核不可见。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: parent_child_syncthreads_no_child
+    claim: 父核 __syncthreads 只同步本 block 线程，不等待任何子网格；用它代替 cudaDeviceSynchronize/tail launch 读子核输出是数据竞争。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+- id: device_dsync
+  name: 设备侧 cudaDeviceSynchronize
+  leaves:
+  - id: device_dsync_grid_wide
+    claim: CDP1 设备侧 cudaDeviceSynchronize 等待的是本父网格所有线程发起的子网格，而不是仅调用线程自己的子核。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: device_dsync_cuda116
+    claim: CUDA 11.6 起设备侧 cudaDeviceSynchronize 弃用；继续在 CDP1 目标上调用会告警，迁移路径是 stream 序或 cudaStreamTailLaunch。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: device_dsync_sm90_removed
+    claim: 对 compute_90/sm_90a（Hopper）及更高编译时，设备侧 cudaDeviceSynchronize 被删除，源码里调用会编译失败。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: device_dsync_max_depth_err
+    claim: 调用深度超过 cudaLimitDevRuntimeSyncDepth 时 cudaDeviceSynchronize → cudaErrorLaunchMaxDepthExceeded，且该次调用不会等待子网格。
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: device_dsync_not_stream
+    claim: 设备侧 cudaDeviceSynchronize 不是按流等待：即使子核发到命名流，它仍等待父网格全部子工作（CDP1），不能当 cudaStreamSynchronize 用。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: device_dsync_host_still_joins
+    claim: CDP2 去掉设备侧 dsync 后，host 的 cudaDeviceSynchronize 仍等待该设备上全部工作，包括嵌套子核（fire-and-forget 除外的隐式完成规则以当前运行时为准）。
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: device_dsync_tail_replacement
+    claim: CDP2 要把「子核完成后继续父逻辑」写成：把后续逻辑放到新的 <<<..., cudaStreamTailLaunch>>> kernel，而不是在父核里 dsync 再往下执行。
+    types:
+    - code_complete
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: device_dsync_one_thread_blocks_grid
+    claim: CDP1 中哪怕只有一条父线程调用 cudaDeviceSynchronize，整个父网格进度也会在该同步点耦合，容易把占用从并发打成近串行。
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+- id: nested_launch_cfg
+  name: 嵌套执行配置
+  leaves:
+  - id: nested_launch_cfg_triple
+    claim: 设备侧 <<<grid, block, dynSmem, stream>>> 四元组语义与 host 相同；省略 stream 则进入该 block 的隐式 NULL 流。
+    types:
+    - syntax
+    - code_complete
+    difficulty:
+    - 2
+    kind: api
+  - id: nested_launch_cfg_block_1024
+    claim: 子核 block 线程数上限 max_threads=1024：<<<1, 1025>>> 在设备侧同步失败，错误不进入 sticky illegal address。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: formula
+  - id: nested_launch_cfg_grid_yz
+    claim: 子网格 gridDim.y 与 gridDim.z 上限各为 65535，与 host 相同；gridDim.y=65536 的设备 launch 立即失败。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: formula
+  - id: nested_launch_cfg_occupancy
+    claim: 子核占用按自身寄存器/smem 独立计算，不继承父核 launch_bounds；父核高占用不能保证子核也能同时驻留。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: nested_launch_cfg_func_ptr
+    claim: 设备 launch 的函数必须是本编译单元可见的 __global__（或通过 -rdc 链接的 __global__），不能对普通 __device__ 函数使用三重尖括号。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: nested_launch_cfg_dyn_smem_optin
+    claim: 子核动态 smem 超过默认 48KB 时必须在 host 对该 __global__ 先 cudaFuncSetAttribute(..., MaxDynamicSharedMemorySize)，设备
+      launch 自身不能完成 opt-in。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: nested_launch_cfg_template_inst
+    claim: 模板 __global__ 的设备 launch 必须在父核编译时已实例化该特化；运行时按函数指针跳到未实例化特化会链接缺失。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: nested_launch_cfg_same_cc
+    claim: 子核与父核在同一 CUDA 二进制/同一 sm 目标上执行，不能从 sm_80 父核发射只含 sm_90a WGMMA 的子入口。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+- id: device_stream_api
+  name: 设备流 API
+  leaves:
+  - id: device_stream_api_create_nb
+    claim: CDP1 设备侧创建命名流必须 cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking)；默认阻塞流标志在设备运行时非法。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: device_stream_api_destroy_device
+    claim: 设备 cudaStreamCreateWithFlags 得到的流必须在设备侧 cudaStreamDestroy；host 销毁该句柄非法。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: device_stream_api_wait_event
+    claim: 设备运行时支持 cudaEventRecord 与 cudaStreamWaitEvent 来跨流加边；不支持 cudaEventSynchronize（那会阻塞设备线程）。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: api
+  - id: device_stream_api_event_no_timing
+    claim: 设备侧 cudaEventCreateWithFlags 必须带 cudaEventDisableTiming；带计时标志的事件创建失败。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: device_stream_api_named_order
+    claim: 同一设备命名流上的子核按发射顺序执行；不同命名流默认并发，跨流数据依赖必须 WaitEvent 或改用同一流。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: device_stream_api_pass_from_host
+    claim: host 创建的 cudaStream_t 可作为 kernel 参数传入，设备线程可向该流发射子核，并与 host 后续提交到同一流的工作保序。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: device_stream_api_per_thread
+    claim: 设备代码使用 cudaStreamPerThread 时，每个父线程有独立隐式流；两线程各 launch 到 PerThread 不互相保序。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: device_stream_api_destroy_before_complete
+    claim: 子核仍在飞行时设备侧 cudaStreamDestroy 该流是未定义行为；必须先保证流上工作完成（CDP1 dsync 或 CDP2 tail/host join）。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    kind: failure
+- id: cdp_compile_limits
+  name: 编译与设备限制
+  leaves:
+  - id: cdp_compile_limits_cc35
+    claim: 设备 launch 要求编译目标 ≥ sm_35；对 sm_30 目标使用三重尖括号发射 __global__ 不合法。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: feature
+  - id: cdp_compile_limits_rdc
+    claim: sm_35+ 设备 launch 要求 nvcc -rdc=true（或 -dc）并在最终链接加 -lcudadevrt，否则设备 launch 符号未定义。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: feature
+  - id: cdp_compile_limits_separate_compile
+    claim: 父核与子核分翻译单元时两边都要可重定位编译，最后一次设备链接生成嵌套可调用的 cubin；只对父单元 -rdc 不够。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cdp_compile_limits_stack
+    claim: 深递归 CDP 会叠加每层线程栈；cudaLimitStackSize 过小导致子核栈溢出 sticky fault，过大则减少 occupancy。
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: cdp_compile_limits_printf_fifo
+    claim: 设备 printf 缓冲默认 cudaLimitPrintfFifoSize=1×2^20=1048576B，CDP 多层 printf 打满后后续输出丢弃，不自动扩容。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+  - id: cdp_compile_limits_no_virtual
+    claim: 作为设备 launch 目标的 __global__ 不能是虚函数，也不能通过 host 函数指针在设备上间接发射未实例化入口。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: cdp_compile_limits_mps
+    claim: 同一设备上 MPS 客户端使用 CDP 时仍共享 pending/heap 限制的设备级池，一个客户端打满 2048 pending 会拖垮同设备其他客户端的设备 launch。
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: cdp_compile_limits_cuda_arch
+    claim: '设备代码里用 #if __CUDA_ARCH__ >= 350（sm_35）守卫 CDP 路径；host 编译通道 __CUDA_ARCH__ 未定义，不能在 host 侧用该宏裁剪
+      libcudadevrt 链接。'
+    types:
+    - syntax
+    - counterfactual
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+- id: param_launch_api
+  name: 参数缓冲与 launch API
+  leaves:
+  - id: param_launch_api_get_buffer_align
+    claim: cudaGetParameterBuffer(alignment, size) 的 alignment 必须是 2 的幂且覆盖参数结构对齐；alignment=0 或小于成员对齐则缓冲无效。
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    kind: api
+  - id: param_launch_api_same_thread
+    claim: cudaGetParameterBuffer 与随后的 cudaLaunchDevice 必须是同一设备线程；线程 A 取缓冲、线程 B launch 未定义。
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 3
+    kind: failure
+  - id: param_launch_api_kernel_arg_4k
+    claim: 子核参数块上限与 host 相同 max_param=4096B；cudaGetParameterBuffer 请求 size>4096 或三重尖括号传超 4KB 捕获对象失败。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: param_launch_api_by_value
+    claim: 设备 launch 的 __global__ 参数按值拷进参数缓冲；传指针只拷地址不拷对象，大结构体必须先放到全局堆再传指针。
+    types:
+    - conceptual
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: param_launch_api_launch_device
+    claim: cudaLaunchDevice(func, buf, grid, block, dynSmem, stream) 是 CDP1 显式发射；func 必须是 __global__ 入口地址，dynSmem
+      单位为字节。
+    types:
+    - syntax
+    - code_complete
+    difficulty:
+    - 3
+    kind: api
+  - id: param_launch_api_triple_preferred
+    claim: CUDA 11+ 设备侧优先用三重尖括号或 cudaLaunchKernel，cudaGetParameterBuffer 路径仅在手写参数布局时需要，混用两套 API 对同一发射未定义。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: param_launch_api_no_pack_overlap
+    claim: 参数缓冲在 cudaLaunchDevice 返回前属于该线程；launch 返回后运行时拥有该槽，线程再写入原缓冲会破坏后续参数。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    kind: failure
+  - id: param_launch_api_grid_dim3
+    claim: 设备 launch 的 grid/block 是 dim3，各维为 unsigned int；用有符号负数维度会被转换成超大 uint 并触发 launch 配置非法。
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    kind: failure
+- id: cdp_event_graph
+  name: 设备事件与图发射
+  leaves:
+  - id: cdp_event_graph_device_launch_flag
+    claim: CUDA 12 要在设备上 cudaGraphLaunch，实例化时必须设置设备发射标志（cudaGraphInstantiateFlagDeviceLaunch），缺标志的 exec
+      图在设备 launch 失败。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: cdp_event_graph_no_host_node
+    claim: 供设备发射的图不能含 host 节点、等待外部信号的节点或需 host 回调的边；含 host 节点的图实例化 DeviceLaunch 失败。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: cdp_event_graph_one_device_at_a_time
+    claim: 同一 cudaGraphExec_t 在设备上重入发射前必须保证上次设备 launch 已完成；未完成就再次 cudaGraphLaunch 同一 exec 非法。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: cdp_event_graph_update_host
+    claim: 设备发射用的 exec 图参数更新仍在 host 做（cudaGraphExecUpdate/SetParams）；设备核内不能改图拓扑。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: cdp_event_graph_event_record
+    claim: CDP1 设备 cudaEventRecord(ev, stream) 把事件插入该设备流；随后其他设备流 cudaStreamWaitEvent 可建立跨流边，但不能从设备 cudaEventSynchronize。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: cdp_event_graph_event_pool
+    claim: CDP2 事件与 pending launch 共享配额：同时存在事件数 ≤ 2×pending_count，创建超出上限的事件返回内存/资源错误。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: cdp_event_graph_tail_after_graph
+    claim: 设备图 launch 若走普通流，随后的 cudaStreamTailLaunch kernel 会等到该图完成；若图走 FireAndForget，tail 仍等待它，host 完成事件则不等
+      FF。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: cdp_event_graph_capture_from_device
+    claim: stream capture 不能在设备线程上开始；cudaStreamBeginCapture 是 host API，设备侧调用不编译或失败。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+- id: child_mem_model
+  name: 子网格内存模型
+  leaves:
+  - id: child_mem_model_d2d_async
+    claim: 设备运行时允许 cudaMemcpyAsync 做 D2D；同步 cudaMemcpy 不在设备 API 集内，在 __device__ 调用不会变成合法的阻塞拷贝。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: child_mem_model_memset_async
+    claim: 设备侧 cudaMemsetAsync 合法且可能占用 pending launch 槽；在深度 24 附近与隐式 launch 一样可能触发深度或 pending 失败。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: child_mem_model_no_host_ptr
+    claim: 子核不能解引用 host malloc/cudaMallocHost 指针；即便 UVA 在 host kernel 里可用，设备 runtime 也不把 host 页映射给子网格。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: child_mem_model_managed
+    claim: cudaMallocManaged 缓冲可被子核访问，但父核未同步就让 host 同时碰同一 managed 页仍遵循并发托管规则，CDP 不额外放宽。
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: child_mem_model_peer_illegal
+    claim: 子核不能 cudaMemcpyAsync 到另一 GPU 的 peer 指针并指望设备 runtime 完成跨卡拷贝；设备 launch 固定本卡，跨卡必须 host 侧。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    kind: failure
+  - id: child_mem_model_const_size
+    claim: constant 内存仍是设备级 size=64KB 池，子核与父核争用同一 __constant__ 镜像；父核运行中 host cudaMemcpyToSymbol 对已发射子核不可见。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: child_mem_model_texture_object
+    claim: host 创建的 cudaTextureObject_t 按值传入父核再传给子核可以采样；在设备上改写该 64-bit 句柄不会创建新绑定。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: child_mem_model_cdp2_see_child_writes
+    claim: CDP2 父核不能 dsync，因此父线程直接读子核全局写是数据竞争；要把读侧放到 cudaStreamTailLaunch 或 host join 之后。
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 3
+    kind: mechanism

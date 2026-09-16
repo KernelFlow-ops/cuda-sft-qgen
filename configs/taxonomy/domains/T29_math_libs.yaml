@@ -1,544 +1,909 @@
 id: T29
 name: 计算库深水
 children:
-  - id: cusparse_spmm
-    name: cuSPARSE SpMM
-    leaves:
-      - id: cusparse_spmm_batch_65535
-        claim: "cusparseSpMM 跨批次上限 max_batch=65535，cusparseCsrSetStridedBatch 超过该值非法；CUSPARSE_SPMM_CSR_ALG3 还不支持 strided batch。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: formula
-      - id: cusparse_spmm_det_alg
-        claim: "仅 CUSPARSE_SPMM_COO_ALG2 与 CUSPARSE_SPMM_CSR_ALG3 保证 bitwise 确定性，COO_ALG1/ALG3 同输入多次运行结果可以不同。"
-        types: [compare, conceptual]
-        difficulty: [3]
-        kind: numeric
-      - id: cusparse_spmm_ld
-        claim: "cuSPARSE dense 布局：行主 ld ≥ n（列数），列主 ld ≥ m（行数），否则 SpMM 描述符创建或执行失败；不满足 → 非法。"
-        types: [layout, debug]
-        difficulty: [2]
-        kind: formula
-      - id: cusparse_spmm_index64
-        claim: "nnz 或行列超过 2^31-1 时必须用 CUSPARSE_INDEX_64I；32I 描述符配 64-bit 偏移会截断索引并读错 CSR 行指针。"
-        types: [debug, syntax]
-        difficulty: [2, 3]
-        kind: failure
-      - id: cusparse_spmm_bsr_det
-        claim: "CUSPARSE_SPMM_BSR_ALG1 保证 bitwise 确定且不需额外 workspace，但要求 opA=NON_TRANSPOSE 且 A 的 block 非列主。"
-        types: [compare, conceptual]
-        difficulty: [3]
-        kind: numeric
-      - id: cusparse_spmm_workspace
-        claim: "cusparseSpMM_bufferSize 给出的 device workspace 必须在 SpMM 执行时传入；CSR_ALG3 需求>0 时 workspace=NULL → 执行失败。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: cusparse_spmm_conj_csr3
-        claim: "CUSPARSE_SPMM_CSR_ALG3 不支持 opB=CONJUGATE_TRANSPOSE，也不支持 CUDA_C_16F/CUDA_C_16BF；这些组合必须换算法或类型。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: failure
-      - id: cusparse_spmm_align16
-        claim: "SpMM 的 csrOffsets/columns/values 与 dense 指针需满足库对齐（常见 16B）；仅 8B 对齐的 double 缓冲可在部分算法上报 misaligned address。"
-        types: [layout, debug]
-        difficulty: [3]
-        kind: failure
-      - id: cusparse_spmm_default_nondet
-        claim: "CUSPARSE_SPMM_ALG_DEFAULT 可能落到 COO_ALG1 等非确定路径；要 bit 稳定必须显式传 COO_ALG2 或 CSR_ALG3，不能依赖 DEFAULT。"
-        types: [counterfactual, compare]
-        difficulty: [3]
-        kind: numeric
-  - id: cusolver_dn
-    name: cuSOLVER 稠密分解
-    leaves:
-      - id: cusolver_dn_gesvdj_32
-        claim: "cusolverDn<t>gesvdjBatched：m≤32 且 n≤32 → 合法；更大尺寸必须改 gesvdj 非 batched 或 gesvdaStridedBatched。"
-        types: [syntax, conceptual]
-        difficulty: [2, 3]
-        kind: formula
-      - id: cusolver_dn_colmajor
-        claim: "cuSOLVER 稠密 API 按列主存储，A[i+lda*j] 为元素 (i,j) 且 lda≥m；对 C 行主缓冲直接调用 potrf 分解的是转置含义的矩阵。"
-        types: [layout, debug]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: cusolver_dn_two_phase
-        claim: "Xpotrf 必须先 bufferSize 再传入恰好 lwork 的 device workspace，lwork 偏小返回 CUSOLVER_STATUS_INVALID_VALUE 或写越界。"
-        types: [syntax, debug]
-        difficulty: [2]
-        kind: api
-      - id: cusolver_dn_64bit
-        claim: "64-bit 维度走 cusolverDnXgesvd 等 DnX API，旧的 DnSgesvd 的 int m,n 在 m>2^31-1 时不能表示，截断后 info 非零。"
-        types: [compare, syntax]
-        difficulty: [3]
-        kind: failure
-      - id: cusolver_dn_info_device
-        claim: "potrf/getrf 的 info 必须是 device 指针；传 host int* 会在设备写 info 时 illegal address，而不是返回 host 可读的 info=-1。"
-        types: [debug, syntax]
-        difficulty: [2, 3]
-        kind: failure
-      - id: cusolver_dn_handle_stream
-        claim: "cusolverDnSetStream 后所有稠密 kernel 进该流；handle 默认流与调用线程的 NULL 流混用会造成隐式同步，workspace 仍按 handle 生命周期。"
-        types: [syntax, conceptual]
-        difficulty: [2]
-        kind: api
-      - id: cusolver_dn_lda_n
-        claim: "potrf 对 N×N 矩阵要求 lda≥N；lda=N-1 时描述非法或读越界，不能靠只分配 N*N 紧凑行主来凑列主 API。"
-        types: [layout, debug]
-        difficulty: [2]
-        kind: formula
-      - id: cusolver_dn_getrf_pivot
-        claim: "getrf 的 ipiv 是 device 数组长度 min(m,n)；省略 pivot 缓冲或长度不足会在分解时写越界。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: cusolver_dn_x_params
-        claim: "cusolverDnXpotrf 的 cuSolverDnParams_t 与 64-bit 维必须配对；把 32-bit DnSpotrf 的 int workspace 当成 X API 的 size_t lwork 混用会估错字节。"
-        types: [compare, syntax]
-        difficulty: [3]
-        kind: api
-  - id: cutensor_contraction
-    name: cuTENSOR 收缩
-    leaves:
-      - id: cutensor_contraction_align256
-        claim: "cutensorTensorDescriptor 默认对齐 alignment=256B（与 cudaMalloc 一致），从偏移 128B 的子缓冲创建描述符会失败。"
-        types: [layout, debug]
-        difficulty: [2, 3]
-        kind: formula
-      - id: cutensor_contraction_colmajor
-        claim: "未给 strides 时 cuTENSOR 假定广义列主：最左模式 stride=1，strides 从左到右递增；行主必须显式传入递减 strides。"
-        types: [layout, conceptual]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: cutensor_contraction_plan
-        claim: "cutensorEstimateWorkspaceSize 给出的 workspace 必须在 cutensorContract 时提供，workspace=NULL 且需求>0 时执行失败。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: cutensor_contraction_modes
-        claim: "收缩用 Einstein 记号 mk,nk→mn 要求两个输入共享的 k 模式 extent 相等，extent 不一致在创建 operation descriptor 时被拒。"
-        types: [debug, conceptual]
-        difficulty: [2, 3]
-        kind: failure
-      - id: cutensor_contraction_unique_modes
-        claim: "同一张量描述符内 mode 标签必须唯一；A 上出现两个 'k' 标签会在创建 descriptor 时失败，不能靠重复 mode 表示对角。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: failure
-      - id: cutensor_contraction_compute_type
-        claim: "FP16 输入配 CUTENSOR_COMPUTE_32F 在累加器走 FP32；配 16F compute 会降精度，同一输入两次 compute type 的输出 bit 不同。"
-        types: [compare, conceptual]
-        difficulty: [2, 3]
-        kind: numeric
-      - id: cutensor_contraction_align_override
-        claim: "若张量基址只有 16B 对齐，创建描述符必须显式声明 alignment=16；仍填 256 会在 plan/execute 因对齐不满足而失败。"
-        types: [layout, debug]
-        difficulty: [3]
-        kind: api
-      - id: cutensor_contraction_plan_cache
-        claim: "同一 handle 上重复相同 contraction 可走 plan 缓存；workspace 上限变了必须重新 create plan，沿用旧 plan 会在 execute 发现 workspace 不足。"
-        types: [optimization, debug]
-        difficulty: [3]
-        kind: mechanism
-      - id: cutensor_contraction_jit
-        claim: "cuTENSOR 2.x 可能 JIT 生成 kernel，第一次 plan 含编译延迟；workspace 与 alignment 约束在 JIT 后仍然执行期检查，不会因为 JIT 而放宽 256B 默认。"
-        types: [profiling, conceptual]
-        difficulty: [3]
-        kind: mechanism
-  - id: cufft_layout
-    name: cuFFT 布局
-    leaves:
-      - id: cufft_layout_r2c_half
-        claim: "长度 N 的 R2C 只写 floor(N/2)+1 个 cufftComplex；N=16 时输出 9 个复数，按 N 个复数分配会在 batch 间距上读到下一批的重叠。"
-        types: [layout, conceptual]
-        difficulty: [2]
-        kind: formula
-      - id: cufft_layout_inplace_pad
-        claim: "原地 R2C 要求最内维 pad 到 2*(N/2+1) 个 real，即 N=256 时每行至少 258 个 float；不 pad 会在写 Hermitian 半谱时越界。"
-        types: [layout, debug]
-        difficulty: [2, 3]
-        kind: formula
-      - id: cufft_layout_plan_many
-        claim: "cufftPlanMany 的 idist/odist 是相邻 batch 首元素距离；R2C 若 odist 仍填 N 而不是 N/2+1，第二批输出覆盖第一批尾部。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: cufft_layout_embed_null
-        claim: "inembed/onembed 传 NULL 时忽略 istride/idist 等高级布局，一律用紧密默认 stride；此时非零 istride 不会生效。"
-        types: [syntax, counterfactual]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: cufft_layout_c2r_destroy
-        claim: "C2R 输入必须是 Hermitian 半谱长度 = floor(N/2)+1；按 N 个复数当输入会读越界或产出错误实序列。"
-        types: [layout, debug]
-        difficulty: [2, 3]
-        kind: formula
-      - id: cufft_layout_istride
-        claim: "非 NULL inembed 时 istride 是同一 FFT 内相邻元素距离；istride=2 表示隔元抽取，idist 仍以元素计不是字节。"
-        types: [layout, syntax]
-        difficulty: [3]
-        kind: api
-      - id: cufft_layout_batch_rank
-        claim: "cufftPlan1d/2d/3d 的 batch 与 many 接口的 batch 都计入同一 plan；rank>3 必须走 PlanMany 的 n[]，不能用 Plan3d 堆第 4 维。"
-        types: [syntax, conceptual]
-        difficulty: [2, 3]
-        kind: api
-      - id: cufft_layout_align
-        claim: "cuFFT 输入/输出/workArea 指针通常需至少 16B 对齐；从 offset=8B 的子缓冲做 C2C 可能 CUFFT_INVALID_VALUE 或设备 misaligned。"
-        types: [layout, debug]
-        difficulty: [2, 3]
-        kind: failure
-      - id: cufft_layout_compat_size
-        claim: "cufftSetCompatibilityMode 不改变 R2C 半谱长度公式 floor(N/2)+1；它只影响填充/布局兼容，不能用来省略 pad。"
-        types: [compare, conceptual]
-        difficulty: [3]
-        kind: mechanism
-  - id: cublasdx_matmul
-    name: MatmulDx / cuBLASDx
-    leaves:
-      - id: cublasdx_matmul_block_all
-        claim: "cuBLASDx GEMM 是 block 级设备函数，必须由该 CUDA block 全部线程以同一 Size/Precision 描述符调用，单线程调用结果未定义。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-      - id: cublasdx_matmul_sm80_mma
-        claim: "在 sm_80 上 cuBLASDx 走 mma.sync，C 放共享内存时 FP32 GEMM 边长受 smem 限制约 117；超限不再静态断言，运行时破坏 smem。"
-        types: [optimization, conceptual]
-        difficulty: [3, 4]
-        kind: feature
-      - id: cublasdx_matmul_sm90_wgmma
-        claim: "sm_90a 路径用 WGMMA，block 维应能构成 128 线程 warpgroup；BlockDim=96 无法组成完整 warpgroup，不能走该 Tensor Core 路径。"
-        types: [layout, debug]
-        difficulty: [3, 4]
-        kind: feature
-      - id: cublasdx_matmul_align
-        claim: "共享内存中的 A/B/C 指针必须满足 cuBLASDx Alignment 运算符给出的字节对齐（常见 16B），不对齐的 smem tile 使 MMA/WGMMA 非法。"
-        types: [layout, debug]
-        difficulty: [3]
-        kind: failure
-      - id: cublasdx_matmul_size_multiple
-        claim: "Size<M,N,K> 必须是所选 MMA 原子形状的整数倍（如 sm_80 f16 常见 16×8×16）；M=15 无法匹配 m16n8k16 原子。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: formula
-      - id: cublasdx_matmul_sm_type
-        claim: "描述符 SM<800>/SM<900> 必须与编译目标一致；SM<900> 的 MatmulDx 在 sm_80 cubin 里会编进 Hopper 指令并在 Ampere 上非法。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: feature
-      - id: cublasdx_matmul_host_call
-        claim: "execute(...) 是 __device__ 集体调用，不能从 host 当 cuBLAS 那样 cublasSgemm；host 只能 launch 包住它的 kernel。"
-        types: [syntax, compare]
-        difficulty: [2]
-        kind: api
-      - id: cublasdx_matmul_precision
-        claim: "Precision::F16 / TF32 / F64 决定 MMA 数据类型；用 F16 描述符配 float smem tile 是类型不匹配，结果未定义。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-      - id: cublasdx_matmul_ld_smem
-        claim: "smem leading dimension 必须满足 Dx 对齐约束（常为 16 元素或 16B 的倍数）；ld=M+1 为避 bank conflict 可能破坏 MMA 对齐。"
-        types: [layout, optimization]
-        difficulty: [3, 4]
-        kind: failure
-  - id: cublaslt_epilogue
-    name: cuBLASLt epilogue
-    leaves:
-      - id: cublaslt_epilogue_bias_ptr
-        claim: "CUBLASLT_EPILOGUE_BIAS 要求设置 CUBLASLT_MATMUL_DESC_BIAS_POINTER 为 device 向量；指针为 NULL 时 heuristic/execute 失败。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: cublaslt_epilogue_gelu_aux
-        claim: "GELU 反向等需要 AUX 的 epilogue 必须设 EPILOGUE_AUX_POINTER 与 AUX_LD；只设 EPILOGUE 枚举不设 AUX → INVALID_VALUE。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-      - id: cublaslt_epilogue_row_relu
-        claim: "D 为 CUBLASLT_ORDER_ROW 时 ReLU/GELU/Bias epilogue 不受支持；行主输出必须改 ORDER_COL 或把 epilogue 拆成单独 kernel。"
-        types: [layout, compare]
-        difficulty: [3]
-        kind: failure
-      - id: cublaslt_epilogue_default
-        claim: "CUBLASLT_EPILOGUE_DEFAULT 只写 D=alpha*op(A)*op(B)+beta*C，不融合 bias；以为 DEFAULT 会读 BIAS_POINTER 是错的。"
-        types: [counterfactual, conceptual]
-        difficulty: [2]
-        kind: mechanism
-      - id: cublaslt_epilogue_fp8_scale
-        claim: "FP8 matmul 必须设置 A/B/D 的 scale 指针与 scale 类型；缺 scale 的 e4m3 描述在 sm_90 上创建/执行失败。"
-        types: [syntax, debug]
-        difficulty: [3, 4]
-        kind: feature
-      - id: cublaslt_epilogue_bias_type
-        claim: "CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE 必须与 epilogue 文档表一致（如 FP16 GEMM 的 bias 常为 FP16/FP32）；乱填 CUDA_R_64F 被拒。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: api
-      - id: cublaslt_epilogue_drelu_splitn
-        claim: "EPILOGUE_DRELU_BGRAD/DGELU_BGRAD 时 cuBLASLt 不沿 N 维切分；超大 N 必须调用方自己切块，否则超出内部限制失败。"
-        types: [optimization, debug]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: cublaslt_epilogue_pointer_mode
-        claim: "bias 融合最佳路径常要求 POINTER_MODE_HOST 且 beta=0；device pointer mode 的 alpha/beta 可能让某些 epilogue heuristic 为空。"
-        types: [optimization, syntax]
-        difficulty: [3]
-        kind: api
-  - id: cublaslt_workspace
-    name: cuBLASLt workspace 与对齐
-    leaves:
-      - id: cublaslt_workspace_align256
-        claim: "cublasLtMatmul 的 workspace 指针必须 256B 对齐；cudaMalloc 满足，从 128B 偏移的子缓冲当 workspace → 对齐失败。"
-        types: [layout, debug]
-        difficulty: [2, 3]
-        kind: formula
-      - id: cublaslt_workspace_pref_max
-        claim: "CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES 限制 heuristic 候选；设 0 只选无 workspace 算法，可能没有合法 algo。"
-        types: [syntax, optimization]
-        difficulty: [2, 3]
-        kind: api
-      - id: cublaslt_workspace_too_small
-        claim: "execute 时 workspaceSizeInBytes 小于该 algo 的 workspaceSize → CUBLAS_STATUS_INVALID_VALUE，不会在不足缓冲上静默跑。"
-        types: [debug, syntax]
-        difficulty: [2]
-        kind: failure
-      - id: cublaslt_workspace_heuristic_state
-        claim: "cublasLtMatmulHeuristicResult_t.state 必须是 SUCCESS 才允许拿 algo 去 Matmul；未检查 state 就用零初始化 algo 非法。"
-        types: [debug, code_complete]
-        difficulty: [2, 3]
-        kind: api
-      - id: cublaslt_workspace_ld_align
-        claim: "常规顺序要求 A/B/C 指针 alignment≥4B、ld 为 4 的倍数；文档建议 alignment=16B，TF32/Tensor Core 路径可能拒绝更弱对齐。"
-        types: [layout, optimization]
-        difficulty: [2, 3]
-        kind: formula
-      - id: cublaslt_workspace_tn_int8
-        claim: "部分整数 Tensor Core 配置只支持 TN（A 转置、B 不转）；NN 的 INT8 描述会让 heuristic 返回 0 个结果。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: failure
-      - id: cublaslt_workspace_stream
-        claim: "cublasLtMatmul 使用传入的 cudaStream_t，不读 cublasSetStream 的老 handle 流；流为 NULL 则走默认流并可能隐式同步。"
-        types: [syntax, compare]
-        difficulty: [2]
-        kind: api
-      - id: cublaslt_workspace_reuse
-        claim: "同一 workspace 缓冲不能在两个未同步的并发 Matmul 间共享；两流并行必须各有一块 256B 对齐 workspace。"
-        types: [debug, counterfactual]
-        difficulty: [3]
-        kind: failure
-  - id: cufft_workspace
-    name: cuFFT workspace 与 plan
-    leaves:
-      - id: cufft_workspace_auto_alloc
-        claim: "默认 cufftMakePlan* 自动 cudaMalloc workArea；cufftSetAutoAllocation(plan,0) 后必须 cufftSetWorkArea，否则 Exec 失败。"
-        types: [syntax, debug]
-        difficulty: [2]
-        kind: api
-      - id: cufft_workspace_getsize
-        claim: "cufftGetSize 在 MakePlan 之后返回该 plan 实际 workSize=N 字节；MakePlan 前的 Estimate 可能偏大，按 Estimate 分配合法但按更小值裁剪可能不足。"
-        types: [conceptual, compare]
-        difficulty: [2, 3]
-        kind: formula
-      - id: cufft_workspace_share
-        claim: "两个 plan 可用同一 workArea，但不得在同一流上重叠 Exec；未同步并发 Exec 共享 workspace 数据竞争。"
-        types: [debug, optimization]
-        difficulty: [3]
-        kind: failure
-      - id: cufft_workspace_setstream
-        claim: "cufftSetStream 把后续 Exec 放到指定流；plan 不是线程安全的，两 host 线程同时 Exec 同一 handle 未定义。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: cufft_workspace_make_once
-        claim: "同一 cufftHandle 只能 MakePlan 一次，再次 MakePlan → CUFFT_INVALID_PLAN；要改尺寸必须销毁重建。"
-        types: [syntax, debug]
-        difficulty: [2]
-        kind: failure
-      - id: cufft_workspace_xt_gpus
-        claim: "多 GPU 计划必须在 MakePlan 之前 cufftXtSetGPUs；MakePlan 之后再设 GPU 列表失败，且 workSize 是每 GPU 一项的数组。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: api
-      - id: cufft_workspace_callback
-        claim: "cufftXtSetCallback 必须在 Exec 前、且该 plan 以支持 callback 的方式创建；callback 是设备函数指针，host 函数指针非法。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-      - id: cufft_workspace_size_pow
-        claim: "素因子超出 cuFFT 支持集合的 N 使 MakePlan 返回 CUFFT_INVALID_SIZE；并非所有 N 都能 FFT，不能假设任意质数长度可 plan。"
-        types: [debug, conceptual]
-        difficulty: [2, 3]
-        kind: failure
-  - id: cusparse_spmv
-    name: cuSPARSE SpMV
-    leaves:
-      - id: cusparse_spmv_det_alg
-        claim: "cusparseSpMV 仅 CUSPARSE_SPMV_COO_ALG2、CSR_ALG2、BSR_ALG1 且 opA=NON_TRANSPOSE 时保证 bitwise 确定。"
-        types: [compare, conceptual]
-        difficulty: [3]
-        kind: numeric
-      - id: cusparse_spmv_buffer
-        claim: "CSR/CSC 的所有算法以及 COO_ALG2 需要额外 device buffer；bufferSize 后传入更小缓冲 → 执行失败或越界。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: cusparse_spmv_index_base
-        claim: "CSR 行指针必须与描述符的 idxBase（0 或 1）一致；1-base 的 MATLAB 数组配 CUSPARSE_INDEX_BASE_ZERO 会读错列。"
-        types: [debug, layout]
-        difficulty: [2]
-        kind: failure
-      - id: cusparse_spmv_64i
-        claim: "nnz>2^31-1 必须 INDEX_64I；32I 的 rowPtr 在 nnz 超界时环绕，SpMV 静默读错而不是必然返回 size error。"
-        types: [debug, conceptual]
-        difficulty: [3]
-        kind: failure
-      - id: cusparse_spmv_ld
-        claim: "dense 向量 x/y 的描述必须匹配布局且 ld≥length；把矩阵 ld 套到向量 SpMV 上会使 leading dimension 非法。"
-        types: [layout, syntax]
-        difficulty: [2]
-        kind: formula
-      - id: cusparse_spmv_transpose
-        claim: "对 CSR 做 opA=TRANSPOSE 的 SpMV 可能换算法并不再满足 CSR_ALG2 的确定性承诺，bit 可随运行变化。"
-        types: [compare, conceptual]
-        difficulty: [3]
-        kind: numeric
-      - id: cusparse_spmv_handle
-        claim: "cusparseHandle_t 绑定流后 SpMV 异步；未 cusparseSetStream 时走默认流，与其他默认流库调用隐式同步。"
-        types: [syntax, conceptual]
-        difficulty: [2]
-        kind: api
-      - id: cusparse_spmv_alg_default
-        claim: "SPMV_ALG_DEFAULT 不保证确定性；要复现必须显式 CSR_ALG2/COO_ALG2，并固定 opA=N。"
-        types: [counterfactual, compare]
-        difficulty: [2, 3]
-        kind: numeric
-  - id: math_det_flags
-    name: 确定性标志与算法锁定
-    leaves:
-      - id: math_det_flags_cublas_pedantic
-        claim: "CUBLAS_COMPUTE_32F_PEDANTIC / 16F_PEDANTIC 关闭 TF32 与非 IEEE 融合，作为 cuBLASLt 确定性基线；非 PEDANTIC 的 32F 可走 TF32。"
-        types: [syntax, compare]
-        difficulty: [2, 3]
-        kind: api
-      - id: math_det_flags_math_mode
-        claim: "cublasSetMathMode(CUBLAS_DEFAULT_MATH) 在 sm_80+ 仍可能启用 TF32；要禁 TF32 需 CUBLAS_PEDANTIC_MATH 或显式 compute type。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: math_det_flags_atomics_not
-        claim: "CUBLAS_ATOMICS_NOT_ALLOWED 禁止原子归约换序；ALLOWED 则同一 GEMM 两次运行 bit 可不同。"
-        types: [compare, conceptual]
-        difficulty: [2, 3]
-        kind: numeric
-      - id: math_det_flags_cusparse_explicit
-        claim: "cuSPARSE 没有全局“deterministic mode”开关，确定性完全由算法枚举决定；只设 handle 标志不会把 DEFAULT 变成 ALG2。"
-        types: [counterfactual, syntax]
-        difficulty: [3]
-        kind: api
-      - id: math_det_flags_cutensor_algo
-        claim: "cuTENSOR plan 锁定具体算法后同输入同 GPU 才谈 bit 稳定；每次 Estimate+自动选 plan 可能换实现。"
-        types: [optimization, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: math_det_flags_cufft_plan_reuse
-        claim: "复用同一 cufftHandle 是 cuFFT 可复现的前提；销毁 plan 重建可能换内部实现，跨 cuFFT 大版本不保证 bit。"
-        types: [compare, conceptual]
-        difficulty: [2, 3]
-        kind: numeric
-      - id: math_det_flags_workspace_env
-        claim: "CUBLAS_WORKSPACE_CONFIG=:4:2 一类设置改变每流 workspace 切片，可改变选中的 GEMM 内核；确定性 CI 必须固定该环境变量。"
-        types: [profiling, debug]
-        difficulty: [3]
-        kind: mechanism
-      - id: math_det_flags_algo_id_save
-        claim: "要把 cuBLASLt 结果钉死，须序列化 heuristic 返回的 algo 并在 cublasLtMatmul 传入同一对象；每次只传 NULL algo 让库重选则不保证 bit。"
-        types: [code_complete, compare]
-        difficulty: [3]
-        kind: api
-  - id: lib_ptr_align
-    name: 库指针对齐
-    leaves:
-      - id: lib_ptr_align_cublas_16
-        claim: "cuBLAS 传统 API 建议 A/B/C alignment=16B、ld 为 16 元素倍数才能走向量化/Tensor Core；仅 alignment=4B 可能退化或对部分 compute type 失败。"
-        types: [layout, optimization]
-        difficulty: [2, 3]
-        kind: formula
-      - id: lib_ptr_align_cusparse_16
-        claim: "cuSPARSE generic API 要求 values/offsets 指针 16B 对齐的情况很常见；cudaMalloc 满足，从 struct 内 offset=4 的数组切片可能失败。"
-        types: [layout, debug]
-        difficulty: [2, 3]
-        kind: failure
-      - id: lib_ptr_align_cutensor_256
-        claim: "cuTENSOR 默认 alignment=256B 与 cudaMalloc 匹配；cudaMallocAsync 也 256B，但切出的 128B 偏移子张量必须降低 descriptor alignment。"
-        types: [layout, compare]
-        difficulty: [2, 3]
-        kind: formula
-      - id: lib_ptr_align_cufft_16
-        claim: "cufftComplex 数组按 8B 自然对齐不够保险，库侧按 16B 要求检查；offset=8B 的 half-complex 视图可能 CUFFT_INVALID_VALUE。"
-        types: [layout, debug]
-        difficulty: [3]
-        kind: failure
-      - id: lib_ptr_align_cublaslt_ws256
-        claim: "cuBLASLt workspace alignment=256B 是硬约束，矩阵指针 alignment≥4B 是下限、16B 是性能/部分 Tensor Core 路径的实际约束，三者不能混为一谈。"
-        types: [compare, layout]
-        difficulty: [3]
-        kind: formula
-      - id: lib_ptr_align_cusolver_lda
-        claim: "cuSOLVER 列主 lda 以元素计且 lda≥max(1,m)；字节对齐另算，lda=m 但基址 4B 对齐的 double 矩阵可能对向量化路径非法。"
-        types: [layout, debug]
-        difficulty: [3]
-        kind: formula
-      - id: lib_ptr_align_managed
-        claim: "cudaMallocManaged 默认对齐与 cudaMalloc 相同（256B），可作库缓冲；但未预取的第一次 touch 不改变库的对齐检查，只改变缺页。"
-        types: [conceptual, compare]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: lib_ptr_align_subbyte_fp8
-        claim: "FP8/INT8 矩阵仍按元素 ld，但 Tensor Core 路径常要求 ld 为 16 或 32 元素倍数；ld=n+1 的 padding 可能破坏该倍数。"
-        types: [layout, optimization]
-        difficulty: [3]
-        kind: failure
-  - id: mathdx_fft
-    name: cuFFTDx / MathDx 约束
-    leaves:
-      - id: mathdx_fft_block_collective
-        claim: "cuFFTDx block FFT 必须由描述符 BlockDim 指定的全体线程集体调用；只有 tid==0 调用 execute 结果未定义。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-      - id: mathdx_fft_size_pow2
-        claim: "FFTDx Size<> 必须是该 SM 目标支持的长度（常见 Size=2^k 及有限 3/5 因子）；Size<7> 在未列出的配置上静态不合法。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: formula
-      - id: mathdx_fft_sm_match
-        claim: "FFTDx SM<800> 只能在 Ampere sm_80 二进制里用；同一源以 sm_90 编译不会自动换成 Hopper 实现，必须改 SM<>。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: feature
-      - id: mathdx_fft_smem
-        claim: "launch 动态 smem 或静态 __shared__ 必须满足 bytes≥shared_memory_size；少一字节即越界。"
-        types: [layout, debug]
-        difficulty: [3]
-        kind: formula
-      - id: mathdx_fft_precision_complex
-        claim: "Precision::F32 的 FFTDx 输入是 complex<float> 布局；把实 float 数组当 complex 交错读会长度差一倍。"
-        types: [layout, syntax]
-        difficulty: [2, 3]
-        kind: api
-      - id: mathdx_fft_warp_vs_block
-        claim: "Thread/Warp FFT 的线程数约束严于 Block FFT：Warp 路径必须恰好 32 线程参与该 execute，Block 路径跟 BlockDim。"
-        types: [compare, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: mathdx_fft_not_cufft_plan
-        claim: "FFTDx 不使用 cufftHandle，也不读 cufftSetStream；它是设备函数，workspace 就是调用者提供的 smem/寄存器。"
-        types: [compare, syntax]
-        difficulty: [2]
-        kind: api
-      - id: mathdx_fft_align
-        claim: "FFTDx 输入指针对齐由 Alignment 运算符给出（常 8/16B）；不对齐的全局或共享指针使向量化加载未定义。"
-        types: [layout, debug]
-        difficulty: [3]
-        kind: failure
+- id: cusparse_spmm
+  name: cuSPARSE SpMM
+  leaves:
+  - id: cusparse_spmm_batch_65535
+    claim: cusparseSpMM 跨批次上限 max_batch=65535，cusparseCsrSetStridedBatch 超过该值非法；CUSPARSE_SPMM_CSR_ALG3
+      还不支持 strided batch。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: cusparse_spmm_det_alg
+    claim: 仅 CUSPARSE_SPMM_COO_ALG2 与 CUSPARSE_SPMM_CSR_ALG3 保证 bitwise 确定性，COO_ALG1/ALG3 同输入多次运行结果可以不同。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cusparse_spmm_ld
+    claim: cuSPARSE dense 布局：行主 ld ≥ n（列数），列主 ld ≥ m（行数），否则 SpMM 描述符创建或执行失败；不满足 → 非法。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    kind: formula
+  - id: cusparse_spmm_index64
+    claim: nnz 或行列超过 2^31-1 时必须用 CUSPARSE_INDEX_64I；32I 描述符配 64-bit 偏移会截断索引并读错 CSR 行指针。
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cusparse_spmm_bsr_det
+    claim: CUSPARSE_SPMM_BSR_ALG1 保证 bitwise 确定且不需额外 workspace，但要求 opA=NON_TRANSPOSE 且 A 的 block 非列主。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cusparse_spmm_workspace
+    claim: cusparseSpMM_bufferSize 给出的 device workspace 必须在 SpMM 执行时传入；CSR_ALG3 需求>0 时 workspace=NULL
+      → 执行失败。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cusparse_spmm_conj_csr3
+    claim: CUSPARSE_SPMM_CSR_ALG3 不支持 opB=CONJUGATE_TRANSPOSE，也不支持 CUDA_C_16F/CUDA_C_16BF；这些组合必须换算法或类型。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: cusparse_spmm_align16
+    claim: SpMM 的 csrOffsets/columns/values 与 dense 指针需满足库对齐（常见 16B）；仅 8B 对齐的 double 缓冲可在部分算法上报 misaligned
+      address。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: cusparse_spmm_default_nondet
+    claim: CUSPARSE_SPMM_ALG_DEFAULT 可能落到 COO_ALG1 等非确定路径；要 bit 稳定必须显式传 COO_ALG2 或 CSR_ALG3，不能依赖 DEFAULT。
+    types:
+    - counterfactual
+    - compare
+    difficulty:
+    - 3
+    kind: numeric
+- id: cusolver_dn
+  name: cuSOLVER 稠密分解
+  leaves:
+  - id: cusolver_dn_gesvdj_32
+    claim: cusolverDn<t>gesvdjBatched：m≤32 且 n≤32 → 合法；更大尺寸必须改 gesvdj 非 batched 或 gesvdaStridedBatched。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: cusolver_dn_colmajor
+    claim: cuSOLVER 稠密 API 按列主存储，A[i+lda*j] 为元素 (i,j) 且 lda≥m；对 C 行主缓冲直接调用 potrf 分解的是转置含义的矩阵。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: cusolver_dn_two_phase
+    claim: Xpotrf 必须先 bufferSize 再传入恰好 lwork 的 device workspace，lwork 偏小返回 CUSOLVER_STATUS_INVALID_VALUE
+      或写越界。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: cusolver_dn_64bit
+    claim: 64-bit 维度走 cusolverDnXgesvd 等 DnX API，旧的 DnSgesvd 的 int m,n 在 m>2^31-1 时不能表示，截断后 info 非零。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+  - id: cusolver_dn_info_device
+    claim: potrf/getrf 的 info 必须是 device 指针；传 host int* 会在设备写 info 时 illegal address，而不是返回 host 可读的 info=-1。
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cusolver_dn_handle_stream
+    claim: cusolverDnSetStream 后所有稠密 kernel 进该流；handle 默认流与调用线程的 NULL 流混用会造成隐式同步，workspace 仍按 handle 生命周期。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: cusolver_dn_lda_n
+    claim: potrf 对 N×N 矩阵要求 lda≥N；lda=N-1 时描述非法或读越界，不能靠只分配 N*N 紧凑行主来凑列主 API。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    kind: formula
+  - id: cusolver_dn_getrf_pivot
+    claim: getrf 的 ipiv 是 device 数组长度 min(m,n)；省略 pivot 缓冲或长度不足会在分解时写越界。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cusolver_dn_x_params
+    claim: cusolverDnXpotrf 的 cuSolverDnParams_t 与 64-bit 维必须配对；把 32-bit DnSpotrf 的 int workspace 当成 X
+      API 的 size_t lwork 混用会估错字节。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+- id: cutensor_contraction
+  name: cuTENSOR 收缩
+  leaves:
+  - id: cutensor_contraction_align256
+    claim: cutensorTensorDescriptor 默认对齐 alignment=256B（与 cudaMalloc 一致），从偏移 128B 的子缓冲创建描述符会失败。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: cutensor_contraction_colmajor
+    claim: 未给 strides 时 cuTENSOR 假定广义列主：最左模式 stride=1，strides 从左到右递增；行主必须显式传入递减 strides。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: cutensor_contraction_plan
+    claim: cutensorEstimateWorkspaceSize 给出的 workspace 必须在 cutensorContract 时提供，workspace=NULL 且需求>0 时执行失败。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cutensor_contraction_modes
+    claim: 收缩用 Einstein 记号 mk,nk→mn 要求两个输入共享的 k 模式 extent 相等，extent 不一致在创建 operation descriptor 时被拒。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cutensor_contraction_unique_modes
+    claim: 同一张量描述符内 mode 标签必须唯一；A 上出现两个 'k' 标签会在创建 descriptor 时失败，不能靠重复 mode 表示对角。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cutensor_contraction_compute_type
+    claim: FP16 输入配 CUTENSOR_COMPUTE_32F 在累加器走 FP32；配 16F compute 会降精度，同一输入两次 compute type 的输出 bit 不同。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: cutensor_contraction_align_override
+    claim: 若张量基址只有 16B 对齐，创建描述符必须显式声明 alignment=16；仍填 256 会在 plan/execute 因对齐不满足而失败。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: cutensor_contraction_plan_cache
+    claim: 同一 handle 上重复相同 contraction 可走 plan 缓存；workspace 上限变了必须重新 create plan，沿用旧 plan 会在 execute 发现
+      workspace 不足。
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cutensor_contraction_jit
+    claim: cuTENSOR 2.x 可能 JIT 生成 kernel，第一次 plan 含编译延迟；workspace 与 alignment 约束在 JIT 后仍然执行期检查，不会因为 JIT
+      而放宽 256B 默认。
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+- id: cufft_layout
+  name: cuFFT 布局
+  leaves:
+  - id: cufft_layout_r2c_half
+    claim: 长度 N 的 R2C 只写 floor(N/2)+1 个 cufftComplex；N=16 时输出 9 个复数，按 N 个复数分配会在 batch 间距上读到下一批的重叠。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+  - id: cufft_layout_inplace_pad
+    claim: 原地 R2C 要求最内维 pad 到 2*(N/2+1) 个 real，即 N=256 时每行至少 258 个 float；不 pad 会在写 Hermitian 半谱时越界。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: cufft_layout_plan_many
+    claim: cufftPlanMany 的 idist/odist 是相邻 batch 首元素距离；R2C 若 odist 仍填 N 而不是 N/2+1，第二批输出覆盖第一批尾部。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cufft_layout_embed_null
+    claim: inembed/onembed 传 NULL 时忽略 istride/idist 等高级布局，一律用紧密默认 stride；此时非零 istride 不会生效。
+    types:
+    - syntax
+    - counterfactual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: cufft_layout_c2r_destroy
+    claim: C2R 输入必须是 Hermitian 半谱长度 = floor(N/2)+1；按 N 个复数当输入会读越界或产出错误实序列。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: cufft_layout_istride
+    claim: 非 NULL inembed 时 istride 是同一 FFT 内相邻元素距离；istride=2 表示隔元抽取，idist 仍以元素计不是字节。
+    types:
+    - layout
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: cufft_layout_batch_rank
+    claim: cufftPlan1d/2d/3d 的 batch 与 many 接口的 batch 都计入同一 plan；rank>3 必须走 PlanMany 的 n[]，不能用 Plan3d
+      堆第 4 维。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cufft_layout_align
+    claim: cuFFT 输入/输出/workArea 指针通常需至少 16B 对齐；从 offset=8B 的子缓冲做 C2C 可能 CUFFT_INVALID_VALUE 或设备 misaligned。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cufft_layout_compat_size
+    claim: cufftSetCompatibilityMode 不改变 R2C 半谱长度公式 floor(N/2)+1；它只影响填充/布局兼容，不能用来省略 pad。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+- id: cublasdx_matmul
+  name: MatmulDx / cuBLASDx
+  leaves:
+  - id: cublasdx_matmul_block_all
+    claim: cuBLASDx GEMM 是 block 级设备函数，必须由该 CUDA block 全部线程以同一 Size/Precision 描述符调用，单线程调用结果未定义。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: cublasdx_matmul_sm80_mma
+    claim: 在 sm_80 上 cuBLASDx 走 mma.sync，C 放共享内存时 FP32 GEMM 边长受 smem 限制约 117；超限不再静态断言，运行时破坏 smem。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: cublasdx_matmul_sm90_wgmma
+    claim: sm_90a 路径用 WGMMA，block 维应能构成 128 线程 warpgroup；BlockDim=96 无法组成完整 warpgroup，不能走该 Tensor Core
+      路径。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: cublasdx_matmul_align
+    claim: 共享内存中的 A/B/C 指针必须满足 cuBLASDx Alignment 运算符给出的字节对齐（常见 16B），不对齐的 smem tile 使 MMA/WGMMA 非法。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: cublasdx_matmul_size_multiple
+    claim: Size<M,N,K> 必须是所选 MMA 原子形状的整数倍（如 sm_80 f16 常见 16×8×16）；M=15 无法匹配 m16n8k16 原子。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: cublasdx_matmul_sm_type
+    claim: 描述符 SM<800>/SM<900> 必须与编译目标一致；SM<900> 的 MatmulDx 在 sm_80 cubin 里会编进 Hopper 指令并在 Ampere 上非法。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: cublasdx_matmul_host_call
+    claim: execute(...) 是 __device__ 集体调用，不能从 host 当 cuBLAS 那样 cublasSgemm；host 只能 launch 包住它的 kernel。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    kind: api
+  - id: cublasdx_matmul_precision
+    claim: Precision::F16 / TF32 / F64 决定 MMA 数据类型；用 F16 描述符配 float smem tile 是类型不匹配，结果未定义。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: cublasdx_matmul_ld_smem
+    claim: smem leading dimension 必须满足 Dx 对齐约束（常为 16 元素或 16B 的倍数）；ld=M+1 为避 bank conflict 可能破坏 MMA 对齐。
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+- id: cublaslt_epilogue
+  name: cuBLASLt epilogue
+  leaves:
+  - id: cublaslt_epilogue_bias_ptr
+    claim: CUBLASLT_EPILOGUE_BIAS 要求设置 CUBLASLT_MATMUL_DESC_BIAS_POINTER 为 device 向量；指针为 NULL 时 heuristic/execute
+      失败。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cublaslt_epilogue_gelu_aux
+    claim: GELU 反向等需要 AUX 的 epilogue 必须设 EPILOGUE_AUX_POINTER 与 AUX_LD；只设 EPILOGUE 枚举不设 AUX → INVALID_VALUE。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: cublaslt_epilogue_row_relu
+    claim: D 为 CUBLASLT_ORDER_ROW 时 ReLU/GELU/Bias epilogue 不受支持；行主输出必须改 ORDER_COL 或把 epilogue 拆成单独 kernel。
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 3
+    kind: failure
+  - id: cublaslt_epilogue_default
+    claim: CUBLASLT_EPILOGUE_DEFAULT 只写 D=alpha*op(A)*op(B)+beta*C，不融合 bias；以为 DEFAULT 会读 BIAS_POINTER
+      是错的。
+    types:
+    - counterfactual
+    - conceptual
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: cublaslt_epilogue_fp8_scale
+    claim: FP8 matmul 必须设置 A/B/D 的 scale 指针与 scale 类型；缺 scale 的 e4m3 描述在 sm_90 上创建/执行失败。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: cublaslt_epilogue_bias_type
+    claim: CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE 必须与 epilogue 文档表一致（如 FP16 GEMM 的 bias 常为 FP16/FP32）；乱填
+      CUDA_R_64F 被拒。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: cublaslt_epilogue_drelu_splitn
+    claim: EPILOGUE_DRELU_BGRAD/DGELU_BGRAD 时 cuBLASLt 不沿 N 维切分；超大 N 必须调用方自己切块，否则超出内部限制失败。
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: cublaslt_epilogue_pointer_mode
+    claim: bias 融合最佳路径常要求 POINTER_MODE_HOST 且 beta=0；device pointer mode 的 alpha/beta 可能让某些 epilogue heuristic
+      为空。
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+- id: cublaslt_workspace
+  name: cuBLASLt workspace 与对齐
+  leaves:
+  - id: cublaslt_workspace_align256
+    claim: cublasLtMatmul 的 workspace 指针必须 256B 对齐；cudaMalloc 满足，从 128B 偏移的子缓冲当 workspace → 对齐失败。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: cublaslt_workspace_pref_max
+    claim: CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES 限制 heuristic 候选；设 0 只选无 workspace 算法，可能没有合法 algo。
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cublaslt_workspace_too_small
+    claim: execute 时 workspaceSizeInBytes 小于该 algo 的 workspaceSize → CUBLAS_STATUS_INVALID_VALUE，不会在不足缓冲上静默跑。
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    kind: failure
+  - id: cublaslt_workspace_heuristic_state
+    claim: cublasLtMatmulHeuristicResult_t.state 必须是 SUCCESS 才允许拿 algo 去 Matmul；未检查 state 就用零初始化 algo
+      非法。
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cublaslt_workspace_ld_align
+    claim: 常规顺序要求 A/B/C 指针 alignment≥4B、ld 为 4 的倍数；文档建议 alignment=16B，TF32/Tensor Core 路径可能拒绝更弱对齐。
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: cublaslt_workspace_tn_int8
+    claim: 部分整数 Tensor Core 配置只支持 TN（A 转置、B 不转）；NN 的 INT8 描述会让 heuristic 返回 0 个结果。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: cublaslt_workspace_stream
+    claim: cublasLtMatmul 使用传入的 cudaStream_t，不读 cublasSetStream 的老 handle 流；流为 NULL 则走默认流并可能隐式同步。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    kind: api
+  - id: cublaslt_workspace_reuse
+    claim: 同一 workspace 缓冲不能在两个未同步的并发 Matmul 间共享；两流并行必须各有一块 256B 对齐 workspace。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    kind: failure
+- id: cufft_workspace
+  name: cuFFT workspace 与 plan
+  leaves:
+  - id: cufft_workspace_auto_alloc
+    claim: 默认 cufftMakePlan* 自动 cudaMalloc workArea；cufftSetAutoAllocation(plan,0) 后必须 cufftSetWorkArea，否则
+      Exec 失败。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: cufft_workspace_getsize
+    claim: cufftGetSize 在 MakePlan 之后返回该 plan 实际 workSize=N 字节；MakePlan 前的 Estimate 可能偏大，按 Estimate 分配合法但按更小值裁剪可能不足。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: cufft_workspace_share
+    claim: 两个 plan 可用同一 workArea，但不得在同一流上重叠 Exec；未同步并发 Exec 共享 workspace 数据竞争。
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 3
+    kind: failure
+  - id: cufft_workspace_setstream
+    claim: cufftSetStream 把后续 Exec 放到指定流；plan 不是线程安全的，两 host 线程同时 Exec 同一 handle 未定义。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cufft_workspace_make_once
+    claim: 同一 cufftHandle 只能 MakePlan 一次，再次 MakePlan → CUFFT_INVALID_PLAN；要改尺寸必须销毁重建。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: failure
+  - id: cufft_workspace_xt_gpus
+    claim: 多 GPU 计划必须在 MakePlan 之前 cufftXtSetGPUs；MakePlan 之后再设 GPU 列表失败，且 workSize 是每 GPU 一项的数组。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: cufft_workspace_callback
+    claim: cufftXtSetCallback 必须在 Exec 前、且该 plan 以支持 callback 的方式创建；callback 是设备函数指针，host 函数指针非法。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: cufft_workspace_size_pow
+    claim: 素因子超出 cuFFT 支持集合的 N 使 MakePlan 返回 CUFFT_INVALID_SIZE；并非所有 N 都能 FFT，不能假设任意质数长度可 plan。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+- id: cusparse_spmv
+  name: cuSPARSE SpMV
+  leaves:
+  - id: cusparse_spmv_det_alg
+    claim: cusparseSpMV 仅 CUSPARSE_SPMV_COO_ALG2、CSR_ALG2、BSR_ALG1 且 opA=NON_TRANSPOSE 时保证 bitwise 确定。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cusparse_spmv_buffer
+    claim: CSR/CSC 的所有算法以及 COO_ALG2 需要额外 device buffer；bufferSize 后传入更小缓冲 → 执行失败或越界。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cusparse_spmv_index_base
+    claim: CSR 行指针必须与描述符的 idxBase（0 或 1）一致；1-base 的 MATLAB 数组配 CUSPARSE_INDEX_BASE_ZERO 会读错列。
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 2
+    kind: failure
+  - id: cusparse_spmv_64i
+    claim: nnz>2^31-1 必须 INDEX_64I；32I 的 rowPtr 在 nnz 超界时环绕，SpMV 静默读错而不是必然返回 size error。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: cusparse_spmv_ld
+    claim: dense 向量 x/y 的描述必须匹配布局且 ld≥length；把矩阵 ld 套到向量 SpMV 上会使 leading dimension 非法。
+    types:
+    - layout
+    - syntax
+    difficulty:
+    - 2
+    kind: formula
+  - id: cusparse_spmv_transpose
+    claim: 对 CSR 做 opA=TRANSPOSE 的 SpMV 可能换算法并不再满足 CSR_ALG2 的确定性承诺，bit 可随运行变化。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cusparse_spmv_handle
+    claim: cusparseHandle_t 绑定流后 SpMV 异步；未 cusparseSetStream 时走默认流，与其他默认流库调用隐式同步。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: cusparse_spmv_alg_default
+    claim: SPMV_ALG_DEFAULT 不保证确定性；要复现必须显式 CSR_ALG2/COO_ALG2，并固定 opA=N。
+    types:
+    - counterfactual
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+- id: math_det_flags
+  name: 确定性标志与算法锁定
+  leaves:
+  - id: math_det_flags_cublas_pedantic
+    claim: CUBLAS_COMPUTE_32F_PEDANTIC / 16F_PEDANTIC 关闭 TF32 与非 IEEE 融合，作为 cuBLASLt 确定性基线；非 PEDANTIC
+      的 32F 可走 TF32。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: math_det_flags_math_mode
+    claim: cublasSetMathMode(CUBLAS_DEFAULT_MATH) 在 sm_80+ 仍可能启用 TF32；要禁 TF32 需 CUBLAS_PEDANTIC_MATH 或显式
+      compute type。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: math_det_flags_atomics_not
+    claim: CUBLAS_ATOMICS_NOT_ALLOWED 禁止原子归约换序；ALLOWED 则同一 GEMM 两次运行 bit 可不同。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: math_det_flags_cusparse_explicit
+    claim: cuSPARSE 没有全局“deterministic mode”开关，确定性完全由算法枚举决定；只设 handle 标志不会把 DEFAULT 变成 ALG2。
+    types:
+    - counterfactual
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: math_det_flags_cutensor_algo
+    claim: cuTENSOR plan 锁定具体算法后同输入同 GPU 才谈 bit 稳定；每次 Estimate+自动选 plan 可能换实现。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: math_det_flags_cufft_plan_reuse
+    claim: 复用同一 cufftHandle 是 cuFFT 可复现的前提；销毁 plan 重建可能换内部实现，跨 cuFFT 大版本不保证 bit。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: math_det_flags_workspace_env
+    claim: CUBLAS_WORKSPACE_CONFIG=:4:2 一类设置改变每流 workspace 切片，可改变选中的 GEMM 内核；确定性 CI 必须固定该环境变量。
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: math_det_flags_algo_id_save
+    claim: 要把 cuBLASLt 结果钉死，须序列化 heuristic 返回的 algo 并在 cublasLtMatmul 传入同一对象；每次只传 NULL algo 让库重选则不保证 bit。
+    types:
+    - code_complete
+    - compare
+    difficulty:
+    - 3
+    kind: api
+- id: lib_ptr_align
+  name: 库指针对齐
+  leaves:
+  - id: lib_ptr_align_cublas_16
+    claim: cuBLAS 传统 API 建议 A/B/C alignment=16B、ld 为 16 元素倍数才能走向量化/Tensor Core；仅 alignment=4B 可能退化或对部分
+      compute type 失败。
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: lib_ptr_align_cusparse_16
+    claim: cuSPARSE generic API 要求 values/offsets 指针 16B 对齐的情况很常见；cudaMalloc 满足，从 struct 内 offset=4 的数组切片可能失败。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: lib_ptr_align_cutensor_256
+    claim: cuTENSOR 默认 alignment=256B 与 cudaMalloc 匹配；cudaMallocAsync 也 256B，但切出的 128B 偏移子张量必须降低 descriptor
+      alignment。
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: lib_ptr_align_cufft_16
+    claim: cufftComplex 数组按 8B 自然对齐不够保险，库侧按 16B 要求检查；offset=8B 的 half-complex 视图可能 CUFFT_INVALID_VALUE。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: lib_ptr_align_cublaslt_ws256
+    claim: cuBLASLt workspace alignment=256B 是硬约束，矩阵指针 alignment≥4B 是下限、16B 是性能/部分 Tensor Core 路径的实际约束，三者不能混为一谈。
+    types:
+    - compare
+    - layout
+    difficulty:
+    - 3
+    kind: formula
+  - id: lib_ptr_align_cusolver_lda
+    claim: cuSOLVER 列主 lda 以元素计且 lda≥max(1,m)；字节对齐另算，lda=m 但基址 4B 对齐的 double 矩阵可能对向量化路径非法。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: formula
+  - id: lib_ptr_align_managed
+    claim: cudaMallocManaged 默认对齐与 cudaMalloc 相同（256B），可作库缓冲；但未预取的第一次 touch 不改变库的对齐检查，只改变缺页。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: lib_ptr_align_subbyte_fp8
+    claim: FP8/INT8 矩阵仍按元素 ld，但 Tensor Core 路径常要求 ld 为 16 或 32 元素倍数；ld=n+1 的 padding 可能破坏该倍数。
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 3
+    kind: failure
+- id: mathdx_fft
+  name: cuFFTDx / MathDx 约束
+  leaves:
+  - id: mathdx_fft_block_collective
+    claim: cuFFTDx block FFT 必须由描述符 BlockDim 指定的全体线程集体调用；只有 tid==0 调用 execute 结果未定义。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: mathdx_fft_size_pow2
+    claim: FFTDx Size<> 必须是该 SM 目标支持的长度（常见 Size=2^k 及有限 3/5 因子）；Size<7> 在未列出的配置上静态不合法。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: mathdx_fft_sm_match
+    claim: FFTDx SM<800> 只能在 Ampere sm_80 二进制里用；同一源以 sm_90 编译不会自动换成 Hopper 实现，必须改 SM<>。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: mathdx_fft_smem
+    claim: launch 动态 smem 或静态 __shared__ 必须满足 bytes≥shared_memory_size；少一字节即越界。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: formula
+  - id: mathdx_fft_precision_complex
+    claim: Precision::F32 的 FFTDx 输入是 complex<float> 布局；把实 float 数组当 complex 交错读会长度差一倍。
+    types:
+    - layout
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: mathdx_fft_warp_vs_block
+    claim: Thread/Warp FFT 的线程数约束严于 Block FFT：Warp 路径必须恰好 32 线程参与该 execute，Block 路径跟 BlockDim。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: mathdx_fft_not_cufft_plan
+    claim: FFTDx 不使用 cufftHandle，也不读 cufftSetStream；它是设备函数，workspace 就是调用者提供的 smem/寄存器。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 2
+    kind: api
+  - id: mathdx_fft_align
+    claim: FFTDx 输入指针对齐由 Alignment 运算符给出（常 8/16B）；不对齐的全局或共享指针使向量化加载未定义。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: failure

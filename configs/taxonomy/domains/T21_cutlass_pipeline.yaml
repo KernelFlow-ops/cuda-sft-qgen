@@ -1,550 +1,912 @@
 id: T21
 name: CUTLASS 3.x/4.x 流水
 children:
-  - id: collective_builder
-    name: Collective Builder
-    leaves:
-      - id: collective_builder_select
-        claim: "cutlass::gemm::collective::CollectiveBuilder 按 ArchTag 与 KernelSchedule 选择 mainloop（sm_80 cp.async vs sm_90 TMA+wgmma vs sm_100 TMA+UMMA），不是运行时 if。"
-        types: [conceptual, syntax]
-        difficulty: [3]
-        kind: mechanism
-      - id: collective_builder_api
-        claim: "CollectiveBuilder<ArchTag, OpClassTensorOp, ElementA, GmemLayoutA, AlignmentA, ...>::CollectiveOp 生成 CollectiveMainloop 类型，缺 Alignment 会静态失败。"
-        types: [syntax, code_complete]
-        difficulty: [3]
-        kind: api
-      - id: collective_builder_carveout
-        claim: "StageCountAutoCarveout<sizeof(SharedStorageEpilogue)> 使 mainloop stages 满足 stages * k_tile_bytes + epilogue_smem + mbarrier ≤ smem_capacity。"
-        types: [optimization, layout]
-        difficulty: [3, 4]
-        kind: formula
-      - id: collective_builder_sm100
-        claim: "CUTLASS 3.x/4.x 的 Sm100 特化走 tcgen05/UMMA 与 TMEM 分配；同一 builder 在 ArchTag=Sm90 时不能生成 TMEM 主循环。"
-        types: [conceptual, compare]
-        difficulty: [4]
-        kind: feature
-      - id: collective_builder_tile
-        claim: "TileShape 是 CTA 级 MMA tile，如 Shape<_128,_128,_64> 表示 (M,N,K)=(128,128,64)；它不是问题矩阵的 (M,N,K)。"
-        types: [syntax, conceptual]
-        difficulty: [2, 3]
-        kind: formula
-      - id: collective_builder_cluster
-        claim: "ClusterShape<_2,_1,_1> 进入 builder，决定 TMA multicast 与 cluster 内 CTA 数；Sm80 builder 只能用 <_1,_1,_1>。"
-        types: [syntax, optimization]
-        difficulty: [3]
-        kind: feature
-      - id: collective_builder_align
-        claim: "AlignmentA 以元素计；TMA 路径常需 128-bit 对齐（fp16 时 AlignmentA=8），对不齐会静态失败而不是运行时 pad。"
-        types: [syntax, layout]
-        difficulty: [3]
-        kind: numeric
-      - id: collective_builder_schedule
-        claim: "KernelSchedule 是模板实参，选择 WS/Cooperative/Pingpong 特化；不是 launch 配置里的 runtime 参数。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: api
-      - id: collective_builder_stage_auto
-        claim: "StageCountAuto 按 smem 容量最大化 stages，但不扣除 epilogue smem；与 epilogue 共用 smem 必须用 StageCountAutoCarveout。"
-        types: [optimization, compare]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: collective_builder_opclass
-        claim: "OpClassTensorOp 选 Tensor Core 主循环；OpClassSimt 不会生成 wgmma/UMMA。"
-        types: [syntax, compare]
-        difficulty: [2, 3]
-        kind: api
-  - id: mainloop_pipeline
-    name: mainloop 流水深度
-    leaves:
-      - id: mainloop_pipeline_pc
-        claim: "Sm90 TMA warp-specialized mainloop 中 producer warp-group 只发 TMA/mbarrier，consumer warp-group 发 wgmma；角色反了会把 MMA 发在空 smem 上。"
-        types: [conceptual, debug]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: mainloop_pipeline_api
-        claim: "cute::PipelineTmaAsync<Stages> 或 CUTLASS MainloopPipeline 的 producer_acquire/commit 与 consumer_wait/release 必须成对，否则 TMA 描述符槽会耗尽。"
-        types: [syntax, debug]
-        difficulty: [3, 4]
-        kind: api
-      - id: mainloop_pipeline_stages
-        claim: "流水深度 Stages 允许最多 Stages 个 K-tile 的 TMA 未完成；H100 228 KiB smem 上 GEMM 常用 Stages∈[3,7]，Stages=1 无法重叠 TMA 与 MMA。"
-        types: [optimization, profiling]
-        difficulty: [3]
-        kind: numeric
-      - id: mainloop_pipeline_underrun
-        claim: "consumer_wait 之前就 wgmma 读该 stage 的 smem，是 pipeline underrun，结果为未定义值而非自动插入硬件 stall 到 TMA 完成。"
-        types: [debug, counterfactual]
-        difficulty: [3, 4]
-        kind: failure
-        hints: ["Stages=2 但 wait_prior<0>", "漏 producer_commit"]
-      - id: mainloop_pipeline_k_iter
-        claim: "mainloop 沿 K 迭代 k_tiles = ceil(K / TILE_K) 次；每次推进一个 K-tile 的 TMA+MMA。"
-        types: [conceptual, optimization]
-        difficulty: [2, 3]
-        kind: formula
-      - id: mainloop_pipeline_mbar
-        claim: "每个 stage 配 mbarrier；producer arrive.expect_tx(bytes) 的 bytes 必须等于该 tile A+B 的 TMA 字节。"
-        types: [debug, conceptual]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: mainloop_pipeline_wgmma_fence
-        claim: "consumer 在 wgmma 前需要对 smem 描述符做 wgmma fence；只做 pipeline wait 不等于 wgmma_commit_group/wait_group。"
-        types: [debug, conceptual]
-        difficulty: [4]
-        kind: mechanism
-      - id: mainloop_pipeline_sm80_cp
-        claim: "Sm80 mainloop 用 cp.async + mma.sync，没有 warp-group producer/consumer 分裂，不能套用 Sm90 的 TMA pipeline API。"
-        types: [compare, conceptual]
-        difficulty: [3]
-        kind: feature
-      - id: mainloop_pipeline_overlap
-        claim: "Stages=3 允许 1 个计算中的 tile + 最多 2 个 in-flight TMA；要隐藏 TMA 延迟必须 Stages≥2。"
-        types: [optimization, profiling]
-        difficulty: [3]
-        kind: formula
-  - id: epilogue_fusion
-    name: epilogue 融合
-    leaves:
-      - id: epilogue_fusion_evt
-        claim: "CUTLASS 3.x epilogue visitor tree（EVT）在寄存器/smem 上融合 bias/activation/scale，不额外 launch kernel，但增加寄存器压力。"
-        types: [conceptual, optimization]
-        difficulty: [3]
-        kind: mechanism
-      - id: epilogue_fusion_lincomb
-        claim: "cutlass::epilogue::fusion::LinCombEltAct<Relu, ElementOutput, ElementCompute> 实现 D = relu(αAC+βC+bias) 一类线性组合，ElementCompute 必须能表示 αβ。"
-        types: [syntax, code_complete]
-        difficulty: [3]
-        kind: api
-      - id: epilogue_fusion_tma_store
-        claim: "sm_90 可选 TMA store epilogue 把 D tile 经 TMA 写回 global；sm_80 builder 没有这条路径，只能用 coalesced 向量 store。"
-        types: [optimization, compare]
-        difficulty: [3, 4]
-        kind: feature
-      - id: epilogue_fusion_dtype
-        claim: "EVT 中 α/β 的 ElementCompute 位宽必须 ≥ 累加器；用 fp16 compute 做 α*acc 会先量化到 16-bit，结果 ≠ fp32 epilogue。"
-        types: [debug, counterfactual]
-        difficulty: [3]
-        kind: numeric
-      - id: epilogue_fusion_source
-        claim: "融合读 C 时 ElementC 与 LayoutC 必须与 builder 一致；C 为空指针且 β≠0 是错误，不会自动当 β=0。"
-        types: [debug, syntax]
-        difficulty: [3]
-        kind: failure
-      - id: epilogue_fusion_relu_order
-        claim: "Relu 作用在 ElementCompute 上；先量化再 relu 与先 relu 再量化一般不等，输出差在阈值附近的元素。"
-        types: [conceptual, compare]
-        difficulty: [3]
-        kind: mechanism
-      - id: epilogue_fusion_smem
-        claim: "EVT 可能占用 smem scratch；Carveout 必须计入该 SharedStorage，否则 stages 与 epilogue 重叠破坏。"
-        types: [optimization, layout]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: epilogue_fusion_v2
-        claim: "CUTLASS 2.x 的 EpilogueOp 不是 3.x EVT 树；把 2.x 融合模板塞进 CollectiveBuilder 会静态失败。"
-        types: [syntax, compare]
-        difficulty: [3]
-        kind: feature
-      - id: epilogue_fusion_bias_axis
-        claim: "bias 向量沿 N 广播，长度须覆盖 tile_n；按 M 轴广播会加错通道。"
-        types: [debug, layout]
-        difficulty: [3]
-        kind: failure
-  - id: tile_scheduler
-    name: Tile 调度器
-    leaves:
-      - id: tile_scheduler_persistent
-        claim: "Persistent tile scheduler 让 CTA 在 grid 内循环领取 (m,n) tile，摊销 TMA descriptor 与 smem 初始化，而不是一 CTA 一 tile 就退出。"
-        types: [conceptual, optimization]
-        difficulty: [3]
-        kind: mechanism
-      - id: tile_scheduler_api
-        claim: "cutlass::gemm::PersistentScheduler 与 KernelTmaWarpSpecializedCooperative 绑定；Pingpong 调度把两个 warp-group 交替做 MMA 与 epilogue。"
-        types: [syntax, compare]
-        difficulty: [3, 4]
-        kind: api
-      - id: tile_scheduler_raster
-        claim: "线性 tile 号 t 映射为 (tile_m, tile_n) = (t % tiles_m, t / tiles_m) 或沿 N raster；沿 N raster 提高 L2 对 B 的复用当 B 是列邻接。"
-        types: [optimization, layout]
-        difficulty: [3]
-        kind: formula
-      - id: tile_scheduler_cluster
-        claim: "sm_90 cluster shape (2,1,1) 把两个 CTA 绑成一个调度原子，TMA multicast 以 cluster 为单位；把 cluster 设成 (1,1,1) 就退化为单 CTA、无 multicast。"
-        types: [optimization, conceptual]
-        difficulty: [3, 4]
-        kind: feature
-      - id: tile_scheduler_work
-        claim: "persistent CTA 循环直到 work idx ≥ tiles_m * tiles_n；idx 来自 atomic/scheduler 状态，不是 blockIdx 自增。"
-        types: [conceptual, debug]
-        difficulty: [3]
-        kind: formula
-      - id: tile_scheduler_grid
-        claim: "persistent 的 grid 常设为 sm_count * cta_per_sm，不是 tiles_m*tiles_n；按输出 tile 数 launch 会失去持久化摊销。"
-        types: [optimization, profiling]
-        difficulty: [3]
-        kind: numeric
-      - id: tile_scheduler_group
-        claim: "Grouped GEMM 用 GroupScheduler，问题尺寸在 host 数组；当普通 PersistentScheduler 会忽略 group 边界而读错指针。"
-        types: [syntax, debug]
-        difficulty: [3, 4]
-        kind: api
-      - id: tile_scheduler_swizzle
-        claim: "raster swizzle 把相邻 CTA 映射到 L2 友好的 (m,n) 块；启用后线性公式 t%tiles_m 不再等于真实 tile_m。"
-        types: [optimization, layout]
-        difficulty: [3]
-        kind: mechanism
-      - id: tile_scheduler_mutex
-        claim: "StreamKScheduler 与 PersistentScheduler 是互斥的模板特化，不能在同一 Kernel 类型上同时实例化两个 scheduler。"
-        types: [syntax, compare]
-        difficulty: [3]
-        kind: api
-  - id: stream_k
-    name: Stream-K
-    leaves:
-      - id: stream_k_split
-        claim: "Stream-K 把 K 维 tile 分给超过输出 tile 数的 CTA：部分 CTA 做完整 (m,n) 输出，其余做部分 K 再经 fixup reduction 写入 C。"
-        types: [conceptual, optimization]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: stream_k_api
-        claim: "CUTLASS GemmUniversal 选择 StreamKScheduler 后由 kernel 内部决定 SK/DP 混合；host 侧仍用同一 GemmUniversalAdapter launch。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: stream_k_iters
-        claim: "k_tiles = ceil(K / TILE_K)；Stream-K 把 k_tiles * tiles_m * tiles_n 个 K-iteration 均分到 launched CTA 上，余数 iteration 分给低编号 CTA。"
-        types: [optimization, conceptual]
-        difficulty: [3, 4]
-        kind: formula
-      - id: stream_k_inplace
-        claim: "C 与 D 原地且 Stream-K 需要跨 CTA fixup 时，部分和与读旧 C 会竞争；必须用非别名 D 或保证 fixup 原子/分阶段写。"
-        types: [debug, counterfactual]
-        difficulty: [4]
-        kind: failure
-      - id: stream_k_dp_sk
-        claim: "DP tile 覆盖完整 K，SK tile 只覆盖部分 K-iteration；同一输出 tile 的 SK 部分必须 fixup 后才等于 DP 结果。"
-        types: [conceptual, compare]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: stream_k_fixup
-        claim: "部分和通过 atomic 或有序 reduction 写入 workspace/C；跳过 fixup 的 SK 输出 ≠ 完整 GEMM。"
-        types: [debug, conceptual]
-        difficulty: [3, 4]
-        kind: failure
-      - id: stream_k_occupancy
-        claim: "launched CTA 数通常取可用 CTA 与总 iteration 的函数，使波数不足时仍摊销 K；grid=tiles_m*tiles_n 时 SK 退化为 DP。"
-        types: [optimization, profiling]
-        difficulty: [3, 4]
-        kind: numeric
-      - id: stream_k_residue
-        claim: "TILE_K 不能整除 K 时最后 iteration 有 remainder k；TMA box/谓词仍须覆盖 residue，否则尾部 K 被丢。"
-        types: [debug, layout]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: stream_k_beta
-        claim: "β*C 只能在最终 fixup 应用一次；每个部分 CTA 都加 β*C 会把 C 加多倍。"
-        types: [debug, counterfactual]
-        difficulty: [4]
-        kind: failure
-  - id: pingpong_wg
-    name: Pingpong 调度
-    leaves:
-      - id: pingpong_wg_two
-        claim: "Pingpong 让两个消费者 warp-group 交替做 MMA 与 epilogue，使 epilogue 与下一 tile 的 MMA 重叠。"
-        types: [conceptual, optimization]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: pingpong_wg_api
-        claim: "KernelTmaWarpSpecializedPingpong 与 Cooperative 不同：Cooperative 两 WG 一起 MMA 同一 tile，Pingpong 则交替拥有 acc。"
-        types: [syntax, compare]
-        difficulty: [3, 4]
-        kind: api
-      - id: pingpong_wg_threads
-        claim: "Pingpong kernel 的 block 线程数通常为 256 或 384（含 TMA producer），不能按 Cooperative 的 256 线程 MMA fragment 去切 TV。"
-        types: [layout, debug]
-        difficulty: [3, 4]
-        kind: numeric
-      - id: pingpong_wg_sm90
-        claim: "Pingpong 是 sm_90 warp-specialized 路径；sm_80 CollectiveBuilder 没有 KernelTmaWarpSpecializedPingpong。"
-        types: [conceptual, compare]
-        difficulty: [3]
-        kind: feature
-      - id: pingpong_wg_reg
-        claim: "每个 WG 保留自己的 acc 寄存器，Pingpong 寄存器压力高于同一 WG 串行 epilogue。"
-        types: [optimization, profiling]
-        difficulty: [3]
-        kind: mechanism
-      - id: pingpong_wg_barrier
-        claim: "两 WG 用 named barrier/mbarrier 交接 MMA 完成与 epilogue 完成；漏 barrier 会让 epilogue 读半成品 acc。"
-        types: [debug, conceptual]
-        difficulty: [3, 4]
-        kind: failure
-      - id: pingpong_wg_tile
-        claim: "同一时刻两 WG 处理不同 tile 或同一 tile 的不同阶段；不能假设 blockIdx 唯一对应一个已完成的 D tile。"
-        types: [conceptual, debug]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: pingpong_wg_vs_ws
-        claim: "单 WG 的 KernelTmaWarpSpecialized 无 pingpong 重叠，epilogue 在 MMA 循环之后串行。"
-        types: [compare, optimization]
-        difficulty: [3]
-        kind: api
-  - id: sm90_collective
-    name: Sm90 collectives
-    leaves:
-      - id: sm90_collective_tma
-        claim: "Sm90 CollectiveMainloop 用 TMA 填 smem，wgmma 从 shared-memory descriptor 读 A/B，而不是通用寄存器指针。"
-        types: [conceptual, layout]
-        difficulty: [3]
-        kind: mechanism
-      - id: sm90_collective_wg
-        claim: "warp-group MMA 要求 128 线程同步发出 wgmma；缺 1 个 warp 时结果未定义。"
-        types: [debug, conceptual]
-        difficulty: [3, 4]
-        kind: numeric
-      - id: sm90_collective_mbar
-        claim: "TMA 完成靠 shared mbarrier.expect_tx，不是 cp.async.wait_group。"
-        types: [compare, debug]
-        difficulty: [3]
-        kind: api
-      - id: sm90_collective_cluster
-        claim: "cluster 内 multicast TMA 一次到达多个 CTA smem；ClusterShape 全 1 时不启用 multicast。"
-        types: [optimization, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: sm90_collective_fp8
-        claim: "Sm90 FP8 mainloop 可在 TMA 后做 in-kernel scale；该 scale 与 EVT 里的 α 不是同一阶段。"
-        types: [conceptual, compare]
-        difficulty: [3, 4]
-        kind: feature
-      - id: sm90_collective_no_tmem
-        claim: "Sm90 路径没有 TMEM/tcgen05；把 Sm100 的 TMEM alloc 插入 Sm90 mainloop 非法。"
-        types: [debug, counterfactual]
-        difficulty: [4]
-        kind: failure
-      - id: sm90_collective_desc
-        claim: "smem 128B swizzle 必须同时写入 TMA 与 wgmma 两份 descriptor；只改一份会静默错数。"
-        types: [layout, debug]
-        difficulty: [4]
-        kind: mechanism
-      - id: sm90_collective_cutlass3
-        claim: "CUTLASS 3.0+ 引入 Sm90 collective；2.x 的 Gemm::Kernel 不是 CollectiveBuilder 产物。"
-        types: [syntax, compare]
-        difficulty: [3]
-        kind: feature
-  - id: sm100_collective
-    name: Sm100 collectives
-    leaves:
-      - id: sm100_collective_umma
-        claim: "Sm100 mainloop 发 tcgen05/UMMA，累加器在 TMEM 而不在寄存器文件。"
-        types: [conceptual, compare]
-        difficulty: [4]
-        kind: mechanism
-      - id: sm100_collective_tmem
-        claim: "必须按列分配 TMEM；分配列数不足比 smem carveout 更早让 builder/运行时失败。"
-        types: [syntax, layout]
-        difficulty: [4]
-        kind: api
-      - id: sm100_collective_2cta
-        claim: "部分 Sm100 MMA 形状是 2CTA 协作，ClusterShape 需匹配；(_1,_1,_1) 不能发 2CTA UMMA。"
-        types: [debug, conceptual]
-        difficulty: [4]
-        kind: feature
-      - id: sm100_collective_builder
-        claim: "ArchTag=Sm100 的 CollectiveBuilder 不能用 Sm90 KernelTmaWarpSpecialized 标签生成 UMMA。"
-        types: [syntax, compare]
-        difficulty: [4]
-        kind: api
-      - id: sm100_collective_tma
-        claim: "Sm100 仍用 TMA 喂操作数，但 MMA 源布局与 Hopper wgmma atom 不同，不能复用 Sm90 的 64x128 TV。"
-        types: [layout, compare]
-        difficulty: [4]
-        kind: mechanism
-      - id: sm100_collective_epilogue
-        claim: "acc 必须从 TMEM 搬到寄存器或 TMA store 才进 EVT；把 wgmma 寄存器 acc 接口套在 Sm100 上是错的。"
-        types: [debug, conceptual]
-        difficulty: [4]
-        kind: failure
-      - id: sm100_collective_static
-        claim: "Sm90 与 Sm100 两套 ArchTag 要分开实例化，不能靠运行时 if 切换 TMEM 分配。"
-        types: [syntax, counterfactual]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: sm100_collective_cutlass4
-        claim: "CUTLASS 3.8/4.x 才提供成熟 Sm100 collectives；3.0 Hopper-only 头没有 tcgen05 mainloop。"
-        types: [conceptual, compare]
-        difficulty: [4]
-        kind: feature
-  - id: evt_visitor
-    name: Epilogue Visitor Tree
-    leaves:
-      - id: evt_visitor_tree
-        claim: "EVT 是表达式树：内部节点是 visitor（add/mul/activation），叶子是 acc/C/bias/scalar。"
-        types: [conceptual, layout]
-        difficulty: [3]
-        kind: mechanism
-      - id: evt_visitor_api
-        claim: "用 fusion::LinCombEltAct / ScaledLinCombPerRow 组合树，而不是在 epilogue functor 里再 launch 第二个 kernel。"
-        types: [syntax, code_complete]
-        difficulty: [3]
-        kind: api
-      - id: evt_visitor_dtype
-        claim: "树中各边 ElementCompute 必须能表示中间值；fp16 边会截断 fp32 acc，结果 ≠ 全 fp32 树。"
-        types: [debug, conceptual]
-        difficulty: [3]
-        kind: numeric
-      - id: evt_visitor_aux
-        claim: "融合写 aux（如 softmax 分母）要额外 gmem 指针与 Stride；节点未声明 aux 不会自动分配。"
-        types: [syntax, layout]
-        difficulty: [3, 4]
-        kind: api
-      - id: evt_visitor_pred
-        claim: "尾 tile 谓词必须挂在 visitor 的 store 节点；只在 mainloop 谓词不够，仍会写 OOB D。"
-        types: [debug, layout]
-        difficulty: [3, 4]
-        kind: failure
-      - id: evt_visitor_tma
-        claim: "sm_90 EVT 可挂 TMA store 节点；节点 alignment 不满足则不能走 TMA store，需改对齐或退回向量 store。"
-        types: [optimization, syntax]
-        difficulty: [3, 4]
-        kind: feature
-      - id: evt_visitor_reg
-        claim: "树过深增加寄存器并降低 occupancy；寄存器不足时应减节点或拆 kernel，而不是指望编译器自动切 kernel。"
-        types: [optimization, profiling]
-        difficulty: [3]
-        kind: mechanism
-      - id: evt_visitor_ptrarray
-        claim: "PtrArray EVT 每问题一组指针，用于 grouped GEMM；单问题 kernel 应使用普通 Tensor EVT。"
-        types: [syntax, compare]
-        difficulty: [3]
-        kind: api
-  - id: raster_along
-    name: Tile raster
-    leaves:
-      - id: raster_along_n
-        claim: "AlongN 使连续 CTA 沿 N 扫，B 的 K×tile_n 在 L2 复用提高（当 B 在 N 向邻接）。"
-        types: [optimization, layout]
-        difficulty: [3]
-        kind: mechanism
-      - id: raster_along_m
-        claim: "AlongM 使连续 CTA 沿 M 扫，有利于 A 的 L2 复用。"
-        types: [optimization, layout]
-        difficulty: [3]
-        kind: mechanism
-      - id: raster_along_formula
-        claim: "线性号 t、TM=tiles_m、TN=tiles_n 时 AlongM：(m,n)=(t % TM, t / TM)；AlongN：(m,n)=(t / TN, t % TN)。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: formula
-      - id: raster_along_api
-        claim: "cutlass::gemm::AlongM / AlongN / Heuristic 由模板或 host 参数选择，不是 blockIdx 隐式决定。"
-        types: [syntax, conceptual]
-        difficulty: [2, 3]
-        kind: api
-      - id: raster_along_l2
-        claim: "选错 Along 方向时 L2 hit rate 下降，Nsight 上 DRAM 流量接近无复用上界。"
-        types: [profiling, optimization]
-        difficulty: [3]
-        kind: numeric
-      - id: raster_along_cluster
-        claim: "cluster 调度以 cluster 为原子步进 raster；(2,1) cluster 一次占两个 M 向 CTA。"
-        types: [optimization, conceptual]
-        difficulty: [3, 4]
-        kind: formula
-      - id: raster_along_swizzle
-        claim: "raster swizzle 在 Along 基础上做块置换，纯公式 t%TM 不再等于真实 tile_m。"
-        types: [layout, debug]
-        difficulty: [3]
-        kind: mechanism
-      - id: raster_along_persistent
-        claim: "persistent CTA 领取的下一 t 仍走同一 raster 函数，而不是 blockIdx.x++。"
-        types: [conceptual, debug]
-        difficulty: [3]
-        kind: api
-  - id: kernel_schedule
-    name: KernelSchedule 标签
-    leaves:
-      - id: kernel_schedule_cutlass_ws
-        claim: "KernelTmaWarpSpecialized 是单消费者 WG + TMA producer warps 的 sm_90 路径。"
-        types: [conceptual, syntax]
-        difficulty: [3]
-        kind: api
-      - id: kernel_schedule_cutlass_coop
-        claim: "KernelTmaWarpSpecializedCooperative 两 WG 协作同一 MMA tile，M 方向通常更大（如 256）。"
-        types: [syntax, compare]
-        difficulty: [3]
-        kind: numeric
-      - id: kernel_schedule_auto
-        claim: "KernelScheduleAuto 按 ArchTag 选默认；在 Sm90 上不等于 Pingpong。"
-        types: [conceptual, compare]
-        difficulty: [3]
-        kind: api
-      - id: kernel_schedule_cpasync
-        claim: "KernelCpAsyncWarpSpecialized 走 sm_80 cp.async，不能发 TMA 指令。"
-        types: [syntax, compare]
-        difficulty: [3]
-        kind: feature
-      - id: kernel_schedule_fp8
-        claim: "CooperativeFP8FastAccum 的 fast acc 不保证与 IEEE fp32 逐元素相等。"
-        types: [conceptual, debug]
-        difficulty: [3, 4]
-        kind: numeric
-      - id: kernel_schedule_cutlass_mismatch
-        claim: "把 Pingpong schedule 配 Cooperative 的 256 线程 MMA TV 会 fragment 错位。"
-        types: [debug, counterfactual]
-        difficulty: [4]
-        kind: failure
-      - id: kernel_schedule_sm100
-        claim: "Sm100 使用独立 KernelSchedule 标签（如 1SM/2SM Sm100 特化），不能复用 Sm90 KernelTmaWarpSpecialized。"
-        types: [syntax, compare]
-        difficulty: [4]
-        kind: feature
-      - id: kernel_schedule_static
-        claim: "schedule 是类型的一部分，CUTLASS 用它特化 CollectiveOp；运行时枚举改不了已编译 kernel。"
-        types: [conceptual, syntax]
-        difficulty: [3]
-        kind: mechanism
-  - id: cluster_tma
-    name: Cluster TMA
-    leaves:
-      - id: cluster_tma_multicast
-        claim: "TMA multicast 把同一 gmem tile 写入 cluster 内多个 CTA 的 smem，减少重复 gmem 事务。"
-        types: [optimization, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: cluster_tma_mask
-        claim: "multicast mask 位对应 cluster 内 CTA rank；mask=1 只写本 CTA，等于无 multicast。"
-        types: [syntax, debug]
-        difficulty: [3, 4]
-        kind: formula
-      - id: cluster_tma_shape
-        claim: "ClusterShape<_2,_1,_1> 在 M 向 2 CTA，常 multicast A；<_1,_2,_1> 常 multicast B。"
-        types: [layout, optimization]
-        difficulty: [3]
-        kind: mechanism
-      - id: cluster_tma_launch
-        claim: "必须用带 clusterDim 的 cudaLaunchKernelEx；普通 <<<grid,block>>> 不能组成 cluster。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-      - id: cluster_tma_sm90
-        claim: "cluster 与 TMA multicast 是 sm_90+；sm_80 上 ClusterShape 必须是 <_1,_1,_1>。"
-        types: [conceptual, compare]
-        difficulty: [3]
-        kind: feature
-      - id: cluster_tma_dsmem
-        claim: "cluster 内可通过 dsmem 读他 CTA smem，但要 cluster.sync 或配对 mbarrier 之后才可见。"
-        types: [debug, conceptual]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: cluster_tma_rank
-        claim: "cluster rank 用 block_rank_in_cluster / cute cluster id，不能用 blockIdx.x 当 rank 去填 multicast mask。"
-        types: [debug, syntax]
-        difficulty: [3, 4]
-        kind: failure
-      - id: cluster_tma_size
-        claim: "cluster 内 CTA 数 = Cm*Cn*Ck；H100 上常用 2，超过 SM 上限的 clusterDim 启动失败。"
-        types: [optimization, conceptual]
-        difficulty: [3]
-        kind: numeric
+- id: collective_builder
+  name: Collective Builder
+  leaves:
+  - id: collective_builder_select
+    claim: cutlass::gemm::collective::CollectiveBuilder 按 ArchTag 与 KernelSchedule 选择 mainloop（sm_80 cp.async
+      vs sm_90 TMA+wgmma vs sm_100 TMA+UMMA），不是运行时 if。
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: collective_builder_api
+    claim: CollectiveBuilder<ArchTag, OpClassTensorOp, ElementA, GmemLayoutA, AlignmentA, ...>::CollectiveOp
+      生成 CollectiveMainloop 类型，缺 Alignment 会静态失败。
+    types:
+    - syntax
+    - code_complete
+    difficulty:
+    - 3
+    kind: api
+  - id: collective_builder_carveout
+    claim: StageCountAutoCarveout<sizeof(SharedStorageEpilogue)> 使 mainloop stages 满足 stages * k_tile_bytes
+      + epilogue_smem + mbarrier ≤ smem_capacity。
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: collective_builder_sm100
+    claim: CUTLASS 3.x/4.x 的 Sm100 特化走 tcgen05/UMMA 与 TMEM 分配；同一 builder 在 ArchTag=Sm90 时不能生成 TMEM 主循环。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+  - id: collective_builder_tile
+    claim: TileShape 是 CTA 级 MMA tile，如 Shape<_128,_128,_64> 表示 (M,N,K)=(128,128,64)；它不是问题矩阵的 (M,N,K)。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: collective_builder_cluster
+    claim: ClusterShape<_2,_1,_1> 进入 builder，决定 TMA multicast 与 cluster 内 CTA 数；Sm80 builder 只能用 <_1,_1,_1>。
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 3
+    kind: feature
+  - id: collective_builder_align
+    claim: AlignmentA 以元素计；TMA 路径常需 128-bit 对齐（fp16 时 AlignmentA=8），对不齐会静态失败而不是运行时 pad。
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    kind: numeric
+  - id: collective_builder_schedule
+    claim: KernelSchedule 是模板实参，选择 WS/Cooperative/Pingpong 特化；不是 launch 配置里的 runtime 参数。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: collective_builder_stage_auto
+    claim: StageCountAuto 按 smem 容量最大化 stages，但不扣除 epilogue smem；与 epilogue 共用 smem 必须用 StageCountAutoCarveout。
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: collective_builder_opclass
+    claim: OpClassTensorOp 选 Tensor Core 主循环；OpClassSimt 不会生成 wgmma/UMMA。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: api
+- id: mainloop_pipeline
+  name: mainloop 流水深度
+  leaves:
+  - id: mainloop_pipeline_pc
+    claim: Sm90 TMA warp-specialized mainloop 中 producer warp-group 只发 TMA/mbarrier，consumer warp-group
+      发 wgmma；角色反了会把 MMA 发在空 smem 上。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: mainloop_pipeline_api
+    claim: cute::PipelineTmaAsync<Stages> 或 CUTLASS MainloopPipeline 的 producer_acquire/commit 与 consumer_wait/release
+      必须成对，否则 TMA 描述符槽会耗尽。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: mainloop_pipeline_stages
+    claim: 流水深度 Stages 允许最多 Stages 个 K-tile 的 TMA 未完成；H100 228 KiB smem 上 GEMM 常用 Stages∈[3,7]，Stages=1
+      无法重叠 TMA 与 MMA。
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: numeric
+  - id: mainloop_pipeline_underrun
+    claim: consumer_wait 之前就 wgmma 读该 stage 的 smem，是 pipeline underrun，结果为未定义值而非自动插入硬件 stall 到 TMA 完成。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+    hints:
+    - Stages=2 但 wait_prior<0>
+    - 漏 producer_commit
+  - id: mainloop_pipeline_k_iter
+    claim: mainloop 沿 K 迭代 k_tiles = ceil(K / TILE_K) 次；每次推进一个 K-tile 的 TMA+MMA。
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: mainloop_pipeline_mbar
+    claim: 每个 stage 配 mbarrier；producer arrive.expect_tx(bytes) 的 bytes 必须等于该 tile A+B 的 TMA 字节。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: mainloop_pipeline_wgmma_fence
+    claim: consumer 在 wgmma 前需要对 smem 描述符做 wgmma fence；只做 pipeline wait 不等于 wgmma_commit_group/wait_group。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: mainloop_pipeline_sm80_cp
+    claim: Sm80 mainloop 用 cp.async + mma.sync，没有 warp-group producer/consumer 分裂，不能套用 Sm90 的 TMA pipeline
+      API。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: mainloop_pipeline_overlap
+    claim: Stages=3 允许 1 个计算中的 tile + 最多 2 个 in-flight TMA；要隐藏 TMA 延迟必须 Stages≥2。
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: formula
+- id: epilogue_fusion
+  name: epilogue 融合
+  leaves:
+  - id: epilogue_fusion_evt
+    claim: CUTLASS 3.x epilogue visitor tree（EVT）在寄存器/smem 上融合 bias/activation/scale，不额外 launch kernel，但增加寄存器压力。
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: epilogue_fusion_lincomb
+    claim: cutlass::epilogue::fusion::LinCombEltAct<Relu, ElementOutput, ElementCompute> 实现 D = relu(αAC+βC+bias)
+      一类线性组合，ElementCompute 必须能表示 αβ。
+    types:
+    - syntax
+    - code_complete
+    difficulty:
+    - 3
+    kind: api
+  - id: epilogue_fusion_tma_store
+    claim: sm_90 可选 TMA store epilogue 把 D tile 经 TMA 写回 global；sm_80 builder 没有这条路径，只能用 coalesced 向量
+      store。
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: epilogue_fusion_dtype
+    claim: EVT 中 α/β 的 ElementCompute 位宽必须 ≥ 累加器；用 fp16 compute 做 α*acc 会先量化到 16-bit，结果 ≠ fp32 epilogue。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: epilogue_fusion_source
+    claim: 融合读 C 时 ElementC 与 LayoutC 必须与 builder 一致；C 为空指针且 β≠0 是错误，不会自动当 β=0。
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+  - id: epilogue_fusion_relu_order
+    claim: Relu 作用在 ElementCompute 上；先量化再 relu 与先 relu 再量化一般不等，输出差在阈值附近的元素。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: epilogue_fusion_smem
+    claim: EVT 可能占用 smem scratch；Carveout 必须计入该 SharedStorage，否则 stages 与 epilogue 重叠破坏。
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: epilogue_fusion_v2
+    claim: CUTLASS 2.x 的 EpilogueOp 不是 3.x EVT 树；把 2.x 融合模板塞进 CollectiveBuilder 会静态失败。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: epilogue_fusion_bias_axis
+    claim: bias 向量沿 N 广播，长度须覆盖 tile_n；按 M 轴广播会加错通道。
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    kind: failure
+- id: tile_scheduler
+  name: Tile 调度器
+  leaves:
+  - id: tile_scheduler_persistent
+    claim: Persistent tile scheduler 让 CTA 在 grid 内循环领取 (m,n) tile，摊销 TMA descriptor 与 smem 初始化，而不是一 CTA
+      一 tile 就退出。
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: tile_scheduler_api
+    claim: cutlass::gemm::PersistentScheduler 与 KernelTmaWarpSpecializedCooperative 绑定；Pingpong 调度把两个
+      warp-group 交替做 MMA 与 epilogue。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: tile_scheduler_raster
+    claim: 线性 tile 号 t 映射为 (tile_m, tile_n) = (t % tiles_m, t / tiles_m) 或沿 N raster；沿 N raster 提高 L2
+      对 B 的复用当 B 是列邻接。
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    kind: formula
+  - id: tile_scheduler_cluster
+    claim: sm_90 cluster shape (2,1,1) 把两个 CTA 绑成一个调度原子，TMA multicast 以 cluster 为单位；把 cluster 设成 (1,1,1)
+      就退化为单 CTA、无 multicast。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: tile_scheduler_work
+    claim: persistent CTA 循环直到 work idx ≥ tiles_m * tiles_n；idx 来自 atomic/scheduler 状态，不是 blockIdx 自增。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: formula
+  - id: tile_scheduler_grid
+    claim: persistent 的 grid 常设为 sm_count * cta_per_sm，不是 tiles_m*tiles_n；按输出 tile 数 launch 会失去持久化摊销。
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: numeric
+  - id: tile_scheduler_group
+    claim: Grouped GEMM 用 GroupScheduler，问题尺寸在 host 数组；当普通 PersistentScheduler 会忽略 group 边界而读错指针。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: tile_scheduler_swizzle
+    claim: raster swizzle 把相邻 CTA 映射到 L2 友好的 (m,n) 块；启用后线性公式 t%tiles_m 不再等于真实 tile_m。
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: tile_scheduler_mutex
+    claim: StreamKScheduler 与 PersistentScheduler 是互斥的模板特化，不能在同一 Kernel 类型上同时实例化两个 scheduler。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: api
+- id: stream_k
+  name: Stream-K
+  leaves:
+  - id: stream_k_split
+    claim: Stream-K 把 K 维 tile 分给超过输出 tile 数的 CTA：部分 CTA 做完整 (m,n) 输出，其余做部分 K 再经 fixup reduction 写入 C。
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: stream_k_api
+    claim: CUTLASS GemmUniversal 选择 StreamKScheduler 后由 kernel 内部决定 SK/DP 混合；host 侧仍用同一 GemmUniversalAdapter
+      launch。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: stream_k_iters
+    claim: k_tiles = ceil(K / TILE_K)；Stream-K 把 k_tiles * tiles_m * tiles_n 个 K-iteration 均分到 launched
+      CTA 上，余数 iteration 分给低编号 CTA。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: stream_k_inplace
+    claim: C 与 D 原地且 Stream-K 需要跨 CTA fixup 时，部分和与读旧 C 会竞争；必须用非别名 D 或保证 fixup 原子/分阶段写。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 4
+    kind: failure
+  - id: stream_k_dp_sk
+    claim: DP tile 覆盖完整 K，SK tile 只覆盖部分 K-iteration；同一输出 tile 的 SK 部分必须 fixup 后才等于 DP 结果。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: stream_k_fixup
+    claim: 部分和通过 atomic 或有序 reduction 写入 workspace/C；跳过 fixup 的 SK 输出 ≠ 完整 GEMM。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: stream_k_occupancy
+    claim: launched CTA 数通常取可用 CTA 与总 iteration 的函数，使波数不足时仍摊销 K；grid=tiles_m*tiles_n 时 SK 退化为 DP。
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+  - id: stream_k_residue
+    claim: TILE_K 不能整除 K 时最后 iteration 有 remainder k；TMA box/谓词仍须覆盖 residue，否则尾部 K 被丢。
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: stream_k_beta
+    claim: β*C 只能在最终 fixup 应用一次；每个部分 CTA 都加 β*C 会把 C 加多倍。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 4
+    kind: failure
+- id: pingpong_wg
+  name: Pingpong 调度
+  leaves:
+  - id: pingpong_wg_two
+    claim: Pingpong 让两个消费者 warp-group 交替做 MMA 与 epilogue，使 epilogue 与下一 tile 的 MMA 重叠。
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: pingpong_wg_api
+    claim: KernelTmaWarpSpecializedPingpong 与 Cooperative 不同：Cooperative 两 WG 一起 MMA 同一 tile，Pingpong
+      则交替拥有 acc。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: pingpong_wg_threads
+    claim: Pingpong kernel 的 block 线程数通常为 256 或 384（含 TMA producer），不能按 Cooperative 的 256 线程 MMA fragment
+      去切 TV。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+  - id: pingpong_wg_sm90
+    claim: Pingpong 是 sm_90 warp-specialized 路径；sm_80 CollectiveBuilder 没有 KernelTmaWarpSpecializedPingpong。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: pingpong_wg_reg
+    claim: 每个 WG 保留自己的 acc 寄存器，Pingpong 寄存器压力高于同一 WG 串行 epilogue。
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: pingpong_wg_barrier
+    claim: 两 WG 用 named barrier/mbarrier 交接 MMA 完成与 epilogue 完成；漏 barrier 会让 epilogue 读半成品 acc。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: pingpong_wg_tile
+    claim: 同一时刻两 WG 处理不同 tile 或同一 tile 的不同阶段；不能假设 blockIdx 唯一对应一个已完成的 D tile。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: pingpong_wg_vs_ws
+    claim: 单 WG 的 KernelTmaWarpSpecialized 无 pingpong 重叠，epilogue 在 MMA 循环之后串行。
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 3
+    kind: api
+- id: sm90_collective
+  name: Sm90 collectives
+  leaves:
+  - id: sm90_collective_tma
+    claim: Sm90 CollectiveMainloop 用 TMA 填 smem，wgmma 从 shared-memory descriptor 读 A/B，而不是通用寄存器指针。
+    types:
+    - conceptual
+    - layout
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: sm90_collective_wg
+    claim: warp-group MMA 要求 128 线程同步发出 wgmma；缺 1 个 warp 时结果未定义。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+  - id: sm90_collective_mbar
+    claim: TMA 完成靠 shared mbarrier.expect_tx，不是 cp.async.wait_group。
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: sm90_collective_cluster
+    claim: cluster 内 multicast TMA 一次到达多个 CTA smem；ClusterShape 全 1 时不启用 multicast。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: sm90_collective_fp8
+    claim: Sm90 FP8 mainloop 可在 TMA 后做 in-kernel scale；该 scale 与 EVT 里的 α 不是同一阶段。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sm90_collective_no_tmem
+    claim: Sm90 路径没有 TMEM/tcgen05；把 Sm100 的 TMEM alloc 插入 Sm90 mainloop 非法。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 4
+    kind: failure
+  - id: sm90_collective_desc
+    claim: smem 128B swizzle 必须同时写入 TMA 与 wgmma 两份 descriptor；只改一份会静默错数。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: sm90_collective_cutlass3
+    claim: CUTLASS 3.0+ 引入 Sm90 collective；2.x 的 Gemm::Kernel 不是 CollectiveBuilder 产物。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+- id: sm100_collective
+  name: Sm100 collectives
+  leaves:
+  - id: sm100_collective_umma
+    claim: Sm100 mainloop 发 tcgen05/UMMA，累加器在 TMEM 而不在寄存器文件。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: sm100_collective_tmem
+    claim: 必须按列分配 TMEM；分配列数不足比 smem carveout 更早让 builder/运行时失败。
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 4
+    kind: api
+  - id: sm100_collective_2cta
+    claim: 部分 Sm100 MMA 形状是 2CTA 协作，ClusterShape 需匹配；(_1,_1,_1) 不能发 2CTA UMMA。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+  - id: sm100_collective_builder
+    claim: ArchTag=Sm100 的 CollectiveBuilder 不能用 Sm90 KernelTmaWarpSpecialized 标签生成 UMMA。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 4
+    kind: api
+  - id: sm100_collective_tma
+    claim: Sm100 仍用 TMA 喂操作数，但 MMA 源布局与 Hopper wgmma atom 不同，不能复用 Sm90 的 64x128 TV。
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: sm100_collective_epilogue
+    claim: acc 必须从 TMEM 搬到寄存器或 TMA store 才进 EVT；把 wgmma 寄存器 acc 接口套在 Sm100 上是错的。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: failure
+  - id: sm100_collective_static
+    claim: Sm90 与 Sm100 两套 ArchTag 要分开实例化，不能靠运行时 if 切换 TMEM 分配。
+    types:
+    - syntax
+    - counterfactual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: sm100_collective_cutlass4
+    claim: CUTLASS 3.8/4.x 才提供成熟 Sm100 collectives；3.0 Hopper-only 头没有 tcgen05 mainloop。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+- id: evt_visitor
+  name: Epilogue Visitor Tree
+  leaves:
+  - id: evt_visitor_tree
+    claim: EVT 是表达式树：内部节点是 visitor（add/mul/activation），叶子是 acc/C/bias/scalar。
+    types:
+    - conceptual
+    - layout
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: evt_visitor_api
+    claim: 用 fusion::LinCombEltAct / ScaledLinCombPerRow 组合树，而不是在 epilogue functor 里再 launch 第二个 kernel。
+    types:
+    - syntax
+    - code_complete
+    difficulty:
+    - 3
+    kind: api
+  - id: evt_visitor_dtype
+    claim: 树中各边 ElementCompute 必须能表示中间值；fp16 边会截断 fp32 acc，结果 ≠ 全 fp32 树。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: evt_visitor_aux
+    claim: 融合写 aux（如 softmax 分母）要额外 gmem 指针与 Stride；节点未声明 aux 不会自动分配。
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: evt_visitor_pred
+    claim: 尾 tile 谓词必须挂在 visitor 的 store 节点；只在 mainloop 谓词不够，仍会写 OOB D。
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: evt_visitor_tma
+    claim: sm_90 EVT 可挂 TMA store 节点；节点 alignment 不满足则不能走 TMA store，需改对齐或退回向量 store。
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: evt_visitor_reg
+    claim: 树过深增加寄存器并降低 occupancy；寄存器不足时应减节点或拆 kernel，而不是指望编译器自动切 kernel。
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: evt_visitor_ptrarray
+    claim: PtrArray EVT 每问题一组指针，用于 grouped GEMM；单问题 kernel 应使用普通 Tensor EVT。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: api
+- id: raster_along
+  name: Tile raster
+  leaves:
+  - id: raster_along_n
+    claim: AlongN 使连续 CTA 沿 N 扫，B 的 K×tile_n 在 L2 复用提高（当 B 在 N 向邻接）。
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: raster_along_m
+    claim: AlongM 使连续 CTA 沿 M 扫，有利于 A 的 L2 复用。
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: raster_along_formula
+    claim: 线性号 t、TM=tiles_m、TN=tiles_n 时 AlongM：(m,n)=(t % TM, t / TM)；AlongN：(m,n)=(t / TN, t % TN)。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: raster_along_api
+    claim: cutlass::gemm::AlongM / AlongN / Heuristic 由模板或 host 参数选择，不是 blockIdx 隐式决定。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: raster_along_l2
+    claim: 选错 Along 方向时 L2 hit rate 下降，Nsight 上 DRAM 流量接近无复用上界。
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: raster_along_cluster
+    claim: cluster 调度以 cluster 为原子步进 raster；(2,1) cluster 一次占两个 M 向 CTA。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: raster_along_swizzle
+    claim: raster swizzle 在 Along 基础上做块置换，纯公式 t%TM 不再等于真实 tile_m。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: raster_along_persistent
+    claim: persistent CTA 领取的下一 t 仍走同一 raster 函数，而不是 blockIdx.x++。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: api
+- id: kernel_schedule
+  name: KernelSchedule 标签
+  leaves:
+  - id: kernel_schedule_cutlass_ws
+    claim: KernelTmaWarpSpecialized 是单消费者 WG + TMA producer warps 的 sm_90 路径。
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: kernel_schedule_cutlass_coop
+    claim: KernelTmaWarpSpecializedCooperative 两 WG 协作同一 MMA tile，M 方向通常更大（如 256）。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: numeric
+  - id: kernel_schedule_auto
+    claim: KernelScheduleAuto 按 ArchTag 选默认；在 Sm90 上不等于 Pingpong。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: api
+  - id: kernel_schedule_cpasync
+    claim: KernelCpAsyncWarpSpecialized 走 sm_80 cp.async，不能发 TMA 指令。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: kernel_schedule_fp8
+    claim: CooperativeFP8FastAccum 的 fast acc 不保证与 IEEE fp32 逐元素相等。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+  - id: kernel_schedule_cutlass_mismatch
+    claim: 把 Pingpong schedule 配 Cooperative 的 256 线程 MMA TV 会 fragment 错位。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 4
+    kind: failure
+  - id: kernel_schedule_sm100
+    claim: Sm100 使用独立 KernelSchedule 标签（如 1SM/2SM Sm100 特化），不能复用 Sm90 KernelTmaWarpSpecialized。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+  - id: kernel_schedule_static
+    claim: schedule 是类型的一部分，CUTLASS 用它特化 CollectiveOp；运行时枚举改不了已编译 kernel。
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 3
+    kind: mechanism
+- id: cluster_tma
+  name: Cluster TMA
+  leaves:
+  - id: cluster_tma_multicast
+    claim: TMA multicast 把同一 gmem tile 写入 cluster 内多个 CTA 的 smem，减少重复 gmem 事务。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cluster_tma_mask
+    claim: multicast mask 位对应 cluster 内 CTA rank；mask=1 只写本 CTA，等于无 multicast。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: cluster_tma_shape
+    claim: ClusterShape<_2,_1,_1> 在 M 向 2 CTA，常 multicast A；<_1,_2,_1> 常 multicast B。
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cluster_tma_launch
+    claim: 必须用带 clusterDim 的 cudaLaunchKernelEx；普通 <<<grid,block>>> 不能组成 cluster。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: cluster_tma_sm90
+    claim: cluster 与 TMA multicast 是 sm_90+；sm_80 上 ClusterShape 必须是 <_1,_1,_1>。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: cluster_tma_dsmem
+    claim: cluster 内可通过 dsmem 读他 CTA smem，但要 cluster.sync 或配对 mbarrier 之后才可见。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: cluster_tma_rank
+    claim: cluster rank 用 block_rank_in_cluster / cute cluster id，不能用 blockIdx.x 当 rank 去填 multicast mask。
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: cluster_tma_size
+    claim: cluster 内 CTA 数 = Cm*Cn*Ck；H100 上常用 2，超过 SM 上限的 clusterDim 启动失败。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric

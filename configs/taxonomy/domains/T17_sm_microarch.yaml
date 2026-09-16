@@ -1,616 +1,1021 @@
 id: T17
 name: SM 微架构 SM70→SM100
 children:
-  - id: sm_partitions
-    name: 分区与调度器
-    leaves:
-      - id: sm_partitions_four_smsp
-        claim: "SM70 到 SM90 每个 SM 含 4 个 SMSP/warp scheduler，每拍每 scheduler 最多向 1 个就绪 warp 发射 1 条指令。"
-        types: [conceptual, profiling]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: sm_partitions_launch_bounds
-        claim: "__launch_bounds__(maxThreadsPerBlock, minBlocksPerMultiprocessor) 强制 ptxas 按该驻留下限分配寄存器，不足则编译失败或 spill。"
-        types: [syntax, optimization]
-        difficulty: [2, 3]
-        kind: api
-      - id: sm_partitions_reg_warps
-        claim: "SM70–SM90 寄存器堆为 65536 个 32-bit 寄存器/SM，驻留 warp 数 = min(64, floor(65536 / (regs_per_thread * 32)), 2048/block_threads)。"
-        types: [optimization, profiling]
-        difficulty: [2, 3]
-        kind: formula
-      - id: sm_partitions_ampere_fp32
-        claim: "sm_80 把 Volta 上与 INT32 共享的那条数据通路改成可发 FP32，使每 SM FP32 CUDA core 从 64 增到 128，INT32 吞吐不再与 FP32 完全对等。"
-        types: [conceptual, compare]
-        difficulty: [2, 3]
-        kind: feature
-      - id: sm_partitions_smsp_private
-        claim: "每个 SMSP 持有独立的 warp 调度器、指令缓冲与寄存器堆分区；跨 SMSP 的寄存器不能被同一 warp 直接使用。"
-        types: [conceptual, debug]
-        difficulty: [3]
-        kind: mechanism
-      - id: sm_partitions_cta_slots
-        claim: "SM70–SM90 每 SM 最多 32 个驻留 CTA；1024 线程 block 时 CTA 上限被 2048 threads/SM 先卡成 2，即使 smem 有余量。"
-        types: [optimization, conceptual]
-        difficulty: [2, 3]
-        kind: numeric
-      - id: sm_partitions_reg_granule
-        claim: "Volta+ 寄存器按每线程 8 的粒度分配，请求 41 个寄存器的实际占用 = 48，occupancy 按 48 而不是 41 计算。"
-        types: [optimization, profiling]
-        difficulty: [2, 3]
-        kind: formula
-      - id: sm_partitions_quad_sub
-        claim: "同一 SMSP 内 8 个 CUDA core 一组处理半拍 SIMT；divergence 在 warp 内按活跃 mask 串行，不会把 lane 迁到另一 SMSP。"
-        types: [conceptual, optimization]
-        difficulty: [3]
-        kind: mechanism
-      - id: sm_partitions_sm100_tpc
-        claim: "Blackwell sm_100 仍以 TPC 为双 SM 封装的调度域，CTA 落点由 GigaThread 引擎按 TPC/SM 空位分配，不是软件选 SM 编号。"
-        types: [conceptual, compare]
-        difficulty: [3, 4]
-        kind: feature
-      - id: sm_partitions_min_blocks_fail
-        claim: "minBlocksPerMultiprocessor 与 regs/smem 冲突时 ptxas 报“register allocation failed”或强制 spill，不会静默降 occupancy。"
-        types: [debug, syntax]
-        difficulty: [3]
-        kind: failure
-        hints: ["__launch_bounds__(256, 8) 且每线程 128 regs", "动态 smem 再叠加"]
-  - id: tensor_pipe
-    name: Tensor 管道
-    leaves:
-      - id: tensor_pipe_wgmma_group
-        claim: "Hopper wgmma.mma_async 以 warp-group（128 线程）为发射与完成单位，单 warp 发 mma.sync 不能驱动同一套 wgmma 数据通路。"
-        types: [conceptual, debug]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: tensor_pipe_wgmma_wait
-        claim: "wgmma.commit_group 把已发的 wgmma.mma_async 编入完成组，wgmma.wait_group N 阻塞到未完成组数 ≤ N。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-      - id: tensor_pipe_hmma_shape
-        claim: "sm_80 mma.sync.aligned.m16n8k16.f32.f16.f16 每线程片段为 A=4×f16（2 个 32-bit 寄存器）、B=2×f16（1 个寄存器）、D=4×f32。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: formula
-      - id: tensor_pipe_tcgen05_issue
-        claim: "sm_100a 的 tcgen05.mma（UMMA）由 CTA 内一条 elect 线程发射，累加器在 TMEM 而非寄存器；sm_90 的 wgmma 不能寻址 TMEM。"
-        types: [conceptual, compare]
-        difficulty: [4]
-        kind: feature
-      - id: tensor_pipe_mma_queue
-        claim: "mma.sync 完成由 warp 寄存器 scoreboard 跟踪；在结果寄存器被后续 FFMA 读取前插入无关指令可隐藏 tensor 延迟。"
-        types: [optimization, profiling]
-        difficulty: [3]
-        kind: mechanism
-      - id: tensor_pipe_wgmma_fence
-        claim: "wgmma.fence 把先前 ld.shared 的 smem 描述符内容对后续 wgmma.mma_async 可见；缺 fence 时 A/B 描述符可读到旧 tile。"
-        types: [debug, syntax]
-        difficulty: [3, 4]
-        kind: api
-      - id: tensor_pipe_async_depth
-        claim: "Hopper wgmma 允许在 wait_group 前重叠多组 MMA，常用深度 2；wait_group 0 才保证全部累加器寄存器已写完。"
-        types: [optimization, conceptual]
-        difficulty: [3]
-        kind: numeric
-      - id: tensor_pipe_sparse
-        claim: "sm_80+ mma.sp 的 2:4 稀疏走同一 Tensor Core 管道但需要 metadata 寄存器；非法 metadata 不会自动回退稠密 MMA。"
-        types: [debug, conceptual]
-        difficulty: [3, 4]
-        kind: feature
-      - id: tensor_pipe_fp32_tf32
-        claim: "Ampere Tensor Core 的 TF32 路径是 19-bit 有效精度（1+8+10），不是 IEEE FP32 全 23-bit 尾数。"
-        types: [conceptual, compare]
-        difficulty: [2, 3]
-        kind: numeric
-      - id: tensor_pipe_no_scalar_mix
-        claim: "同一拍不能把 wgmma 与依赖其 D 寄存器的标量 FMA 当成已完成；必须 wait_group 后再用 D，否则读到部分更新。"
-        types: [debug, counterfactual]
-        difficulty: [3]
-        kind: failure
-        hints: ["wgmma.mma_async 后立刻 fadd D", "缺 wgmma.wait_group 0"]
-  - id: lsu_mio
-    name: LSU 与 MIO
-    leaves:
-      - id: lsu_mio_cp_async_path
-        claim: "sm_80 的 cp.async 走 SM 异步拷贝/LSU 通路把 global 写入 shared，完成与 ld.shared 之间必须 cp.async.wait_group/wait_all，否则读到未完成数据。"
-        types: [debug, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: lsu_mio_tma_mbarrier
-        claim: "sm_90 cp.async.bulk.tensor（TMA）由专用 copy engine 执行，完成信号写入 shared 中的 mbarrier 事务计数，而不是 scoreboard 到通用寄存器。"
-        types: [conceptual, profiling]
-        difficulty: [3, 4]
-        kind: feature
-      - id: lsu_mio_smem_bank
-        claim: "32-bank shared 上同拍 32 个 4-byte 访问的 bank index = (byte_addr / 4) mod 32，相同 bank 不同字串行化为 N-way conflict。"
-        types: [optimization, layout]
-        difficulty: [2, 3]
-        kind: formula
-      - id: lsu_mio_stall_mio
-        claim: "NCU stall reason mio_throttle 表示 MIO 管道（shared/TMA/特殊功能）背压，继续加 ld.shared 密度会加重而非隐藏该 stall。"
-        types: [profiling, optimization]
-        difficulty: [3]
-        kind: failure
-      - id: lsu_mio_ldgsts
-        claim: "SASS LDGSTS 对应 cp.async；它占用 LSU 而不是 Tensor 管道，与 MMA 可重叠，但与大量 LDG/STG 争同一 LSU。"
-        types: [profiling, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: lsu_mio_sfu
-        claim: "SFU/MIO 负责 rsqrt/sinf/popc 等特殊函数，吞吐远低于 FMA；把热循环里的 rsqrtf 当 FMA 隐藏会表现为 mio/sfu stall。"
-        types: [optimization, profiling]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: lsu_mio_l1_shared
-        claim: "Volta+ 的 L1 与 shared 共用同一数据 SRAM；提高 smem 容量会缩小 L1 数据缓存，表现为 ld.global 命中率下降。"
-        types: [optimization, compare]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: lsu_mio_texture_unit
-        claim: "纹理/表面访问走 TEX/MIO 而非通用 LSU；__ldg 走只读缓存路径，与 ld.global.ca 的 L1 数据缓存不是同一套命中计数。"
-        types: [profiling, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: lsu_mio_64bit_bank
-        claim: "8-byte shared 的 bank index = (byte_addr / 8) mod 32；addr 与 addr+256 落入同一 bank，2-way conflict。"
-        types: [layout, optimization]
-        difficulty: [3]
-        kind: formula
-      - id: lsu_mio_tma_not_lsu
-        claim: "Hopper TMA 不占用 SM LSU 发射槽，因此 kernel 在 TMA 飞行时可继续发 MMA；用 sm_80 cp.async 密度去估 sm_90 TMA 占用会错。"
-        types: [compare, profiling]
-        difficulty: [3, 4]
-        kind: feature
-  - id: tmem_physical
-    name: TMEM 物理组织
-    leaves:
-      - id: tmem_physical_not_smem
-        claim: "Blackwell TMEM 是独立于寄存器堆与 shared 的 2D SRAM，只能由 tcgen05.ld/st/cp/mma 访问，不能取地址当 generic shared 用。"
-        types: [conceptual, compare]
-        difficulty: [4]
-        kind: mechanism
-      - id: tmem_physical_alloc_cols
-        claim: "tcgen05.alloc 按 column 向 CTA 分配 TMEM，列数必须是 32 的倍数；dealloc 前仍对该列发 tcgen05.mma 是非法的。"
-        types: [syntax, debug]
-        difficulty: [4]
-        kind: api
-      - id: tmem_physical_capacity
-        claim: "sm_100 每个 SM 的 TMEM = 128 lanes × 512 columns × 4 bytes = 256 KiB，最大单 CTA 累加器常用 256 columns（128 KiB）。"
-        types: [conceptual, layout]
-        difficulty: [4]
-        kind: numeric
-      - id: tmem_physical_sm120_absent
-        claim: "GeForce Blackwell sm_120 没有 TMEM 也没有 tcgen05.*，CUTLASS/PTX 必须回退 mma.sync 或 wgmma，不能把 sm_100a cubin 当 sm_120 跑。"
-        types: [debug, compare]
-        difficulty: [4]
-        kind: failure
-      - id: tmem_physical_lane_col
-        claim: "TMEM 地址是 (lane, column) 二维：tcgen05.ld 按列收集 32-bit 字到寄存器，不能用线性 smem 下标当 TMEM 坐标。"
-        types: [layout, syntax]
-        difficulty: [4]
-        kind: mechanism
-      - id: tmem_physical_cta_share
-        claim: "同一 SM 上两 CTA 分时占用 TMEM 列集合，总列数 ≤ 512；超分配时 tcgen05.alloc 失败或阻塞，不会静默别名他 CTA 累加器。"
-        types: [debug, conceptual]
-        difficulty: [4]
-        kind: numeric
-      - id: tmem_physical_ldst_width
-        claim: "tcgen05.ld/st 有 16/32-column 等宽度限制，宽度必须整除已分配列数；错宽度读会越出本 CTA 列窗口。"
-        types: [syntax, debug]
-        difficulty: [4]
-        kind: api
-      - id: tmem_physical_relinquish
-        claim: "tcgen05.relinquish_alloc_permit 之后本 CTA 不能再 alloc；再 alloc 是非法，应在完成所有 alloc 后、进入 MMA 稳态前调用。"
-        types: [syntax, debug]
-        difficulty: [4]
-        kind: failure
-        hints: ["MMA 循环内再次 alloc", "relinquish 后再 tcgen05.alloc"]
-      - id: tmem_physical_cp_async_no
-        claim: "cp.async / TMA 不能把 global 直接写入 TMEM；须 TMA→smem 或 tcgen05.cp 规定路径，否则没有合法编码。"
-        types: [conceptual, compare]
-        difficulty: [4]
-        kind: mechanism
-      - id: tmem_physical_sm100a_only
-        claim: "tcgen05.* 属于 sm_100a 加速特性；sm_100f 等无 UMMA 的变体不能假设 256 KiB TMEM 对用户 kernel 开放。"
-        types: [conceptual, compare]
-        difficulty: [4]
-        kind: feature
-  - id: clocks_issue
-    name: 发射与时钟
-    leaves:
-      - id: clocks_issue_dual_issue
-        claim: "Volta/Ampere 同一 SMSP 可在一拍向同一 warp 双发（例如 INT 与 FP 不同管道），但两条都用 FMA/Tensor 管道时第二发会被堵住。"
-        types: [conceptual, optimization]
-        difficulty: [3]
-        kind: mechanism
-      - id: clocks_issue_max_warps
-        claim: "SM70–SM90 硬件上限 = 64 warps/SM = 2048 threads/SM；block 为 1024 线程时每 SM 最多 2 个 CTA，即使寄存器与 smem 仍有余量。"
-        types: [optimization, conceptual]
-        difficulty: [2]
-        kind: numeric
-      - id: clocks_issue_clock64
-        claim: "clock64() 读的是 SM 时钟计数器，差值 / 1e6 不是毫秒；跨 CTA 比较 clock64 没有设备级同步语义。"
-        types: [profiling, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: clocks_issue_h100_smem
-        claim: "sm_90 H100 每 SM 可配置共享内存上限为 228 KiB（大于 sm_80 的 164 KiB），直接决定 wgmma 流水线 stage 数上限。"
-        types: [optimization, compare]
-        difficulty: [3]
-        kind: feature
-      - id: clocks_issue_gpcclk
-        claim: "NCU gpc__cycles_elapsed 与 clock64 的比值 = GPC_clk/SM_clk，动态调频时该比值 ≠ 1，不能把二者当同一计数器相减。"
-        types: [profiling, conceptual]
-        difficulty: [3]
-        kind: formula
-      - id: clocks_issue_tensor_busy
-        claim: "pipe_tensor_cycles_active 高而 issue_slot_empty 也高，说明 tensor 管道满、调度器缺独立指令；再增加纯 MMA 密度不会提高 SM 吞吐。"
-        types: [profiling, optimization]
-        difficulty: [3]
-        kind: failure
-      - id: clocks_issue_s2r_clock
-        claim: "SASS S2R SR_CLOCKLO 对应 clock() 的 32-bit 低位，溢出周期 = 2^32 SM 拍；长 kernel 必须用 clock64 避免回绕算成负延迟。"
-        types: [debug, profiling]
-        difficulty: [2, 3]
-        kind: numeric
-      - id: clocks_issue_scoreboard
-        claim: "固定延迟管道（FMA）用静态 scoreboard，可变延迟 ld/st 用动态 scoreboard；过早使用 ld 结果表现为 long_scoreboard stall。"
-        types: [profiling, conceptual]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: clocks_issue_ibar
-        claim: "bar.sync 让 warp 在 barrier 单元等待，等待期间该 warp 不占 issue 槽，但 SMSP 上其他就绪 warp 仍可发射。"
-        types: [conceptual, optimization]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: clocks_issue_blackwell_clk
-        claim: "Blackwell sm_100 的 UMMA/TMEM 完成不以 clock64 差值当同步；必须 tcgen05.wait 或 mbarrier，跨 CTA 比 clock64 无意义。"
-        types: [debug, conceptual]
-        difficulty: [4]
-        kind: feature
-  - id: gpc_tpc
-    name: GPC 与 TPC
-    leaves:
-      - id: gpc_tpc_hierarchy
-        claim: "GPU 层次为 GPC ⊃ TPC ⊃ SM：Ampere+ 每个 TPC 含 2 个 SM 与 1 个 PolyMorph/纹理前端。"
-        types: [conceptual, compare]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: gpc_tpc_a100
-        claim: "A100 满配 SM 数 = 7 GPC × 8 TPC × 2 SM = 112，SKU 屏蔽后常用 108 SM。"
-        types: [conceptual, profiling]
-        difficulty: [3]
-        kind: formula
-      - id: gpc_tpc_h100
-        claim: "H100 SXM 满配 8 GPC × 9 TPC × 2 SM = 144 SM，常见 SKU 为 132 SM；不能把 108 的 A100 公式套到 Hopper。"
-        types: [compare, conceptual]
-        difficulty: [3]
-        kind: feature
-      - id: gpc_tpc_raster
-        claim: "图形光栅/ROP 挂在 GPC 级，计算 kernel 不经过光栅，但 GPC 时钟域仍是 NCU gpc__* 计数器的来源。"
-        types: [profiling, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: gpc_tpc_l2_slice
-        claim: "L2 slice 按物理地址交叉分布在 GPU 级，不属于单个 TPC；跨 SM 一致性点在 L2 而不是 TPC 私有缓存。"
-        types: [conceptual, optimization]
-        difficulty: [3]
-        kind: mechanism
-      - id: gpc_tpc_cluster_place
-        claim: "Hopper thread-block cluster 尽量落在能走 DSMEM/多播的 SM 集合；cluster 尺寸超过 GPC/SM 拓扑允许范围会导致 launch 失败。"
-        types: [debug, conceptual]
-        difficulty: [3, 4]
-        kind: feature
-      - id: gpc_tpc_sm_id
-        claim: "%smid 是逻辑 SM 编号，不保证相邻 CTA 的 smid 连续，也不能用 smid 差当跨 GPC 延迟模型。"
-        types: [debug, profiling]
-        difficulty: [2, 3]
-        kind: api
-      - id: gpc_tpc_b200
-        claim: "Blackwell B200 的 GPC/TPC 计数随 SKU 变化，编程模型仍是 grid→CTA→warp；不能假设与 H100 相同的 132 SM。"
-        types: [conceptual, compare]
-        difficulty: [3]
-        kind: feature
-  - id: warp_schedulers
-    name: Warp 调度器
-    leaves:
-      - id: warp_schedulers_four
-        claim: "SM70–SM90 每 SM 4 个 warp scheduler，每 scheduler 管理最多 16 个 warp（64/4），每拍各选 1 个就绪 warp。"
-        types: [conceptual, profiling]
-        difficulty: [2]
-        kind: numeric
-      - id: warp_schedulers_eligible
-        claim: "就绪 warp 条件 = 有指令 ∧ scoreboard 清 ∧ 不在 barrier/yield；stall 的 warp 把 issue 机会让给同 SMSP 其他 warp。"
-        types: [conceptual, optimization]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: warp_schedulers_its
-        claim: "sm_70 Independent Thread Scheduling 让 warp 内线程有独立 PC；调度器仍以 warp 为发射单位，只是 convergent 不再硬件隐式保证。"
-        types: [conceptual, debug]
-        difficulty: [3]
-        kind: feature
-      - id: warp_schedulers_yield
-        claim: "nanosleep/yield 让当前 warp 放弃 issue，利于同 SMSP 上延迟隐藏；不能当作内存 fence。"
-        types: [optimization, conceptual]
-        difficulty: [2]
-        kind: api
-      - id: warp_schedulers_dual_issue
-        claim: "同一 warp 双发要求两条指令走不同执行管道且无寄存器冲突；两条 FFMA 不能双发。"
-        types: [optimization, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: warp_schedulers_occupancy_ilp
-        claim: "每 scheduler 仅 1 个 issue 槽时，隐藏 ld 延迟需要同 SMSP 有多个就绪 warp 或同 warp 高 ILP；occupancy=1 warp/SMSP 时 long_scoreboard 无法被他 warp 填满。"
-        types: [optimization, profiling]
-        difficulty: [3]
-        kind: formula
-      - id: warp_schedulers_barrier_mask
-        claim: "warp 在 bar.sync 上睡眠时对调度器不可选；部分线程未到达时整个 warp 仍占驻留名额但不发指令。"
-        types: [conceptual, debug]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: warp_schedulers_sm100
-        claim: "sm_100 UMMA 由 elect 线程代表 CTA 发射，不要求 4 个 scheduler 各发一条 MMA；调度器仍负责其余整数/LSU 指令。"
-        types: [conceptual, compare]
-        difficulty: [4]
-        kind: feature
-  - id: rf_banks
-    name: 寄存器堆银行
-    leaves:
-      - id: rf_banks_partition
-        claim: "寄存器堆按 SMSP 分区：每分区容量 = 65536/4 = 16384 个 32-bit 寄存器，本 SMSP 的 16 个 warp 共享该分区。"
-        types: [conceptual, layout]
-        difficulty: [3]
-        kind: formula
-      - id: rf_banks_collector
-        claim: "operand collector 从寄存器堆多 bank 收集源操作数；同拍多指令争同一 bank 会造成 collector stall，即使算术管道空闲。"
-        types: [profiling, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: rf_banks_max_per_thread
-        claim: "硬件上限 255 个 32-bit 寄存器/线程；请求 256 会编译失败，不会回绕到 0。"
-        types: [syntax, debug]
-        difficulty: [2]
-        kind: numeric
-      - id: rf_banks_uniform
-        claim: "Volta+ 有 uniform 寄存器文件存 warp 一致值，减少收集带宽；发散后的值不能再当 uniform 用。"
-        types: [optimization, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: rf_banks_spill_local
-        claim: "寄存器不够时 ptxas 溢出到 local，经 LSU 访问，延迟 ≫ RF；NCU 的 lmem_peak 上升说明 occupancy 换来了 spill。"
-        types: [profiling, optimization]
-        difficulty: [2, 3]
-        kind: failure
-      - id: rf_banks_reuse
-        claim: "SASS 的寄存器 reuse 标志让 operand 留在 collector，避免再读 RF bank；手工内联 PTX 时无该标志可能增加 bank 压力。"
-        types: [optimization, conceptual]
-        difficulty: [4]
-        kind: mechanism
-      - id: rf_banks_wgmma_d
-        claim: "Hopper wgmma 的 D 仍在通用 RF，大 n 形状会撑爆每线程寄存器；sm_100 UMMA 把累加器放到 TMEM 正是为了卸 RF 压力。"
-        types: [compare, optimization]
-        difficulty: [3, 4]
-        kind: feature
-      - id: rf_banks_bank_conflict
-        claim: "同一指令 3 个源寄存器若映射到同一 RF bank 且未 reuse，收集周期可从 1 增到 2+，表现为 issue 后的依赖气泡。"
-        types: [profiling, optimization]
-        difficulty: [3, 4]
-        kind: numeric
-  - id: sm70_volta
-    name: SM70 Volta 单元
-    leaves:
-      - id: sm70_volta_its
-        claim: "sm_70 引入 Independent Thread Scheduling 与每线程 PC，__syncwarp 成为 warp 内共享可见性的必需同步。"
-        types: [conceptual, debug]
-        difficulty: [2, 3]
-        kind: feature
-      - id: sm70_volta_fp32_int
-        claim: "Volta 每 SM 64 FP32 + 64 INT32 但共享数据通路，峰值不能同时达到 64 FMA/拍与 64 INT/拍。"
-        types: [conceptual, compare]
-        difficulty: [2, 3]
-        kind: numeric
-      - id: sm70_volta_tensor
-        claim: "sm_70 第一代 Tensor Core 原生 HMMA，形状以 m8n8k4 等为硬件单位，CUDA WMMA m16n16k16 由多次 HMMA 合成。"
-        types: [conceptual, syntax]
-        difficulty: [3]
-        kind: mechanism
-      - id: sm70_volta_smem
-        claim: "V100 每 SM 共享内存可配到 96 KiB，L1/shared 合计 128 KiB 量级，小于 sm_80 的 192 KiB 合计。"
-        types: [optimization, compare]
-        difficulty: [2]
-        kind: feature
-      - id: sm70_volta_no_cp_async
-        claim: "sm_70 没有 cp.async；global→shared 只能 ld.global+st.shared，CUDA 11 memcpy_async 在 Volta 上降级为同步拷贝。"
-        types: [syntax, compare]
-        difficulty: [2, 3]
-        kind: feature
-      - id: sm70_volta_match
-        claim: "sm_70 提供 match.any.sync / match.all.sync 做 warp 内值匹配，前代架构无此指令。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: api
-      - id: sm70_volta_activemask
-        claim: "__activemask() 在 ITS 下返回当前执行该指令的 lane 集合，不等于 __ballot_sync(0xffffffff,1)，分歧分支里二者不同。"
-        types: [debug, compare]
-        difficulty: [3]
-        kind: failure
-        hints: ["if(lane<16) mask=__activemask()", "把它当满 warp 掩码"]
-      - id: sm70_volta_l2
-        claim: "GV100 L2 约 6 MiB，是设备级一致性点；跨 SM 普通 load 仍可命中 SM L1 而看不到已达 L2 的 store。"
-        types: [conceptual, profiling]
-        difficulty: [3]
-        kind: mechanism
-  - id: sm80_ampere
-    name: SM80 Ampere 单元
-    leaves:
-      - id: sm80_ampere_fp32_128
-        claim: "sm_80 每 SM 128 个 FP32 CUDA core，FP32 峰值相对 sm_70 约 2×，INT32 仍约 64 路。"
-        types: [compare, conceptual]
-        difficulty: [2]
-        kind: feature
-      - id: sm80_ampere_cp_async
-        claim: "Ampere 引入 cp.async.ca/cg 与 commit_group/wait_group，把 global→shared 从 LSU 同步路径改为异步拷贝引擎。"
-        types: [conceptual, optimization]
-        difficulty: [2, 3]
-        kind: feature
-      - id: sm80_ampere_smem_164
-        claim: "A100 每 SM 共享内存上限 164 KiB，opt-in 后占用 L1 SRAM；默认 48 KiB 时 occupancy 计算不能按 164 估。"
-        types: [optimization, conceptual]
-        difficulty: [2, 3]
-        kind: numeric
-      - id: sm80_ampere_l2_persist
-        claim: "sm_80 的 L2 persisting access window 把指定 VA 范围优先留在 L2，需 cudaAccessPolicyWindow，不影响寄存器/smem。"
-        types: [optimization, syntax]
-        difficulty: [3]
-        kind: api
-      - id: sm80_ampere_async_barrier
-        claim: "CUDA 11 的 cuda::barrier 与 pipeline 在 sm_80 上映射到 mbarrier/cp.async，在 sm_70 上无硬件 mbarrier。"
-        types: [syntax, compare]
-        difficulty: [3]
-        kind: feature
-      - id: sm80_ampere_sparse_tc
-        claim: "第三代 Tensor Core 支持 2:4 sparse MMA 与 TF32；sparse 需要 metadata，不能把稠密 mma.sync 当 sp 用。"
-        types: [conceptual, debug]
-        difficulty: [3]
-        kind: mechanism
-      - id: sm80_ampere_no_tma
-        claim: "sm_80 没有 TMA/cluster/dsmem；cp.async.bulk.tensor 在 Ampere 上非法。"
-        types: [syntax, compare]
-        difficulty: [2, 3]
-        kind: failure
-      - id: sm80_ampere_l2_size
-        claim: "A100 L2 = 40 MiB，是 Ampere 设备级一致性与缓存容量的主要升级，不是每 SM 私有 40 MiB。"
-        types: [conceptual, profiling]
-        difficulty: [2]
-        kind: numeric
-  - id: sm90_hopper
-    name: SM90 Hopper 单元
-    leaves:
-      - id: sm90_hopper_tma
-        claim: "sm_90 TMA 由 tensor memory accelerator 执行 cp.async.bulk.tensor，描述符在 generic 空间，完成打在 mbarrier 上。"
-        types: [conceptual, syntax]
-        difficulty: [3, 4]
-        kind: feature
-      - id: sm90_hopper_wgmma
-        claim: "Hopper wgmma.mma_async 从 smem descriptor 取 A/B、D 进寄存器，发射单位 128 线程 warp-group。"
-        types: [conceptual, debug]
-        difficulty: [3]
-        kind: mechanism
-      - id: sm90_hopper_cluster
-        claim: "thread-block cluster 提供 dsmem 与 cluster.sync；cluster 尺寸须整除 grid 且受 SM 驻留限制。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: api
-      - id: sm90_hopper_smem_228
-        claim: "H100 每 SM 共享内存上限 228 KiB，常用 2–3 stage wgmma 流水线的 smem 预算按 228 而不是 164 计算。"
-        types: [optimization, layout]
-        difficulty: [3]
-        kind: numeric
-      - id: sm90_hopper_tmem_absent
-        claim: "Hopper 没有 TMEM/tcgen05；累加器必须放 RF 或 smem，不能把 Blackwell kernel 的 TMEM 地址当 Hopper 合法。"
-        types: [compare, debug]
-        difficulty: [3, 4]
-        kind: failure
-      - id: sm90_hopper_setmaxnreg
-        claim: "sm_90 setmaxnreg 允许 warp-group 动态调整寄存器配额，配合 warp specialization 把寄存器让给 MMA warp。"
-        types: [optimization, syntax]
-        difficulty: [4]
-        kind: api
-      - id: sm90_hopper_gmma_pipe
-        claim: "wgmma 管道与 TMA 管道独立：TMA wait 完成不意味着 wgmma.wait_group 完成，两条完成链必须分别等待。"
-        types: [debug, conceptual]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: sm90_hopper_l2
-        claim: "sm_90 Hopper H100 的 L2 约 50 MiB 量级且带更高带宽切片；一致性点仍在 L2，cluster 内 dsmem 不经过 L2。"
-        types: [conceptual, profiling]
-        difficulty: [3]
-        kind: feature
-  - id: sm100_blackwell
-    name: SM100 Blackwell 单元
-    leaves:
-      - id: sm100_blackwell_umma
-        claim: "sm_100a tcgen05.mma 由 CTA elect 线程发射，A/B 可来自 smem 或 TMEM，累加器驻 TMEM。"
-        types: [conceptual, syntax]
-        difficulty: [4]
-        kind: feature
-      - id: sm100_blackwell_tmem_256
-        claim: "B200 类 sm_100 TMEM 容量 256 KiB/SM，与 228 KiB smem 并存，不是从 smem 里再切一块。"
-        types: [layout, compare]
-        difficulty: [4]
-        kind: numeric
-      - id: sm100_blackwell_no_wgmma_tmem
-        claim: "wgmma.mma_async 不能把 TMEM 当 smem descriptor 用；混用两条 MMA ISA 需要对不同累加器空间显式搬运。"
-        types: [debug, compare]
-        difficulty: [4]
-        kind: failure
-      - id: sm100_blackwell_2cta
-        claim: "部分 tcgen05.mma 形状支持 2-CTA 协作，要求 cluster 内配对 CTA 与约定 TMEM/smem 布局，单 CTA launch 不能发该形状。"
-        types: [syntax, conceptual]
-        difficulty: [4]
-        kind: api
-      - id: sm100_blackwell_sm120
-        claim: "GeForce sm_120 是另一条 Blackwell 计算能力，缺 TMEM/UMMA，不能把 sm_100a cubin 当 sm_120 加载。"
-        types: [debug, compare]
-        difficulty: [4]
-        kind: feature
-      - id: sm100_blackwell_tma5
-        claim: "Blackwell TMA 相对 Hopper 增加更宽的 tensor 搬运与 TMEM 相关 copy；完成仍由 mbarrier tx_count 表达。"
-        types: [conceptual, optimization]
-        difficulty: [4]
-        kind: mechanism
-      - id: sm100_blackwell_elect
-        claim: "UMMA 发射线程由 elect.sync 选出，其余线程必须汇合在同一 MMA 序列上，不能各发各的 tcgen05.mma。"
-        types: [debug, conceptual]
-        difficulty: [4]
-        kind: mechanism
-      - id: sm100_blackwell_rf_offload
-        claim: "把累加器放 TMEM 后每线程 RF 可留给地址计算与 epilogue；仍用 Hopper 的 m64n256 RF 累加器布局会在 Blackwell 上浪费 TMEM。"
-        types: [optimization, compare]
-        difficulty: [4]
-        kind: mechanism
-  - id: issue_scoreboard
-    name: 记分牌与执行管道
-    leaves:
-      - id: issue_scoreboard_long
-        claim: "NCU stall long_scoreboard 主要来自 ld/st 结果未就绪；增加与该 load 无关的独立算术才能隐藏，而不是再发依赖它的指令。"
-        types: [profiling, optimization]
-        difficulty: [2, 3]
-        kind: failure
-      - id: issue_scoreboard_short
-        claim: "short_scoreboard 来自短可变延迟（如一些 MIO）；与 math_pipe 满不同，对症是降 MIO 密度或提高 occupancy。"
-        types: [profiling, compare]
-        difficulty: [3]
-        kind: mechanism
-      - id: issue_scoreboard_wait
-        claim: "SASS 的 WAIT / DEPBAR 编码静态等待固定管道；手工 SASS 改 wait 数过小会读到错误寄存器，过大则浪费拍。"
-        types: [debug, conceptual]
-        difficulty: [4]
-        kind: numeric
-      - id: issue_scoreboard_fma_pipe
-        claim: "FFMA/FADD 走 FP32 管道，HMMA/wgmma 走 Tensor 管道，二者可重叠；但 D 寄存器依赖仍受 scoreboard 约束。"
-        types: [optimization, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: issue_scoreboard_imad
-        claim: "IMAD/IADD 走整数管道，sm_80 上不再与 FP32 完全抢同一数据通路，地址计算与 FP32 可更好双发。"
-        types: [optimization, compare]
-        difficulty: [2, 3]
-        kind: feature
-      - id: issue_scoreboard_barrier_unit
-        claim: "CTA barrier 有独立硬件计数器，bar.sync 不经过 LSU scoreboard；把 barrier 当内存 load 用 NCU mem 指标看会看到 0 字节。"
-        types: [profiling, conceptual]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: issue_scoreboard_yield_not_wait
-        claim: "YIELD 只让出调度器，不清除 scoreboard；load 未完成时 yield 回来仍会 stall。"
-        types: [counterfactual, conceptual]
-        difficulty: [2]
-        kind: mechanism
-      - id: issue_scoreboard_mbar_async
-        claim: "mbarrier.try_wait 失败路径应循环而非当作 scoreboard 已清；TMA 完成与通用寄存器 scoreboard 无关。"
-        types: [debug, conceptual]
-        difficulty: [3, 4]
-        kind: api
+- id: sm_partitions
+  name: 分区与调度器
+  leaves:
+  - id: sm_partitions_four_smsp
+    claim: SM70 到 SM90 每个 SM 含 4 个 SMSP/warp scheduler，每拍每 scheduler 最多向 1 个就绪 warp 发射 1 条指令。
+    types:
+    - conceptual
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: sm_partitions_launch_bounds
+    claim: __launch_bounds__(maxThreadsPerBlock, minBlocksPerMultiprocessor) 强制 ptxas 按该驻留下限分配寄存器，不足则编译失败或
+      spill。
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: sm_partitions_reg_warps
+    claim: SM70–SM90 寄存器堆为 65536 个 32-bit 寄存器/SM，驻留 warp 数 = min(64, floor(65536 / (regs_per_thread *
+      32)), 2048/block_threads)。
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: sm_partitions_ampere_fp32
+    claim: sm_80 把 Volta 上与 INT32 共享的那条数据通路改成可发 FP32，使每 SM FP32 CUDA core 从 64 增到 128，INT32 吞吐不再与 FP32
+      完全对等。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: sm_partitions_smsp_private
+    claim: 每个 SMSP 持有独立的 warp 调度器、指令缓冲与寄存器堆分区；跨 SMSP 的寄存器不能被同一 warp 直接使用。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: sm_partitions_cta_slots
+    claim: SM70–SM90 每 SM 最多 32 个驻留 CTA；1024 线程 block 时 CTA 上限被 2048 threads/SM 先卡成 2，即使 smem 有余量。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: sm_partitions_reg_granule
+    claim: Volta+ 寄存器按每线程 8 的粒度分配，请求 41 个寄存器的实际占用 = 48，occupancy 按 48 而不是 41 计算。
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: sm_partitions_quad_sub
+    claim: 同一 SMSP 内 8 个 CUDA core 一组处理半拍 SIMT；divergence 在 warp 内按活跃 mask 串行，不会把 lane 迁到另一 SMSP。
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: sm_partitions_sm100_tpc
+    claim: Blackwell sm_100 仍以 TPC 为双 SM 封装的调度域，CTA 落点由 GigaThread 引擎按 TPC/SM 空位分配，不是软件选 SM 编号。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sm_partitions_min_blocks_fail
+    claim: minBlocksPerMultiprocessor 与 regs/smem 冲突时 ptxas 报“register allocation failed”或强制 spill，不会静默降
+      occupancy。
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+    hints:
+    - __launch_bounds__(256, 8) 且每线程 128 regs
+    - 动态 smem 再叠加
+- id: tensor_pipe
+  name: Tensor 管道
+  leaves:
+  - id: tensor_pipe_wgmma_group
+    claim: Hopper wgmma.mma_async 以 warp-group（128 线程）为发射与完成单位，单 warp 发 mma.sync 不能驱动同一套 wgmma 数据通路。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: tensor_pipe_wgmma_wait
+    claim: wgmma.commit_group 把已发的 wgmma.mma_async 编入完成组，wgmma.wait_group N 阻塞到未完成组数 ≤ N。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: tensor_pipe_hmma_shape
+    claim: sm_80 mma.sync.aligned.m16n8k16.f32.f16.f16 每线程片段为 A=4×f16（2 个 32-bit 寄存器）、B=2×f16（1 个寄存器）、D=4×f32。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: tensor_pipe_tcgen05_issue
+    claim: sm_100a 的 tcgen05.mma（UMMA）由 CTA 内一条 elect 线程发射，累加器在 TMEM 而非寄存器；sm_90 的 wgmma 不能寻址 TMEM。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+  - id: tensor_pipe_mma_queue
+    claim: mma.sync 完成由 warp 寄存器 scoreboard 跟踪；在结果寄存器被后续 FFMA 读取前插入无关指令可隐藏 tensor 延迟。
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: tensor_pipe_wgmma_fence
+    claim: wgmma.fence 把先前 ld.shared 的 smem 描述符内容对后续 wgmma.mma_async 可见；缺 fence 时 A/B 描述符可读到旧 tile。
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: tensor_pipe_async_depth
+    claim: Hopper wgmma 允许在 wait_group 前重叠多组 MMA，常用深度 2；wait_group 0 才保证全部累加器寄存器已写完。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: tensor_pipe_sparse
+    claim: sm_80+ mma.sp 的 2:4 稀疏走同一 Tensor Core 管道但需要 metadata 寄存器；非法 metadata 不会自动回退稠密 MMA。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: tensor_pipe_fp32_tf32
+    claim: Ampere Tensor Core 的 TF32 路径是 19-bit 有效精度（1+8+10），不是 IEEE FP32 全 23-bit 尾数。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: tensor_pipe_no_scalar_mix
+    claim: 同一拍不能把 wgmma 与依赖其 D 寄存器的标量 FMA 当成已完成；必须 wait_group 后再用 D，否则读到部分更新。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    kind: failure
+    hints:
+    - wgmma.mma_async 后立刻 fadd D
+    - 缺 wgmma.wait_group 0
+- id: lsu_mio
+  name: LSU 与 MIO
+  leaves:
+  - id: lsu_mio_cp_async_path
+    claim: sm_80 的 cp.async 走 SM 异步拷贝/LSU 通路把 global 写入 shared，完成与 ld.shared 之间必须 cp.async.wait_group/wait_all，否则读到未完成数据。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: lsu_mio_tma_mbarrier
+    claim: sm_90 cp.async.bulk.tensor（TMA）由专用 copy engine 执行，完成信号写入 shared 中的 mbarrier 事务计数，而不是 scoreboard
+      到通用寄存器。
+    types:
+    - conceptual
+    - profiling
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: lsu_mio_smem_bank
+    claim: 32-bank shared 上同拍 32 个 4-byte 访问的 bank index = (byte_addr / 4) mod 32，相同 bank 不同字串行化为 N-way
+      conflict。
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: lsu_mio_stall_mio
+    claim: NCU stall reason mio_throttle 表示 MIO 管道（shared/TMA/特殊功能）背压，继续加 ld.shared 密度会加重而非隐藏该 stall。
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: failure
+  - id: lsu_mio_ldgsts
+    claim: SASS LDGSTS 对应 cp.async；它占用 LSU 而不是 Tensor 管道，与 MMA 可重叠，但与大量 LDG/STG 争同一 LSU。
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: lsu_mio_sfu
+    claim: SFU/MIO 负责 rsqrt/sinf/popc 等特殊函数，吞吐远低于 FMA；把热循环里的 rsqrtf 当 FMA 隐藏会表现为 mio/sfu stall。
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: lsu_mio_l1_shared
+    claim: Volta+ 的 L1 与 shared 共用同一数据 SRAM；提高 smem 容量会缩小 L1 数据缓存，表现为 ld.global 命中率下降。
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: lsu_mio_texture_unit
+    claim: 纹理/表面访问走 TEX/MIO 而非通用 LSU；__ldg 走只读缓存路径，与 ld.global.ca 的 L1 数据缓存不是同一套命中计数。
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: lsu_mio_64bit_bank
+    claim: 8-byte shared 的 bank index = (byte_addr / 8) mod 32；addr 与 addr+256 落入同一 bank，2-way conflict。
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+  - id: lsu_mio_tma_not_lsu
+    claim: Hopper TMA 不占用 SM LSU 发射槽，因此 kernel 在 TMA 飞行时可继续发 MMA；用 sm_80 cp.async 密度去估 sm_90 TMA 占用会错。
+    types:
+    - compare
+    - profiling
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+- id: tmem_physical
+  name: TMEM 物理组织
+  leaves:
+  - id: tmem_physical_not_smem
+    claim: Blackwell TMEM 是独立于寄存器堆与 shared 的 2D SRAM，只能由 tcgen05.ld/st/cp/mma 访问，不能取地址当 generic shared
+      用。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: tmem_physical_alloc_cols
+    claim: tcgen05.alloc 按 column 向 CTA 分配 TMEM，列数必须是 32 的倍数；dealloc 前仍对该列发 tcgen05.mma 是非法的。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 4
+    kind: api
+  - id: tmem_physical_capacity
+    claim: sm_100 每个 SM 的 TMEM = 128 lanes × 512 columns × 4 bytes = 256 KiB，最大单 CTA 累加器常用 256 columns（128
+      KiB）。
+    types:
+    - conceptual
+    - layout
+    difficulty:
+    - 4
+    kind: numeric
+  - id: tmem_physical_sm120_absent
+    claim: GeForce Blackwell sm_120 没有 TMEM 也没有 tcgen05.*，CUTLASS/PTX 必须回退 mma.sync 或 wgmma，不能把 sm_100a
+      cubin 当 sm_120 跑。
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 4
+    kind: failure
+  - id: tmem_physical_lane_col
+    claim: TMEM 地址是 (lane, column) 二维：tcgen05.ld 按列收集 32-bit 字到寄存器，不能用线性 smem 下标当 TMEM 坐标。
+    types:
+    - layout
+    - syntax
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: tmem_physical_cta_share
+    claim: 同一 SM 上两 CTA 分时占用 TMEM 列集合，总列数 ≤ 512；超分配时 tcgen05.alloc 失败或阻塞，不会静默别名他 CTA 累加器。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: numeric
+  - id: tmem_physical_ldst_width
+    claim: tcgen05.ld/st 有 16/32-column 等宽度限制，宽度必须整除已分配列数；错宽度读会越出本 CTA 列窗口。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 4
+    kind: api
+  - id: tmem_physical_relinquish
+    claim: tcgen05.relinquish_alloc_permit 之后本 CTA 不能再 alloc；再 alloc 是非法，应在完成所有 alloc 后、进入 MMA 稳态前调用。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 4
+    kind: failure
+    hints:
+    - MMA 循环内再次 alloc
+    - relinquish 后再 tcgen05.alloc
+  - id: tmem_physical_cp_async_no
+    claim: cp.async / TMA 不能把 global 直接写入 TMEM；须 TMA→smem 或 tcgen05.cp 规定路径，否则没有合法编码。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: tmem_physical_sm100a_only
+    claim: tcgen05.* 属于 sm_100a 加速特性；sm_100f 等无 UMMA 的变体不能假设 256 KiB TMEM 对用户 kernel 开放。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+- id: clocks_issue
+  name: 发射与时钟
+  leaves:
+  - id: clocks_issue_dual_issue
+    claim: Volta/Ampere 同一 SMSP 可在一拍向同一 warp 双发（例如 INT 与 FP 不同管道），但两条都用 FMA/Tensor 管道时第二发会被堵住。
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: clocks_issue_max_warps
+    claim: SM70–SM90 硬件上限 = 64 warps/SM = 2048 threads/SM；block 为 1024 线程时每 SM 最多 2 个 CTA，即使寄存器与 smem
+      仍有余量。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 2
+    kind: numeric
+  - id: clocks_issue_clock64
+    claim: clock64() 读的是 SM 时钟计数器，差值 / 1e6 不是毫秒；跨 CTA 比较 clock64 没有设备级同步语义。
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: clocks_issue_h100_smem
+    claim: sm_90 H100 每 SM 可配置共享内存上限为 228 KiB（大于 sm_80 的 164 KiB），直接决定 wgmma 流水线 stage 数上限。
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: clocks_issue_gpcclk
+    claim: NCU gpc__cycles_elapsed 与 clock64 的比值 = GPC_clk/SM_clk，动态调频时该比值 ≠ 1，不能把二者当同一计数器相减。
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: clocks_issue_tensor_busy
+    claim: pipe_tensor_cycles_active 高而 issue_slot_empty 也高，说明 tensor 管道满、调度器缺独立指令；再增加纯 MMA 密度不会提高 SM
+      吞吐。
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: failure
+  - id: clocks_issue_s2r_clock
+    claim: SASS S2R SR_CLOCKLO 对应 clock() 的 32-bit 低位，溢出周期 = 2^32 SM 拍；长 kernel 必须用 clock64 避免回绕算成负延迟。
+    types:
+    - debug
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: clocks_issue_scoreboard
+    claim: 固定延迟管道（FMA）用静态 scoreboard，可变延迟 ld/st 用动态 scoreboard；过早使用 ld 结果表现为 long_scoreboard stall。
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: clocks_issue_ibar
+    claim: bar.sync 让 warp 在 barrier 单元等待，等待期间该 warp 不占 issue 槽，但 SMSP 上其他就绪 warp 仍可发射。
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: clocks_issue_blackwell_clk
+    claim: Blackwell sm_100 的 UMMA/TMEM 完成不以 clock64 差值当同步；必须 tcgen05.wait 或 mbarrier，跨 CTA 比 clock64
+      无意义。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+- id: gpc_tpc
+  name: GPC 与 TPC
+  leaves:
+  - id: gpc_tpc_hierarchy
+    claim: GPU 层次为 GPC ⊃ TPC ⊃ SM：Ampere+ 每个 TPC 含 2 个 SM 与 1 个 PolyMorph/纹理前端。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: gpc_tpc_a100
+    claim: A100 满配 SM 数 = 7 GPC × 8 TPC × 2 SM = 112，SKU 屏蔽后常用 108 SM。
+    types:
+    - conceptual
+    - profiling
+    difficulty:
+    - 3
+    kind: formula
+  - id: gpc_tpc_h100
+    claim: H100 SXM 满配 8 GPC × 9 TPC × 2 SM = 144 SM，常见 SKU 为 132 SM；不能把 108 的 A100 公式套到 Hopper。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: gpc_tpc_raster
+    claim: 图形光栅/ROP 挂在 GPC 级，计算 kernel 不经过光栅，但 GPC 时钟域仍是 NCU gpc__* 计数器的来源。
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: gpc_tpc_l2_slice
+    claim: L2 slice 按物理地址交叉分布在 GPU 级，不属于单个 TPC；跨 SM 一致性点在 L2 而不是 TPC 私有缓存。
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: gpc_tpc_cluster_place
+    claim: Hopper thread-block cluster 尽量落在能走 DSMEM/多播的 SM 集合；cluster 尺寸超过 GPC/SM 拓扑允许范围会导致 launch 失败。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: gpc_tpc_sm_id
+    claim: '%smid 是逻辑 SM 编号，不保证相邻 CTA 的 smid 连续，也不能用 smid 差当跨 GPC 延迟模型。'
+    types:
+    - debug
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: gpc_tpc_b200
+    claim: Blackwell B200 的 GPC/TPC 计数随 SKU 变化，编程模型仍是 grid→CTA→warp；不能假设与 H100 相同的 132 SM。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+- id: warp_schedulers
+  name: Warp 调度器
+  leaves:
+  - id: warp_schedulers_four
+    claim: SM70–SM90 每 SM 4 个 warp scheduler，每 scheduler 管理最多 16 个 warp（64/4），每拍各选 1 个就绪 warp。
+    types:
+    - conceptual
+    - profiling
+    difficulty:
+    - 2
+    kind: numeric
+  - id: warp_schedulers_eligible
+    claim: 就绪 warp 条件 = 有指令 ∧ scoreboard 清 ∧ 不在 barrier/yield；stall 的 warp 把 issue 机会让给同 SMSP 其他 warp。
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: warp_schedulers_its
+    claim: sm_70 Independent Thread Scheduling 让 warp 内线程有独立 PC；调度器仍以 warp 为发射单位，只是 convergent 不再硬件隐式保证。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: warp_schedulers_yield
+    claim: nanosleep/yield 让当前 warp 放弃 issue，利于同 SMSP 上延迟隐藏；不能当作内存 fence。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: warp_schedulers_dual_issue
+    claim: 同一 warp 双发要求两条指令走不同执行管道且无寄存器冲突；两条 FFMA 不能双发。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: warp_schedulers_occupancy_ilp
+    claim: 每 scheduler 仅 1 个 issue 槽时，隐藏 ld 延迟需要同 SMSP 有多个就绪 warp 或同 warp 高 ILP；occupancy=1 warp/SMSP
+      时 long_scoreboard 无法被他 warp 填满。
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: formula
+  - id: warp_schedulers_barrier_mask
+    claim: warp 在 bar.sync 上睡眠时对调度器不可选；部分线程未到达时整个 warp 仍占驻留名额但不发指令。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: warp_schedulers_sm100
+    claim: sm_100 UMMA 由 elect 线程代表 CTA 发射，不要求 4 个 scheduler 各发一条 MMA；调度器仍负责其余整数/LSU 指令。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+- id: rf_banks
+  name: 寄存器堆银行
+  leaves:
+  - id: rf_banks_partition
+    claim: 寄存器堆按 SMSP 分区：每分区容量 = 65536/4 = 16384 个 32-bit 寄存器，本 SMSP 的 16 个 warp 共享该分区。
+    types:
+    - conceptual
+    - layout
+    difficulty:
+    - 3
+    kind: formula
+  - id: rf_banks_collector
+    claim: operand collector 从寄存器堆多 bank 收集源操作数；同拍多指令争同一 bank 会造成 collector stall，即使算术管道空闲。
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: rf_banks_max_per_thread
+    claim: 硬件上限 255 个 32-bit 寄存器/线程；请求 256 会编译失败，不会回绕到 0。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: numeric
+  - id: rf_banks_uniform
+    claim: Volta+ 有 uniform 寄存器文件存 warp 一致值，减少收集带宽；发散后的值不能再当 uniform 用。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: rf_banks_spill_local
+    claim: 寄存器不够时 ptxas 溢出到 local，经 LSU 访问，延迟 ≫ RF；NCU 的 lmem_peak 上升说明 occupancy 换来了 spill。
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: rf_banks_reuse
+    claim: SASS 的寄存器 reuse 标志让 operand 留在 collector，避免再读 RF bank；手工内联 PTX 时无该标志可能增加 bank 压力。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: rf_banks_wgmma_d
+    claim: Hopper wgmma 的 D 仍在通用 RF，大 n 形状会撑爆每线程寄存器；sm_100 UMMA 把累加器放到 TMEM 正是为了卸 RF 压力。
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: rf_banks_bank_conflict
+    claim: 同一指令 3 个源寄存器若映射到同一 RF bank 且未 reuse，收集周期可从 1 增到 2+，表现为 issue 后的依赖气泡。
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+- id: sm70_volta
+  name: SM70 Volta 单元
+  leaves:
+  - id: sm70_volta_its
+    claim: sm_70 引入 Independent Thread Scheduling 与每线程 PC，__syncwarp 成为 warp 内共享可见性的必需同步。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: sm70_volta_fp32_int
+    claim: Volta 每 SM 64 FP32 + 64 INT32 但共享数据通路，峰值不能同时达到 64 FMA/拍与 64 INT/拍。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: sm70_volta_tensor
+    claim: sm_70 第一代 Tensor Core 原生 HMMA，形状以 m8n8k4 等为硬件单位，CUDA WMMA m16n16k16 由多次 HMMA 合成。
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: sm70_volta_smem
+    claim: V100 每 SM 共享内存可配到 96 KiB，L1/shared 合计 128 KiB 量级，小于 sm_80 的 192 KiB 合计。
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 2
+    kind: feature
+  - id: sm70_volta_no_cp_async
+    claim: sm_70 没有 cp.async；global→shared 只能 ld.global+st.shared，CUDA 11 memcpy_async 在 Volta 上降级为同步拷贝。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: sm70_volta_match
+    claim: sm_70 提供 match.any.sync / match.all.sync 做 warp 内值匹配，前代架构无此指令。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: sm70_volta_activemask
+    claim: __activemask() 在 ITS 下返回当前执行该指令的 lane 集合，不等于 __ballot_sync(0xffffffff,1)，分歧分支里二者不同。
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 3
+    kind: failure
+    hints:
+    - if(lane<16) mask=__activemask()
+    - 把它当满 warp 掩码
+  - id: sm70_volta_l2
+    claim: GV100 L2 约 6 MiB，是设备级一致性点；跨 SM 普通 load 仍可命中 SM L1 而看不到已达 L2 的 store。
+    types:
+    - conceptual
+    - profiling
+    difficulty:
+    - 3
+    kind: mechanism
+- id: sm80_ampere
+  name: SM80 Ampere 单元
+  leaves:
+  - id: sm80_ampere_fp32_128
+    claim: sm_80 每 SM 128 个 FP32 CUDA core，FP32 峰值相对 sm_70 约 2×，INT32 仍约 64 路。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    kind: feature
+  - id: sm80_ampere_cp_async
+    claim: Ampere 引入 cp.async.ca/cg 与 commit_group/wait_group，把 global→shared 从 LSU 同步路径改为异步拷贝引擎。
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: sm80_ampere_smem_164
+    claim: A100 每 SM 共享内存上限 164 KiB，opt-in 后占用 L1 SRAM；默认 48 KiB 时 occupancy 计算不能按 164 估。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: sm80_ampere_l2_persist
+    claim: sm_80 的 L2 persisting access window 把指定 VA 范围优先留在 L2，需 cudaAccessPolicyWindow，不影响寄存器/smem。
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: sm80_ampere_async_barrier
+    claim: CUDA 11 的 cuda::barrier 与 pipeline 在 sm_80 上映射到 mbarrier/cp.async，在 sm_70 上无硬件 mbarrier。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: sm80_ampere_sparse_tc
+    claim: 第三代 Tensor Core 支持 2:4 sparse MMA 与 TF32；sparse 需要 metadata，不能把稠密 mma.sync 当 sp 用。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: sm80_ampere_no_tma
+    claim: sm_80 没有 TMA/cluster/dsmem；cp.async.bulk.tensor 在 Ampere 上非法。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: sm80_ampere_l2_size
+    claim: A100 L2 = 40 MiB，是 Ampere 设备级一致性与缓存容量的主要升级，不是每 SM 私有 40 MiB。
+    types:
+    - conceptual
+    - profiling
+    difficulty:
+    - 2
+    kind: numeric
+- id: sm90_hopper
+  name: SM90 Hopper 单元
+  leaves:
+  - id: sm90_hopper_tma
+    claim: sm_90 TMA 由 tensor memory accelerator 执行 cp.async.bulk.tensor，描述符在 generic 空间，完成打在 mbarrier
+      上。
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sm90_hopper_wgmma
+    claim: Hopper wgmma.mma_async 从 smem descriptor 取 A/B、D 进寄存器，发射单位 128 线程 warp-group。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: sm90_hopper_cluster
+    claim: thread-block cluster 提供 dsmem 与 cluster.sync；cluster 尺寸须整除 grid 且受 SM 驻留限制。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: sm90_hopper_smem_228
+    claim: H100 每 SM 共享内存上限 228 KiB，常用 2–3 stage wgmma 流水线的 smem 预算按 228 而不是 164 计算。
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    kind: numeric
+  - id: sm90_hopper_tmem_absent
+    claim: Hopper 没有 TMEM/tcgen05；累加器必须放 RF 或 smem，不能把 Blackwell kernel 的 TMEM 地址当 Hopper 合法。
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: sm90_hopper_setmaxnreg
+    claim: sm_90 setmaxnreg 允许 warp-group 动态调整寄存器配额，配合 warp specialization 把寄存器让给 MMA warp。
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 4
+    kind: api
+  - id: sm90_hopper_gmma_pipe
+    claim: wgmma 管道与 TMA 管道独立：TMA wait 完成不意味着 wgmma.wait_group 完成，两条完成链必须分别等待。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: sm90_hopper_l2
+    claim: sm_90 Hopper H100 的 L2 约 50 MiB 量级且带更高带宽切片；一致性点仍在 L2，cluster 内 dsmem 不经过 L2。
+    types:
+    - conceptual
+    - profiling
+    difficulty:
+    - 3
+    kind: feature
+- id: sm100_blackwell
+  name: SM100 Blackwell 单元
+  leaves:
+  - id: sm100_blackwell_umma
+    claim: sm_100a tcgen05.mma 由 CTA elect 线程发射，A/B 可来自 smem 或 TMEM，累加器驻 TMEM。
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 4
+    kind: feature
+  - id: sm100_blackwell_tmem_256
+    claim: B200 类 sm_100 TMEM 容量 256 KiB/SM，与 228 KiB smem 并存，不是从 smem 里再切一块。
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 4
+    kind: numeric
+  - id: sm100_blackwell_no_wgmma_tmem
+    claim: wgmma.mma_async 不能把 TMEM 当 smem descriptor 用；混用两条 MMA ISA 需要对不同累加器空间显式搬运。
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 4
+    kind: failure
+  - id: sm100_blackwell_2cta
+    claim: 部分 tcgen05.mma 形状支持 2-CTA 协作，要求 cluster 内配对 CTA 与约定 TMEM/smem 布局，单 CTA launch 不能发该形状。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 4
+    kind: api
+  - id: sm100_blackwell_sm120
+    claim: GeForce sm_120 是另一条 Blackwell 计算能力，缺 TMEM/UMMA，不能把 sm_100a cubin 当 sm_120 加载。
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+  - id: sm100_blackwell_tma5
+    claim: Blackwell TMA 相对 Hopper 增加更宽的 tensor 搬运与 TMEM 相关 copy；完成仍由 mbarrier tx_count 表达。
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: sm100_blackwell_elect
+    claim: UMMA 发射线程由 elect.sync 选出，其余线程必须汇合在同一 MMA 序列上，不能各发各的 tcgen05.mma。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: sm100_blackwell_rf_offload
+    claim: 把累加器放 TMEM 后每线程 RF 可留给地址计算与 epilogue；仍用 Hopper 的 m64n256 RF 累加器布局会在 Blackwell 上浪费 TMEM。
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 4
+    kind: mechanism
+- id: issue_scoreboard
+  name: 记分牌与执行管道
+  leaves:
+  - id: issue_scoreboard_long
+    claim: NCU stall long_scoreboard 主要来自 ld/st 结果未就绪；增加与该 load 无关的独立算术才能隐藏，而不是再发依赖它的指令。
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: issue_scoreboard_short
+    claim: short_scoreboard 来自短可变延迟（如一些 MIO）；与 math_pipe 满不同，对症是降 MIO 密度或提高 occupancy。
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: issue_scoreboard_wait
+    claim: SASS 的 WAIT / DEPBAR 编码静态等待固定管道；手工 SASS 改 wait 数过小会读到错误寄存器，过大则浪费拍。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: numeric
+  - id: issue_scoreboard_fma_pipe
+    claim: FFMA/FADD 走 FP32 管道，HMMA/wgmma 走 Tensor 管道，二者可重叠；但 D 寄存器依赖仍受 scoreboard 约束。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: issue_scoreboard_imad
+    claim: IMAD/IADD 走整数管道，sm_80 上不再与 FP32 完全抢同一数据通路，地址计算与 FP32 可更好双发。
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: issue_scoreboard_barrier_unit
+    claim: CTA barrier 有独立硬件计数器，bar.sync 不经过 LSU scoreboard；把 barrier 当内存 load 用 NCU mem 指标看会看到 0 字节。
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: issue_scoreboard_yield_not_wait
+    claim: YIELD 只让出调度器，不清除 scoreboard；load 未完成时 yield 回来仍会 stall。
+    types:
+    - counterfactual
+    - conceptual
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: issue_scoreboard_mbar_async
+    claim: mbarrier.try_wait 失败路径应循环而非当作 scoreboard 已清；TMA 完成与通用寄存器 scoreboard 无关。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: api

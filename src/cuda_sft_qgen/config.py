@@ -119,6 +119,10 @@ class Settings:
         return self.default_yaml.get("review", {})
 
     @property
+    def taxonomy_manager_cfg(self) -> dict[str, Any]:
+        return (self.default_yaml.get("taxonomy") or {}).get("manager") or {}
+
+    @property
     def evolver_fraction(self) -> float:
         return float(self.generation.get("evolver_fraction", 0.30))
 

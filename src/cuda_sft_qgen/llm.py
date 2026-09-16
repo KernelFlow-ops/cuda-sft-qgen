@@ -209,12 +209,36 @@ class FakeLLM(LLMClient):
         prompt_cache_key: str | None = None,
     ) -> str:
         user = ""
+        system = ""
+        for m in messages:
+            if m.get("role") == "system" and not system:
+                system = m.get("content") or ""
         for m in reversed(messages):
             if m.get("role") == "user":
                 user = m.get("content") or ""
                 break
+        if "suggested_claim" in user:
+            return json.dumps({"suggestions": []}, ensure_ascii=False)
+        if "health_notes" in user or "WorkOrder" in user or '"refine_ids"' in user:
+            return json.dumps(
+                {
+                    "health_notes": [],
+                    "misplaced": [],
+                    "unanswerable": [],
+                    "kind_mismatch": [],
+                    "expansion_priority": [],
+                    "search_queries": [],
+                    "refine_ids": [],
+                },
+                ensure_ascii=False,
+            )
         if "Taxonomy" in (messages[0].get("content") if messages else "") or "new_leaves" in user:
             return json.dumps({"new_leaves": []}, ensure_ascii=False)
+        blob = f"{system}{user}"
+        if "suggestions" in blob and "new_leaves" not in user:
+            return json.dumps({"suggestions": []}, ensure_ascii=False)
+        if "keep_both" in user or "retire_id" in user:
+            return json.dumps({"decisions": []}, ensure_ascii=False)
         if (
             '"decisions"' in user
             or "SteeringBrief" in user

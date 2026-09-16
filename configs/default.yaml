@@ -31,14 +31,36 @@ taxonomy:
   target_leaves_per_l2: 30
   target_leaf_count: 4500
   expand_max_per_call: 40
+  manager:
+    enabled: true
+    every_k_reviews: 5
+    max_llm_calls_per_tick: 2
+    max_leaves_per_tick: 12
+    health_expand_threshold: 70
+    leaf_cosine_dup: 0.92
+    leaf_cosine_gray: 0.85
+    facets:
+      - formula
+      - failure
+      - feature
+      - mechanism
+      - api
+      - numeric
+      - layout
+      - profiling
+      - arch_migrate
+      - cross_factor
+    allow_refine_in_pipeline: false
+    allow_merge_in_pipeline: false
+    allow_new_domains: false
 
 review:
   batch_size: 20
   top_k: 8
-  semantic_dup_threshold: 0.93
-  semantic_gray_threshold: 0.88
-  template_jaccard_threshold: 0.88
-  template_gray_jaccard: 0.75
+  semantic_dup_threshold: 0.94      # Was 0.93 - more strict semantic similarity
+  semantic_gray_threshold: 0.90     # Was 0.88 - narrower gray zone
+  template_jaccard_threshold: 0.91  # Was 0.88 - raise to reduce false positives
+  template_gray_jaccard: 0.82       # Was 0.75 - wider gray zone
   simhash_hamming_threshold: 3
   simhash_gray_hamming: 8
   kl_alert: 0.15

@@ -57,6 +57,7 @@ class QuestionBrief(BaseModel):
     role: Literal["writer", "evolver"] = "writer"
     seed_question: str | None = None
     seed_id: str | None = None
+    breadth_or_depth: str = "BREADTH"  # "BREADTH" | "DEPTH"
 
 
 class Question(BaseModel):

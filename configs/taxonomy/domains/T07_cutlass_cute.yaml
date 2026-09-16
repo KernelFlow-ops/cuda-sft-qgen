@@ -92,7 +92,8 @@ children:
     - 4
     kind: numeric
   - id: layout_algebra_rank
-    claim: rank(layout) = 模式个数；Shape<_16,_8> 的 rank=2，Shape<Shape<_16,_8>> 的 rank=1，composition 对 rank 的约束不同
+    claim: rank(layout) = 模式个数；Shape<_16,_8> 的 rank=2，Shape<Shape<_16,_8>> 的 rank=1，composition 对 rank
+      的约束不同
     types:
     - layout
     - compare
@@ -138,7 +139,8 @@ children:
     - 3
     kind: failure
   - id: swizzle_atom_128b
-    claim: Swizzle<3,4,3> 的 yyy_msk = ((1<<3)-1)<<(4+3) = 0x380，apply(addr)=addr XOR ((addr & 0x380)>>3)，对应 128B 行
+    claim: Swizzle<3,4,3> 的 yyy_msk = ((1<<3)-1)<<(4+3) = 0x380，apply(addr)=addr XOR ((addr & 0x380)>>3)，对应
+      128B 行
     types:
     - layout
     - conceptual
@@ -229,7 +231,8 @@ children:
     - 4
     kind: api
   - id: tiled_thrfrg
-    claim: thrfrg_A(mma, tensor) 按 atom 的 LayoutA_TV 切 A；返回 fragment 的 size 必须等于该 atom 每线程寄存器占用（如 m16n8k16.f16 的 A 为 4 个 u32）
+    claim: thrfrg_A(mma, tensor) 按 atom 的 LayoutA_TV 切 A；返回 fragment 的 size 必须等于该 atom 每线程寄存器占用（如 m16n8k16.f16
+      的 A 为 4 个 u32）
     types:
     - layout
     - debug
@@ -246,7 +249,8 @@ children:
     - 3
     kind: failure
   - id: tiled_mma_n_repeat
-    claim: 沿 N 重复 atom（如 16×8 atom × N-repeat=4 → tile N=32）靠 AtomLayout 的 N 模；改 MMA_Atom 的 N 而不是 repeat 会换指令
+    claim: 沿 N 重复 atom（如 16×8 atom × N-repeat=4 → tile N=32）靠 AtomLayout 的 N 模；改 MMA_Atom 的 N 而不是 repeat
+      会换指令
     types:
     - layout
     - compare
@@ -301,7 +305,8 @@ children:
     - 4
     kind: mechanism
   - id: cutlass_kernel_universal
-    claim: GemmUniversalAdapter 把 CollectiveMainloop/Epilogue 与 TileScheduler 绑成 kernel；改 scheduler 不必重写 MMA atom
+    claim: GemmUniversalAdapter 把 CollectiveMainloop/Epilogue 与 TileScheduler 绑成 kernel；改 scheduler 不必重写
+      MMA atom
     types:
     - syntax
     - conceptual
@@ -317,7 +322,8 @@ children:
     - 3
     kind: numeric
   - id: cutlass_kernel_smem_carveout
-    claim: StageCountAutoCarveout<sizeof(SharedStorageEpilogue)> 让 stages*KtileBytes + epilogue_smem + mbarrier ≤ smem 容量（H100 上限 228 KiB）
+    claim: StageCountAutoCarveout<sizeof(SharedStorageEpilogue)> 让 stages*KtileBytes + epilogue_smem +
+      mbarrier ≤ smem 容量（H100 上限 228 KiB）
     types:
     - optimization
     - layout
@@ -441,7 +447,8 @@ children:
     - 4
     kind: mechanism
   - id: epilogue_visit_lincomb
-    claim: LinCombEltAct<Relu, ElementOutput, ElementCompute> 实现 D=relu(αAC+βC+bias)；ElementCompute 必须能表示 α、β
+    claim: LinCombEltAct<Relu, ElementOutput, ElementCompute> 实现 D=relu(αAC+βC+bias)；ElementCompute 必须能表示
+      α、β
     types:
     - syntax
     - code_complete
@@ -647,7 +654,8 @@ children:
     - 3
     kind: failure
   - id: tiled_copy_stsm
-    claim: SM90_U32x4_STSM_N 把寄存器按 stmatrix 写 smem，供后续 TMA store 或 debug dump；普通 UniversalCopy 不会得到 LDSM 布局
+    claim: SM90_U32x4_STSM_N 把寄存器按 stmatrix 写 smem，供后续 TMA store 或 debug dump；普通 UniversalCopy 不会得到 LDSM
+      布局
     types:
     - layout
     - compare

@@ -1,0 +1,174 @@
+# Concatenate `when` + `must` + `must_not` onto curator.md to steer one expansion call.
+# `example_claim` / `banned_claim` are few-shot anchors, not extra leaves to copy.
+facets:
+  - id: formula
+    when: |
+      Use this facet when the L2 is thin on closed-form identities a student can plug numbers into
+      (occupancy, offset, bank map, sector/transaction count, alignment, stage bytes, tile size).
+    must: |
+      Prefer kind=formula. Every new claim MUST contain `=` or `→` or `=>` and name the inputs
+      plus a unique output (bytes, warps, banks, sectors, offset, stages). Mix at most a minority
+      of non-formula kinds, and only when they encode the same identity's failure/API edge.
+    must_not: |
+      Do not emit glossary identities, marketing speedups, or "derive a performance model" with no
+      closed form. Do not mark a legality/API question as formula. Do not restate an existing
+      occupancy/offset claim with different variable names.
+    example_claim: |
+      SM70–SM90 register file is 65536×32-bit/SM; resident warps = min(64, floor(65536 / (regs_per_thread * 32)), 2048/block_threads).
+    banned_claim: |
+      Occupancy is determined by registers, shared memory, and the warp limit.
+
+  - id: failure
+    when: |
+      Use this facet when the L2 lacks observable wrong outcomes: deadlock, race, silent corruption,
+      UB, hang, or a wait that fires too early/late.
+    must: |
+      Prefer kind=failure. Every claim MUST name a concrete path (code, mask, launch, barrier, OOB)
+      AND an observable consequence. A writer must be able to show a short wrong snippet from the claim.
+    must_not: |
+      Do not write "this might be racy" or "undefined in some cases" without the path. Do not turn
+      a missing __syncthreads into a generic "what is wrong with this code" leaf. Do not use
+      kind=failure for architecture availability (that is feature).
+    example_claim: |
+      TMA completion signals an mbarrier; a consumer that uses __syncthreads instead of wait on the same barrier transaction count reads incomplete data.
+    banned_claim: |
+      Forgetting synchronization can cause race conditions in CUDA kernels.
+
+  - id: feature
+    when: |
+      Use this facet when the L2 needs architecture/version gates: sm_80 vs sm_90 vs sm_100,
+      CUDA version floors, TMA/TMEM/UMMA/cluster availability, or a hard alignment/shape limit
+      that is not true on every GPU.
+    must: |
+      Prefer kind=feature. Every claim MUST name sm_ / Hopper / Blackwell / Ampere / a CUDA version
+      AND one hard constraint (API exists only here, alignment, shape, scope, cluster, TMEM).
+      State what older/newer hardware must not do.
+    must_not: |
+      No press-release tone ("greatly improves", "revolutionary", "next-generation performance").
+      Do not introduce a feature without a constraint a writer can violate. Do not claim Ampere-only
+      APIs on Hopper wording or mix sm_90 with Blackwell as if they were the same.
+    example_claim: |
+      TMA (cp.async.bulk.tensor) exists from sm_90; sm_80 only has cp.async.ca/cg and must not treat a tensormap as an Ampere path.
+    banned_claim: |
+      Hopper TMA greatly improves asynchronous copy performance.
+
+  - id: mechanism
+    when: |
+      Use this facet when the L2 needs causal hardware/execution reasons: why A implies B in the
+      memory model, warp scheduler, cache hierarchy, CuTe algebra, or pipeline.
+    must: |
+      Prefer kind=mechanism. Every claim MUST be of the form "A causes B because <hardware/execution
+      reason>" and be falsifiable. Name the unit (warp, SMSP, CTA, cluster, L1/L2 sector, layout).
+    must_not: |
+      Do not emit glossary entries ("X is a type of Y"), tautologies ("because the hardware does that"),
+      or marketing. Do not hide a formula identity inside mechanism if the point is the equation —
+      use formula instead.
+    example_claim: |
+      Each SMSP holds its own warp scheduler, instruction buffer, and register-file partition; a warp cannot read another SMSP's registers directly.
+    banned_claim: |
+      A streaming multiprocessor contains schedulers and registers that execute warps.
+
+  - id: api
+    when: |
+      Use this facet when the L2 needs legal vs illegal invocations: qualifiers, launch geometry,
+      PTX modifiers, CUTLASS builder parameters, libcu++/CUDA Python signatures, return codes.
+    must: |
+      Prefer kind=api. Every claim MUST state a legality, parameter, or return-value constraint a
+      writer can show with 2–3 snippets (compiles / fails / UB). Name the API token (cuda*, __*,
+      cute::, cutlass::, cp.*, mbarrier, cuda::).
+    must_not: |
+      Do not write "how to use X" tutorials or best-practice lists. Do not invent non-NVIDIA APIs.
+      Do not use kind=api for a numeric identity (that is formula) or an arch gate with no call
+      (that is feature).
+    example_claim: |
+      __ldg(ptr) compiles to ld.global.nc and requires that address not be written by any thread for the kernel lifetime; a conflicting write makes the read undefined.
+    banned_claim: |
+      CUDA provides __ldg to load from global memory more efficiently.
+
+  - id: numeric
+    when: |
+      Use this facet when the L2 needs plug-in instances: given concrete numbers, compute a unique
+      result (resident CTAs, sector count, smem bytes, cosize, bank index, expected tx bytes).
+    must: |
+      Prefer kind=numeric. Every claim MUST include specific numbers (or a fully bound symbol set)
+      and a unique numeric result or comparison. If you also state the identity, still keep the
+      numbers in the claim. Distinct from formula: the point is the instance, not only the law.
+    must_not: |
+      Do not ask to "estimate performance" with no unique value. Do not omit units (B, warps, CTAs,
+      sectors). Do not duplicate an existing formula leaf by only changing one constant unless the
+      constant changes the conclusion.
+    example_claim: |
+      SM70–SM90 allow at most 32 resident CTAs per SM; a 1024-thread block is capped by 2048 threads/SM to 2 CTAs even when smem remains.
+    banned_claim: |
+      Occupancy depends on how many threads you launch per block.
+
+  - id: layout
+    when: |
+      Use this facet when the L2 is CuTe/CUTLASS layout, shared-memory swizzle, TMA box/stride,
+      bank mapping, or coordinate→offset algebra — even if existing leaves are only API names.
+    must: |
+      Every claim MUST mention at least one of: Shape, Stride, composition, complement,
+      logical_divide / logical_product, swizzle, bank, TMA box, or a concrete coordinate/offset.
+      Prefer kinds formula, mechanism, api, numeric. Include a worked coordinate or Shape/Stride
+      when the kind is formula.
+    must_not: |
+      Do not emit "layout is important for performance". Do not talk about global-only coalescing
+      unless the L2 is actually about gmem; do not substitute cudaMalloc for a CuTe/TMA layout
+      claim. Do not mention "layout" without a Shape, Stride, or bank map.
+    example_claim: |
+      composition(A,B)(c) = A(B(c)); it is not elementwise stride multiply, and composition(A,B) ≠ composition(B,A) in general.
+    banned_claim: |
+      CuTe layouts describe how tensors are stored in memory.
+
+  - id: profiling
+    when: |
+      Use this facet when the L2 needs Nsight Compute / Nsight Systems observables: SOL pipes,
+      stall reasons, sector counters, achieved occupancy, DRAM bytes, tensor-pipe busy.
+    must: |
+      Prefer kinds profiling-capable (formula, mechanism, numeric) and include type `profiling`
+      when it fits. Every claim MUST name a real Nsight Compute counter, SOL pipe, or stall family
+      (examples: l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum, smsp__warp_issue_stalled_long_scoreboard,
+      dram__bytes.sum, l1tex/dram/tensor SOL). State which way the counter moves or how to interpret it.
+    must_not: |
+      Do not write "how would you profile this?" with no metric. Do not invent counter names.
+      Do not claim occupancy-up always means faster without a SOL/stall qualifier.
+    example_claim: |
+      l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum approximates global load sectors; dividing by the theoretical minimum sectors yields the excess-transaction factor.
+    banned_claim: |
+      Use Nsight Compute to find bottlenecks in the kernel.
+
+  - id: arch_migrate
+    when: |
+      Use this facet when the L2 needs Ampere ↔ Hopper ↔ Blackwell (sm_80 / sm_90 / sm_100) semantic
+      diffs: cp.async vs TMA, MMA vs WGMMA vs UMMA/TMEM, CTA barrier vs cluster mbarrier, CUDA
+      version floors.
+    must: |
+      Prefer kind=feature or compare-capable mechanism/api. Every claim MUST name two sides
+      (old arch/API and new arch/API) OR a one-way gate (exists from sm_XX; illegal on sm_YY)
+      plus a hard constraint. Keep the L2 topic; do not wander into an unrelated domain.
+    must_not: |
+      Do not slap "on Hopper" onto an Ampere-true claim with no Hopper-specific API. Do not
+      equate sm_90 with Blackwell or sm_100 with Hopper. Do not invent a migration that NVIDIA
+      GPUs do not have.
+    example_claim: |
+      Ampere sm_80 bulk copies use cp.async.ca/cg; Hopper sm_90 TMA (cp.async.bulk.tensor) requires a tensormap and 16B gmem base alignment that Ampere cp.async does not.
+    banned_claim: |
+      On Hopper the same kernel just runs faster.
+
+  - id: cross_factor
+    when: |
+      Use this facet when the L2's leaves are single-factor and writers need two interacting
+      constraints (occupancy×latency, TMA×alignment, warp-group×barrier, stages×smem carveout,
+      coalescing×sector size).
+    must: |
+      Every claim MUST name ≥2 interacting factors and state which one decides the outcome when
+      they conflict. Kinds may mix (mechanism, formula, failure, numeric). The claim must remain
+      one sentence and still be falsifiable — not a design essay.
+    must_not: |
+      Do not dump a best-practice list. Do not change more than two factors into an unanswerable
+      "it depends". Do not fuse unrelated mechanisms (TMA alignment + NCCL topology) unless this
+      L2 actually owns both.
+    example_claim: |
+      TMA consumer wait is legal only when mbarrier.expect_tx bytes = TMA completed bytes AND the wait uses that same barrier; __syncthreads cannot substitute.
+    banned_claim: |
+      Kernel performance depends on many factors including occupancy, memory, and synchronization.

@@ -41,6 +41,8 @@ def test_layers_and_json_schema_for_formula():
     assert "KIND: formula" in bundle.user
     assert "Write the JSON now." in bundle.user
     assert "reason privately" in bundle.system.lower() or "Do NOT write the reasoning" in bundle.system
+    assert "BREADTH" in bundle.system
+    assert "strong token" in bundle.system.lower() or "Strong tokens" in bundle.system
 
 
 def test_feature_kind_allows_arch_constraint_not_glossary_ban():
@@ -68,6 +70,21 @@ def test_empty_corpus_still_has_anti_patterns():
     bundle = sp.build(_brief(), SteeringBrief())
     assert "What is CUDA" in bundle.system or "名词解释" in bundle.system
     assert "(none yet)" in bundle.system
+
+
+def test_evolver_policy_lists_operators():
+    settings = load_settings(fake_llm=True)
+    sp = StructuredPrompt(settings, FewshotCorpus())
+    bundle = sp.build(
+        _brief(role="evolver", seed_question="regs=64 occupancy on a 256-thread block?"),
+        SteeringBrief(),
+    )
+    text = bundle.system.lower()
+    assert "deepen" in text
+    assert "inject-bug" in text
+    assert "layout-eq" in text
+    assert "just changing stride=16 to stride=32" in bundle.system
+    assert '"operator"' in bundle.system
 
 
 def test_angle_guide_is_not_duplicated_in_semi_prefix():

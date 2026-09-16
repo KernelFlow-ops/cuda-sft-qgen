@@ -66,7 +66,8 @@ children:
     - 3
     kind: failure
   - id: p2p_array
-    claim: cudaDeviceGetP2PAttribute 的 CudaArrayAccessSupported 与普通线性内存 P2P 独立；array 未支持时 cudaMemcpy2D 走 staging
+    claim: cudaDeviceGetP2PAttribute 的 CudaArrayAccessSupported 与普通线性内存 P2P 独立；array 未支持时 cudaMemcpy2D
+      走 staging
     types:
     - conceptual
     - debug
@@ -591,7 +592,8 @@ children:
     - 3
     kind: failure
   - id: nccl_group_graph
-    claim: CUDA Graph 捕获 NCCL 需要支持图捕获的 NCCL 且 collective 在同一 stream；捕获期 Group 未 End 会失败，与 sm_80 TMA 无关但同样不能拆 Group
+    claim: CUDA Graph 捕获 NCCL 需要支持图捕获的 NCCL 且 collective 在同一 stream；捕获期 Group 未 End 会失败，与 sm_80 TMA 无关但同样不能拆
+      Group
     types:
     - debug
     - conceptual

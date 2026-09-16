@@ -1,665 +1,1118 @@
 id: T30
 name: 架构特性编年
 children:
-  - id: sm80_cp_async
-    name: SM80 异步拷贝
-    leaves:
-      - id: sm80_cp_async_16b_align
-        claim: "Ampere sm_80 的 cp.async 16 字节形式要求全局源与共享目的均 16B 对齐且 size 为 16 的倍数，4B 对齐的 smem 目的不能发 16B 拷贝。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: feature
-      - id: sm80_cp_async_commit_group
-        claim: "Ampere sm_80 上 cp.async 必须配 cp.async.commit_group / wait_group，wait_group 0 之前读取同一 smem 字节是数据竞争。"
-        types: [debug, code_complete]
-        difficulty: [3]
-        kind: feature
-      - id: sm80_cp_async_no_tma
-        claim: "Ampere sm_80 没有 TMA：cp.async.bulk.tensor 与 CUtensorMap 需要 Hopper sm_90+，在 sm_80 上 ptxas 拒绝该指令。"
-        types: [compare, syntax]
-        difficulty: [2, 3]
-        kind: feature
-      - id: sm80_cp_async_l2_persist
-        claim: "Ampere sm_80（CUDA 11.0+）的 L2 persisting access window 通过 cudaStreamSetAttribute 设置，窗口大小不能超过设备 l2CacheSize，越界属性被截断或失败。"
-        types: [optimization, syntax]
-        difficulty: [3]
-        kind: feature
-      - id: sm80_cp_async_ca_sizes
-        claim: "Ampere sm_80 的 cp.async.ca 的 cp-size ∈ {4,8,16}；size=12 或 32 在 PTX 中非法。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: feature
-      - id: sm80_cp_async_cg_16
-        claim: "Ampere sm_80 的 cp.async.cg.shared.global 强制 cp-size=16；写成 4 或 8 的 .cg 形式 ptxas 失败。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: feature
-      - id: sm80_cp_async_zfill
-        claim: "Ampere sm_80 上 src-size < cp-size 时剩余字节在 smem 填 0（zfill）；src-size 必须 ≤ cp-size，否则指令未定义。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: feature
-      - id: sm80_cp_async_not_mbarrier
-        claim: "Ampere sm_80 用 commit_group 完成异步拷贝，没有 Hopper 的 mbarrier.expect_tx；在 sm_80 上对该拷贝用 mbarrier 完成信号汇编失败。"
-        types: [compare, syntax]
-        difficulty: [3]
-        kind: feature
-      - id: sm80_cp_async_shared_only
-        claim: "Ampere sm_80 的 cp.async 目的状态空间必须是 shared，不能直接异步拷到寄存器或全局；dst 为 .global 非法。"
-        types: [syntax, debug]
-        difficulty: [2]
-        kind: feature
-      - id: sm80_cp_async_sm70_no
-        claim: "Volta sm_70 没有 cp.async，该 intrinsic/PTX 最低 Ampere sm_80；对 sm_70 编译会失败，只能用同步 smem 加载。"
-        types: [compare, syntax]
-        difficulty: [2]
-        kind: feature
-  - id: sm80_mma_sparse
-    name: SM80 MMA 与 2:4 稀疏
-    leaves:
-      - id: sm80_mma_sparse_shape
-        claim: "Ampere sm_80 的 mma.sync.aligned.m16n8k16.f16 要求 warp 32 线程全体参与且 A/B/C 寄存器碎片布局固定，不能用 16 线程的 sub-warp 发该指令。"
-        types: [syntax, layout]
-        difficulty: [3]
-        kind: feature
-      - id: sm80_mma_sparse_24
-        claim: "Ampere sm_80 结构稀疏 Tensor Core 只接受 2:4 模式（每 4 个元素恰好 2 个非零）并需 mma.sp 元数据寄存器，1:2 或随机稀疏不能走该硬件路径。"
-        types: [conceptual, debug]
-        difficulty: [3]
-        kind: feature
-      - id: sm80_mma_sparse_ldmatrix
-        claim: "Ampere sm_80 ldmatrix.sync.aligned.x4 要求 smem 源 16B 对齐，否则指令未定义；它把 8×8 矩阵碎片装入寄存器供随后 mma.sync 使用。"
-        types: [layout, debug]
-        difficulty: [3]
-        kind: feature
-      - id: sm80_mma_sparse_no_wgmma
-        claim: "Ampere sm_80 没有 wgmma.mma_async：该指令最低 Hopper sm_90a，在 sm_80 目标上汇编失败，必须停留在 warp 级 mma.sync。"
-        types: [compare, syntax]
-        difficulty: [2, 3]
-        kind: feature
-      - id: sm80_mma_sparse_meta_bits
-        claim: "Ampere sm_80 的 mma.sp 元数据按每 4 个连续元素 2 bit 选择非零位置；错误 metadata 仍会执行但数值不等于稠密参考。"
-        types: [debug, layout]
-        difficulty: [3, 4]
-        kind: feature
-      - id: sm80_mma_sparse_k_double
-        claim: "Ampere sm_80 稀疏 MMA 的 K 维相对稠密同形状加倍：m16n8k32.sp 对应稠密 k16 的非零吞吐，K 必须匹配稀疏原子。"
-        types: [conceptual, optimization]
-        difficulty: [3]
-        kind: feature
-      - id: sm80_mma_sparse_sm70_no
-        claim: "Volta sm_70 Tensor Core 无 2:4 结构稀疏；mma.sp 在 sm_70 上非法，稀疏必须在软件端用零元素的稠密 mma。"
-        types: [compare, syntax]
-        difficulty: [2, 3]
-        kind: feature
-      - id: sm80_mma_sparse_tf32
-        claim: "Ampere sm_80 的 mma.sync.aligned.m16n8k8.f32.tf32 要求 A/B 先截到 TF32；未 cvt 的 IEEE f32 寄存器直接当 tf32 操作数未定义。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: feature
-      - id: sm80_mma_sparse_no_fp64_sp
-        claim: "Ampere sm_80 没有 FP64 的 mma.sp；稀疏 Tensor Core 覆盖 f16/bf16/tf32/int8 等，FP64 只能走稠密路径或 CUDA core。"
-        types: [compare, conceptual]
-        difficulty: [3]
-        kind: feature
-      - id: sm80_mma_sparse_align_a
-        claim: "Ampere sm_80 稀疏 A 的压缩存储仍须满足 ldmatrix 16B 对齐；把 2:4 压缩矩阵紧挨着放到 8B 对齐地址会使 mma.sp 未定义。"
-        types: [layout, debug]
-        difficulty: [3]
-        kind: feature
-  - id: sm90_tma_cluster
-    name: SM90 TMA 与 Cluster
-    leaves:
-      - id: sm90_tma_cluster_align
-        claim: "Hopper sm_90 TMA（cp.async.bulk.tensor）要求 smem 目的 128B 对齐、gmem 基址 16B 对齐、gmem stride 为 16B 倍数，否则 tensor map 创建或拷贝未定义。"
-        types: [layout, debug]
-        difficulty: [3, 4]
-        kind: feature
-      - id: sm90_tma_cluster_size
-        claim: "Hopper sm_90 线程块 cluster 最大 16 个 CTA，且 launch 的 clusterDim 必须整除 gridDim；cluster 17 非法。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: feature
-      - id: sm90_tma_cluster_mbarrier
-        claim: "Hopper sm_90 TMA 完成信号走 8B 对齐的 shared mbarrier；cuda::barrier 保证该对齐，手工 int 数组若仅 4B 对齐则 mbarrier.init 非法。"
-        types: [debug, syntax]
-        difficulty: [3]
-        kind: feature
-      - id: sm90_tma_cluster_arch_a
-        claim: "Hopper 的 TMA/cluster 加速指令需编译为 sm_90a；仅 sm_90 的可移植 PTX 不启用 wgmma/TMA 专用形态，运行时不会出现 UTMALDG。"
-        types: [syntax, compare]
-        difficulty: [3]
-        kind: feature
-      - id: sm90_tma_cluster_portable8
-        claim: "Hopper sm_90 可移植 cluster 上限是 8 个 CTA；要 9–16 必须 cudaFuncSetAttribute NonPortableClusterSizeAllowed=1，否则 launch 失败。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: feature
-      - id: sm90_tma_cluster_sm80_no
-        claim: "Ampere sm_80 没有 thread block cluster：cudaLaunchKernelEx 设 clusterDim 在 sm_80 上失败，也不存在 map_shared_cluster。"
-        types: [compare, syntax]
-        difficulty: [2, 3]
-        kind: feature
-      - id: sm90_tma_cluster_multicast
-        claim: "Hopper sm_90 TMA multicast 只能发到同一 cluster 内的 CTA；clusterDim=1 时 multicast mask 无同伴，不能当广播到任意 SM。"
-        types: [conceptual, debug]
-        difficulty: [3, 4]
-        kind: feature
-      - id: sm90_tma_cluster_dsmem
-        claim: "Hopper sm_90 分布式共享内存用 mapa 把本 CTA smem 映射到 cluster 同伴；映射地址只在 cluster.sync 之后对同伴可见，未同步解引用非法。"
-        types: [debug, layout]
-        difficulty: [3, 4]
-        kind: feature
-      - id: sm90_tma_cluster_divide
-        claim: "Hopper sm_90 要求 gridDim 各维能被 clusterDim 整除：grid=(10,1,1) cluster=(8,1,1) 非法，必须改 grid 为 8 或 16。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: feature
-      - id: sm90_tma_cluster_expect_tx
-        claim: "Hopper sm_90 上 TMA 完成必须 mbarrier.arrive.expect_tx 把预期字节数写入；漏 expect_tx 只 arrive 会造成永久等待或早放行。"
-        types: [debug, code_complete]
-        difficulty: [3, 4]
-        kind: feature
-  - id: sm90_wgmma
-    name: SM90 WGMMA
-    leaves:
-      - id: sm90_wgmma_128_threads
-        claim: "Hopper sm_90a 的 wgmma.mma_async 必须由连续 4 warp=128 线程的 warpgroup 集体发出，单 warp 32 线程发该指令非法。"
-        types: [syntax, conceptual]
-        difficulty: [3, 4]
-        kind: feature
-      - id: sm90_wgmma_m64_smem_b
-        claim: "Hopper WGMMA 稠密混合精度形状固定 M=64，B 操作数必须来自 smem descriptor（128B swizzle 模式之一），不能把 B 放在通用寄存器当 mma.sync 用。"
-        types: [layout, compare]
-        difficulty: [3, 4]
-        kind: feature
-      - id: sm90_wgmma_acc_regs
-        claim: "Hopper 最大 wgmma 形状 m64n256k16 的 FP32 累加器是 64×256 个值，由 128 线程分摊 → 每线程 128 个寄存器，超过 255/thread 硬件上限的更大 N 不存在。"
-        types: [optimization, conceptual]
-        difficulty: [3, 4]
-        kind: feature
-      - id: sm90_wgmma_commit_wait
-        claim: "Hopper wgmma 是异步的：wgmma.fence、一组 mma_async、wgmma.commit_group 与 wgmma.wait_group 必须成对；wait 之前读累加寄存器得到旧值。"
-        types: [debug, code_complete]
-        difficulty: [3, 4]
-        kind: feature
-      - id: sm90_wgmma_sm80_no
-        claim: "Ampere sm_80 汇编 wgmma.mma_async 失败；Hopper 的 warpgroup MMA 不能作为 sm_80 的运行时快路径。"
-        types: [compare, syntax]
-        difficulty: [2, 3]
-        kind: feature
-      - id: sm90_wgmma_desc_swizzle
-        claim: "Hopper sm_90a WGMMA smem descriptor 的 swizzle 必须是 32/64/128B 模式之一且与实际 smem 布局一致；错误 swizzle 使 MMA 读错 tile。"
-        types: [layout, debug]
-        difficulty: [4]
-        kind: feature
-      - id: sm90_wgmma_fp8
-        claim: "Hopper sm_90a 的 wgmma 支持 e4m3/e5m2 FP8 操作数；Ampere sm_80 无 FP8 Tensor Core，同一 PTX 在 sm_80 上非法。"
-        types: [compare, conceptual]
-        difficulty: [3]
-        kind: feature
-      - id: sm90_wgmma_a_smem_or_reg
-        claim: "Hopper WGMMA 的 A 可来自 smem descriptor 或寄存器碎片，B 必须 smem；把 B 放寄存器发 wgmma 非法。"
-        types: [layout, syntax]
-        difficulty: [3, 4]
-        kind: feature
-      - id: sm90_wgmma_sm100_removed
-        claim: "Blackwell sm_100a 删除 wgmma.mma_async，Hopper WGMMA 源码在 sm_100a 上 ptxas 失败，必须改写 tcgen05。"
-        types: [compare, debug]
-        difficulty: [3, 4]
-        kind: feature
-      - id: sm90_wgmma_i8
-        claim: "Hopper sm_90a 整数 wgmma 的 K 与类型组合固定（如 s8 的 k32 类形状）；任意 K=24 的 int8 wgmma 不存在。"
-        types: [syntax, conceptual]
-        difficulty: [3, 4]
-        kind: feature
-  - id: sm100_tmem
-    name: SM100 TMEM
-    leaves:
-      - id: sm100_tmem_shape
-        claim: "Blackwell sm_100a 的 Tensor Memory 为 128 lane × 512 列 × 4B=256 KB/SM，不能当通用 smem 用，必须经 tcgen05.ld/st 访问。"
-        types: [conceptual, layout]
-        difficulty: [4]
-        kind: feature
-      - id: sm100_tmem_lane_restrict
-        claim: "Blackwell TMEM 按 warpgroup 寻址：一个 warp 只能碰自己那组 lane，跨 lane 的 tcgen05.ld 违反硬件约束，数据未定义。"
-        types: [debug, conceptual]
-        difficulty: [4]
-        kind: feature
-      - id: sm100_tmem_alloc
-        claim: "Blackwell 上 TMEM 容量由 CTA 显式 alloc/dealloc，未分配列上执行 tcgen05.mma 非法；释放后仍把累加器当活的寄存器使用会读到回收后的内容。"
-        types: [syntax, debug]
-        difficulty: [4]
-        kind: feature
-      - id: sm100_tmem_not_on_sm90
-        claim: "TMEM 与 tcgen05.ld 只存在于 Blackwell sm_100a/sm_103a，Hopper sm_90a 没有该存储层次，在 sm_90a 上汇编 tcgen05 失败。"
-        types: [compare, syntax]
-        difficulty: [3, 4]
-        kind: feature
-      - id: sm100_tmem_not_generic
-        claim: "Blackwell sm_100a 不能对 TMEM 做普通 ld/st.shared；用 smem 指针算术去碰 TMEM 列是非法地址。"
-        types: [debug, layout]
-        difficulty: [4]
-        kind: feature
-      - id: sm100_tmem_sm120_no
-        claim: "消费级 Blackwell sm_120/sm_120a 没有 TMEM；tcgen05.ld 在 sm_120 目标上失败，应使用寄存器累加的 mma.sync。"
-        types: [compare, syntax]
-        difficulty: [3, 4]
-        kind: feature
-      - id: sm100_tmem_columns_share
-        claim: "Blackwell sm_100a 每 SM 512 列 TMEM 由驻留 CTA 共享；两 CTA 各 alloc 256 列后第三份 alloc 失败，不是自动换出到 smem。"
-        types: [optimization, conceptual]
-        difficulty: [4]
-        kind: feature
-      - id: sm100_tmem_utccp
-        claim: "Blackwell sm_100a 的 UTCCP 把 smem 常量/scale 搬进 TMEM，要求与当前 cta_group（1 或 2）一致；cg1 的 UTCCP 不能喂 cg2 MMA。"
-        types: [syntax, debug]
-        difficulty: [4]
-        kind: feature
-      - id: sm100_tmem_epilogue_ld
-        claim: "Blackwell sm_100a 写回全局前必须 tcgen05.ld 把 TMEM 累加器搬到寄存器；没有从 TMEM 直达 gmem 的通用 st。"
-        types: [code_complete, layout]
-        difficulty: [4]
-        kind: feature
-      - id: sm100_tmem_addr_fields
-        claim: "Blackwell TMEM 地址高 16 bit 为 lane、低 16 bit 为列；软件构造超出 127 lane 或 511 列的地址违反 sm_100a 硬件约束。"
-        types: [layout, debug]
-        difficulty: [4]
-        kind: feature
-  - id: sm100_umma
-    name: SM100 UMMA / tcgen05
-    leaves:
-      - id: sm100_umma_single_thread
-        claim: "Blackwell sm_100a 的 tcgen05.mma（UMMA）由 CTA 内单线程代表发射，累加器在 TMEM 而非寄存器；其余线程不得各发一条自己的 mma。"
-        types: [conceptual, compare]
-        difficulty: [4]
-        kind: feature
-      - id: sm100_umma_cta_group2
-        claim: "Blackwell 2SM MMA 使用 .cta_group::2，要求一对 CTA 同属一个 TPC 并在 cluster 中配对；单 CTA launch（cluster=1 且无配对）不能发 2SM 形状。"
-        types: [syntax, layout]
-        difficulty: [4]
-        kind: feature
-      - id: sm100_umma_no_wgmma
-        claim: "Blackwell sm_100a/sm_103a/sm_120a 删除 wgmma.mma_async，Hopper WGMMA 源码在这些目标上 ptxas 失败，必须改写为 tcgen05 或 sm_120 的 mma.sync。"
-        types: [compare, debug]
-        difficulty: [3, 4]
-        kind: feature
-      - id: sm100_umma_portable_ptx
-        claim: "无后缀的 sm_100 可移植 PTX 既没有 tcgen05 也没有 wgmma；Blackwell Tensor Core 路径只在 sm_100a 等 arch-specific 目标上合法。"
-        types: [syntax, conceptual]
-        difficulty: [4]
-        kind: feature
-      - id: sm100_umma_b_smem
-        claim: "Blackwell sm_100a UMMA 的 B 必须在 smem，A 可在 smem 或 TMEM，累加器必须在 TMEM；三操作数都放寄存器的 Ampere 风格非法。"
-        types: [layout, compare]
-        difficulty: [4]
-        kind: feature
-      - id: sm100_umma_k16_f16
-        claim: "Blackwell sm_100a 对 16-bit 类型的 tcgen05.mma K=16（或文档列出的固定 K）；K=8 的 Hopper wgmma 形状不能直接当 UMMA 原子。"
-        types: [syntax, conceptual]
-        difficulty: [4]
-        kind: feature
-      - id: sm100_umma_m256_cg2
-        claim: "Blackwell sm_100a 的 M=256 UMMA 需要 cta_group::2；在 cluster=1 的单 CTA 上发 m256 形状非法。"
-        types: [syntax, debug]
-        difficulty: [4]
-        kind: feature
-      - id: sm100_umma_sm120_mma_sync
-        claim: "消费级 Blackwell sm_120 用 warp 级 mma.sync 而非 tcgen05 UMMA；把 sm_100a UMMA kernel 当 sm_120 运行会缺指令。"
-        types: [compare, syntax]
-        difficulty: [3, 4]
-        kind: feature
-      - id: sm100_umma_mix_cg
-        claim: "Blackwell sm_100a 同一 kernel 不得混用 cta_group::1 与 cta_group::2 的 tcgen05.mma；混用违反硬件约束。"
-        types: [debug, syntax]
-        difficulty: [4]
-        kind: feature
-      - id: sm100_umma_scale
-        claim: "Blackwell sm_100a 的 mxFP4/FP8 UMMA 需要块缩放因子在 TMEM/smem 的规定布局；缺 scale 操作数的 mxf8f6f4 MMA 非法。"
-        types: [layout, debug]
-        difficulty: [4]
-        kind: feature
-  - id: dp4a_int
-    name: dp4a 与整数点积
-    leaves:
-      - id: dp4a_int_sm61
-        claim: "Pascal sm_61 引入 __dp4a(a,b,c)：四对 8-bit 点积加到 32-bit 累加器；sm_50 上该 intrinsic 不存在。"
-        types: [syntax, conceptual]
-        difficulty: [2]
-        kind: feature
-      - id: dp4a_int_pack
-        claim: "sm_61+ 的 __dp4a 把两个 int 各解释为 4 个 packed 8-bit；对未打包的 char4 误用 int 加载但字节序不对会得到错误点积。"
-        types: [layout, debug]
-        difficulty: [2, 3]
-        kind: feature
-      - id: dp4a_int_ptx
-        claim: "PTX dp4a.s32.s32 最低 sm_61；在 sm_80 上仍合法，但 Ampere 大块 INT8 GEMM 应改 mma.sync 而不是手工 dp4a。"
-        types: [compare, optimization]
-        difficulty: [2, 3]
-        kind: feature
-      - id: dp4a_int_dp2a
-        claim: "sm_61 还有 __dp2a 做 2×16-bit 点积；在 sm_61 上把 16-bit 对塞进 __dp4a 的 8-bit 通道数值错误。"
-        types: [syntax, compare]
-        difficulty: [2, 3]
-        kind: feature
-      - id: dp4a_int_sm80_imma
-        claim: "Ampere sm_80 的 mma.sync.i8 是 warp 级 INT8 Tensor Core，要求 32 线程与固定碎片；不能用单线程 __dp4a 冒充该 MMA。"
-        types: [compare, conceptual]
-        difficulty: [3]
-        kind: feature
-      - id: dp4a_int_sat
-        claim: "sm_61 __dp4a 累加在 32-bit 整数上环绕，不自动饱和到 8-bit；要饱和必须另用 VADD/VSET 类指令或手工 clamp。"
-        types: [conceptual, debug]
-        difficulty: [2, 3]
-        kind: feature
-      - id: dp4a_int_ampere_still
-        claim: "Ampere sm_80 与 Hopper sm_90 仍实现 dp4a；编译目标 sm_80 时 __dp4a 合法，但 sm_30 目标非法。"
-        types: [syntax, compare]
-        difficulty: [2]
-        kind: feature
-      - id: dp4a_int_align4
-        claim: "sm_61+ 从全局加载 packed int 做 dp4a 要求 4B 对齐；1B 对齐的 int8 缓冲必须先对齐拷到寄存器，否则向量加载未定义。"
-        types: [layout, debug]
-        difficulty: [2, 3]
-        kind: feature
-  - id: cache_policy
-    name: 缓存策略
-    leaves:
-      - id: cache_policy_sm80_evict
-        claim: "Ampere sm_80（PTX ISA 7.4+）的 ld.global.L1::evict_first/evict_last 设置 L1 逐出优先级；sm_70 无这些修饰符。"
-        types: [syntax, optimization]
-        difficulty: [3]
-        kind: feature
-      - id: cache_policy_createpolicy
-        claim: "Ampere sm_80 的 createpolicy.fractional.L2::evict_last 生成 64-bit cache-policy 操作数，供带 .L2::cache_hint 的 ld/cp.async 使用；sm_70 无 createpolicy。"
-        types: [syntax, conceptual]
-        difficulty: [3, 4]
-        kind: feature
-      - id: cache_policy_cp_async_cg
-        claim: "Ampere sm_80 的 cp.async.cg 只在 L2 缓存数据、不填 L1，且 size 必须 16B；.ca 才填 L1+L2。"
-        types: [compare, optimization]
-        difficulty: [3]
-        kind: feature
-      - id: cache_policy_access_window
-        claim: "Ampere sm_80 CUDA 11 的 cudaAccessPolicyWindow 经流属性设置 L2 persisting 窗口，hitRatio 在 (0,1]；窗口字节超过 l2CacheSize 被拒或截断。"
-        types: [syntax, optimization]
-        difficulty: [3]
-        kind: feature
-      - id: cache_policy_no_allocate
-        claim: "Ampere sm_80 的 ld.global.L1::no_allocate 提示不在 L1 分配行；把它写进 sm_60 PTX 非法。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: feature
-      - id: cache_policy_hint_perf
-        claim: "Ampere/Hopper 的 cache operator（.ca/.cg/.cs）是性能提示，不改变 CUDA 内存模型可见性；用 .cg 不能代替 __threadfence。"
-        types: [conceptual, counterfactual]
-        difficulty: [3]
-        kind: feature
-      - id: cache_policy_sm90_evict
-        claim: "Hopper sm_90 继承 sm_80 的 L1/L2 eviction qualifier，并与 TMA 的 L2 hint 组合；TMA 描述符里的 cache 策略不能用 Ampere cp.async 的 commit_group 表达。"
-        types: [compare, syntax]
-        difficulty: [3, 4]
-        kind: feature
-      - id: cache_policy_dlcm
-        claim: "对 Ampere sm_80+ 传 -Xptxas -dlcm=cg 使默认 ld.global 旁路 L1；与 sm_80 上 __ldcg 等价，不适用于 sm_30 的独立编译器默认。"
-        types: [optimization, profiling]
-        difficulty: [2, 3]
-        kind: feature
-  - id: cluster_cta
-    name: Thread block cluster
-    leaves:
-      - id: cluster_cta_sm90_only
-        claim: "Thread block cluster 最低 Hopper sm_90；Ampere sm_80 的 cudaLaunchKernelEx 若带 cluster 维度失败。"
-        types: [syntax, compare]
-        difficulty: [2, 3]
-        kind: feature
-      - id: cluster_cta_max16
-        claim: "Hopper sm_90 / Blackwell sm_100 硬件 cluster 最大 16 CTA；portable 默认最大 8，超过 8 必须非可移植 opt-in。"
-        types: [conceptual, syntax]
-        difficulty: [3]
-        kind: feature
-      - id: cluster_cta_sync
-        claim: "Hopper sm_90 的 cluster.sync / barrier.cluster 必须由 cluster 内全部 CTA 的对应线程参与；缺一个 CTA 则死等。"
-        types: [debug, conceptual]
-        difficulty: [3, 4]
-        kind: feature
-      - id: cluster_cta_launch_attr
-        claim: "Hopper sm_90 要用 cudaLaunchAttributeClusterDimension 或 Cooperative Groups cluster 接口在 launch 时给定 dim3；kernel 内不能动态改 cluster 大小。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: feature
-      - id: cluster_cta_gpc
-        claim: "Hopper sm_90 cluster 保证同 GPC 共调度；cluster 大于 GPC 内 SM 数时 launch 失败，不能跨 GPC 硬拼 16。"
-        types: [conceptual, debug]
-        difficulty: [3, 4]
-        kind: feature
-      - id: cluster_cta_sm100_fallback
-        claim: "Blackwell sm_100 支持 preferred cluster 与 fallback cluster 尺寸，fallback 常为 1 或 2 以吃尽剩余 SM；Hopper sm_90 无这套 preferred/fallback 属性。"
-        types: [compare, optimization]
-        difficulty: [4]
-        kind: feature
-      - id: cluster_cta_rank
-        claim: "Hopper sm_90 的 block_rank_in_cluster ∈ [0, cluster_size)；用它索引 dsmem 同伴时越界 rank 是非法映射。"
-        types: [debug, layout]
-        difficulty: [3]
-        kind: feature
-      - id: cluster_cta_no_cga_sm80
-        claim: "Ampere sm_80 没有 cluster.sync 与 distributed smem：在 sm_80 上写 barrier.cluster 汇编失败。"
-        types: [syntax, compare]
-        difficulty: [2, 3]
-        kind: feature
-  - id: fp8_tensor
-    name: FP8 Tensor Core
-    leaves:
-      - id: fp8_tensor_sm90
-        claim: "Hopper sm_90a 首次提供 e4m3/e5m2 FP8 Tensor Core（wgmma）；Ampere sm_80 无 FP8 MMA，只能 CUDA core 模拟。"
-        types: [compare, conceptual]
-        difficulty: [2, 3]
-        kind: feature
-      - id: fp8_tensor_cuda118
-        claim: "cuda_fp8.h 的 __nv_fp8_e4m3 类型随 CUDA 11.8+ 提供；更早 toolkit 没有该头，即使编译 sm_90 也缺类型。"
-        types: [syntax, conceptual]
-        difficulty: [2]
-        kind: feature
-      - id: fp8_tensor_cvt
-        claim: "Hopper sm_90 的 cvt.rn.satfinite.e4m3x2.f32 把两个 f32 饱和转换到 packed FP8；无 satfinite 的普通 cvt 溢出行为不同。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: feature
-      - id: fp8_tensor_scale
-        claim: "Hopper sm_90 FP8 GEMM 通常需要逐张量 scale（cuBLASLt 描述符）；把 e4m3 当 IEEE 无 scale 输入会得到错误动态范围。"
-        types: [conceptual, debug]
-        difficulty: [3]
-        kind: feature
-      - id: fp8_tensor_sm100_mx
-        claim: "Blackwell sm_100a 的 tcgen05 支持微缩放 FP8/FP4（mxf8f6f4 等）；Hopper sm_90a wgmma 无 FP4 UMMA 形状。"
-        types: [compare, conceptual]
-        difficulty: [4]
-        kind: feature
-      - id: fp8_tensor_acc_f32
-        claim: "Hopper sm_90a FP8 wgmma 累加器是 FP32 寄存器；不能把累加器声明为 e4m3 再 wgmma.wait 后当 FP8 读。"
-        types: [layout, debug]
-        difficulty: [3, 4]
-        kind: feature
-      - id: fp8_tensor_e5m2_vs_e4m3
-        claim: "Hopper sm_90 的 e5m2 动态范围更大、尾数更少，与 e4m3 不能在同一 wgmma 原子里混装 A/B 类型，除非 PTX 列出的混合形状。"
-        types: [syntax, compare]
-        difficulty: [3, 4]
-        kind: feature
-      - id: fp8_tensor_sm80_compile
-        claim: "含 wgmma FP8 的源若只编译 sm_80，ptxas 失败；必须提供 sm_90a 二进制或运行时拒绝该路径。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: feature
-  - id: green_ctx
-    name: Green context
-    leaves:
-      - id: green_ctx_cuda124
-        claim: "CUDA 12.4 引入 cuGreenCtxCreate；CUDA 12.3 及更早无绿上下文 API，链接会缺符号。"
-        types: [syntax, conceptual]
-        difficulty: [2, 3]
-        kind: feature
-      - id: green_ctx_sm90_min8
-        claim: "Hopper sm_90+ 绿上下文 SM 分区 minCount 必须 ≥8 且为 8 的倍数；请求 4 个 SM 会被上取整或拆分失败。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: feature
-      - id: green_ctx_sm80_min4
-        claim: "Ampere sm_80 绿上下文最小 4 个 SM 且为 2 的倍数；请求 1 个 SM 不满足 sm_80 硬约束。"
-        types: [syntax, compare]
-        difficulty: [3]
-        kind: feature
-      - id: green_ctx_sm70_min2
-        claim: "Volta/Turing sm_70/sm_75 绿上下文最小 2 个 SM 且为 2 的倍数；与 Hopper 的 8 对齐规则不同。"
-        types: [compare, conceptual]
-        difficulty: [3]
-        kind: feature
-      - id: green_ctx_sm100_stream
-        claim: "CUDA 12.4+ 提交到绿上下文必须使用该上下文创建的流（cuGreenCtxCreate 后从该 ctx 建流）；primary context 的默认流不受该 SM 分区约束。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: feature
-      - id: green_ctx_split_sum
-        claim: "各绿上下文 SM 份数之和不能超过该 GPU 的 multiProcessorCount；Hopper H100 132 SM 上两份 80 非法。"
-        types: [debug, conceptual]
-        difficulty: [2, 3]
-        kind: feature
-      - id: green_ctx_cluster
-        claim: "Hopper sm_90 在绿上下文上流上做 cluster launch 时，clusterDim 不能超过该绿上下文分到的 SM 数，也必须满足 coschedule 约束。"
-        types: [debug, optimization]
-        difficulty: [4]
-        kind: feature
-      - id: green_ctx_destroy
-        claim: "CUDA 12.4 的 cuGreenCtxDestroy 前必须完成该绿上下文流上的工作；仍有飞行 kernel 时销毁使后续同步看到非法上下文。"
-        types: [debug, conceptual]
-        difficulty: [3]
-        kind: feature
-  - id: tma_tensormap
-    name: TMA tensor map
-    leaves:
-      - id: tma_tensormap_encode
-        claim: "Hopper sm_90 的 cuTensorMapEncodeTiled 在 host 创建 CUtensorMap，设备 cp.async.bulk.tensor 使用该描述符；sm_80 无此 API 用途。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: feature
-      - id: tma_tensormap_smem128
-        claim: "Hopper sm_90 TMA 存到 shared 的目的地址必须 128B 对齐；64B 对齐的 smem tile 基址使 tensor copy 未定义。"
-        types: [layout, debug]
-        difficulty: [3]
-        kind: feature
-      - id: tma_tensormap_gmem16
-        claim: "Hopper sm_90 tensor map 的全局基址 16B 对齐、各维 stride 为 16B 倍数；byte stride=24 的 FP16 矩阵不能直接编码。"
-        types: [layout, debug]
-        difficulty: [3, 4]
-        kind: feature
-      - id: tma_tensormap_rank5
-        claim: "Hopper sm_90 CUtensorMap 最多 5 维；6 维张量必须合并维才能 EncodeTiled，否则创建失败。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: feature
-      - id: tma_tensormap_swizzle
-        claim: "Hopper sm_90 tensor map swizzle ∈ {none,32B,64B,128B} 且须匹配 smem 布局；swizzle=128B 但 smem 按线性存放会使 TMA 写错 bank。"
-        types: [layout, debug]
-        difficulty: [4]
-        kind: feature
-      - id: tma_tensormap_box
-        claim: "Hopper sm_90 的 box 尺寸是单次 TMA 拷贝的坐标盒，必须 ≤ 该维 extent 且满足对齐；box 超过 remaining extent 的越界行为由 OOB fill 模式决定，不是静默 clamp 到 CUDA array 纹理。"
-        types: [conceptual, debug]
-        difficulty: [3, 4]
-        kind: feature
-      - id: tma_tensormap_device_modify
-        claim: "Hopper sm_90 上设备可 tensormap.replace 改地址字段，但不能在设备上从零构造完整合法 map；初始 encode 仍在 host。"
-        types: [syntax, compare]
-        difficulty: [4]
-        kind: feature
-      - id: tma_tensormap_sm100
-        claim: "Blackwell sm_100a 仍用 TMA 把 gmem 搬到 smem 再 UMMA；没有 TMA 的 sm_80 路径不能靠换指令名在 Blackwell 上替代 tensormap。"
-        types: [compare, conceptual]
-        difficulty: [3, 4]
-        kind: feature
-  - id: async_bulk
-    name: cp.async.bulk
-    leaves:
-      - id: async_bulk_sm90
-        claim: "cp.async.bulk 最低 Hopper sm_90；Ampere sm_80 只有 cp.async 4/8/16B，不能发 bulk 任意字节。"
-        types: [compare, syntax]
-        difficulty: [2, 3]
-        kind: feature
-      - id: async_bulk_mbarrier
-        claim: "Hopper sm_90 的 cp.async.bulk 完成走 shared mbarrier.expect_tx，不是 sm_80 的 commit_group；混用两套完成协议会丢同步。"
-        types: [debug, compare]
-        difficulty: [3]
-        kind: feature
-      - id: async_bulk_shared_cluster
-        claim: "Hopper sm_90 的 cp.async.bulk 可把目的写成 shared::cluster 以写同伴 CTA smem；clusterDim=1 时 cluster 目的无意义且可能非法。"
-        types: [syntax, layout]
-        difficulty: [3, 4]
-        kind: feature
-      - id: async_bulk_size_align
-        claim: "Hopper sm_90 bulk 拷贝字节数必须满足 PTX 对齐（常见 16B 倍数）；size=1 的 bulk 非法，小拷贝应回退 sm_80 式 cp.async。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: feature
-      - id: async_bulk_tensor_vs_1d
-        claim: "Hopper sm_90 的 cp.async.bulk.tensor 走 tensormap 多维盒；cp.async.bulk 一维字节拷贝不读 CUtensorMap，二者不能互换描述符。"
-        types: [compare, syntax]
-        difficulty: [3]
-        kind: feature
-      - id: async_bulk_sm100
-        claim: "Blackwell sm_100a 保留 TMA/bulk 作为 gmem→smem 路径，但 MMA 完成是 tcgen05 而非 wgmma.commit_group。"
-        types: [compare, conceptual]
-        difficulty: [4]
-        kind: feature
-      - id: async_bulk_prefetch
-        claim: "Hopper sm_90 的 cp.async.bulk.prefetch 只填 L2 不写 smem；把它的完成当 smem 数据就绪在 sm_90 上是错误同步。"
-        types: [debug, counterfactual]
-        difficulty: [3, 4]
-        kind: feature
-      - id: async_bulk_cta_group
-        claim: "Hopper sm_90 bulk 默认 CTA 范围；Blackwell sm_100 的 cta_group::2 TMA 需要配对 CTA，单 CTA bulk 不能替代 2SM 传输。"
-        types: [compare, layout]
-        difficulty: [4]
-        kind: feature
-  - id: sparse_tc
-    name: 结构稀疏 Tensor Core
-    leaves:
-      - id: sparse_tc_sm80_24
-        claim: "结构稀疏 Tensor Core 从 Ampere sm_80 开始，只硬件加速 2:4；sm_70 无 mma.sp。"
-        types: [conceptual, compare]
-        difficulty: [2, 3]
-        kind: feature
-      - id: sparse_tc_sm90_wgmma_sp
-        claim: "Hopper sm_90a 提供稀疏 wgmma（mma_async 的 sparse 形态），仍要求 2:4 metadata；不能把 CSR 不规则稀疏直接送进 wgmma.sp。"
-        types: [syntax, debug]
-        difficulty: [3, 4]
-        kind: feature
-      - id: sparse_tc_cusparselt
-        claim: "cuSPARSELt 的 2:4 路径要求 sm_80+；在 sm_75 上 prune/matmul 会因缺稀疏 Tensor Core 而失败或走不支持。"
-        types: [syntax, compare]
-        difficulty: [2, 3]
-        kind: feature
-      - id: sparse_tc_meta_reg
-        claim: "Ampere sm_80 mma.sp 把 metadata 放在指定寄存器通道；Hopper 稀疏 wgmma 的 metadata 布局不同，sm_80 的碎片映射不能原样用于 sm_90a。"
-        types: [layout, compare]
-        difficulty: [4]
-        kind: feature
-      - id: sparse_tc_k_even
-        claim: "Ampere sm_80 2:4 稀疏 GEMM 的 K 必须匹配稀疏原子（压缩前 K 为原子 K 的相应倍数）；K=15 的 INT8 稀疏 MMA 不存在。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: feature
-      - id: sparse_tc_dense_ref
-        claim: "Ampere/Hopper 稀疏 MMA 在 metadata 标明的位置外视作零；若压缩前那 4 元组实际有 3 个非零，硬件仍只取 2 个，数值不等于稠密参考。"
-        types: [debug, conceptual]
-        difficulty: [3]
-        kind: feature
-      - id: sparse_tc_sm100
-        claim: "Blackwell sm_100a 稀疏/微缩放 MMA 走 tcgen05 而非 mma.sp；把 sm_80 的 mma.sp 内联进 sm_100a kernel 会缺指令。"
-        types: [compare, syntax]
-        difficulty: [4]
-        kind: feature
-      - id: sparse_tc_prune_align
-        claim: "Ampere sm_80 上 cuSPARSELt 剪枝输出的压缩矩阵与 metadata 必须 16B 对齐才能喂稀疏 TC；未对齐 prune 输出使后续 matmul 失败。"
-        types: [layout, debug]
-        difficulty: [3]
-        kind: feature
+- id: sm80_cp_async
+  name: SM80 异步拷贝
+  leaves:
+  - id: sm80_cp_async_16b_align
+    claim: Ampere sm_80 的 cp.async 16 字节形式要求全局源与共享目的均 16B 对齐且 size 为 16 的倍数，4B 对齐的 smem 目的不能发 16B 拷贝。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: sm80_cp_async_commit_group
+    claim: Ampere sm_80 上 cp.async 必须配 cp.async.commit_group / wait_group，wait_group 0 之前读取同一 smem 字节是数据竞争。
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 3
+    kind: feature
+  - id: sm80_cp_async_no_tma
+    claim: Ampere sm_80 没有 TMA：cp.async.bulk.tensor 与 CUtensorMap 需要 Hopper sm_90+，在 sm_80 上 ptxas 拒绝该指令。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: sm80_cp_async_l2_persist
+    claim: Ampere sm_80（CUDA 11.0+）的 L2 persisting access window 通过 cudaStreamSetAttribute 设置，窗口大小不能超过设备
+      l2CacheSize，越界属性被截断或失败。
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 3
+    kind: feature
+  - id: sm80_cp_async_ca_sizes
+    claim: Ampere sm_80 的 cp.async.ca 的 cp-size ∈ {4,8,16}；size=12 或 32 在 PTX 中非法。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: sm80_cp_async_cg_16
+    claim: Ampere sm_80 的 cp.async.cg.shared.global 强制 cp-size=16；写成 4 或 8 的 .cg 形式 ptxas 失败。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: sm80_cp_async_zfill
+    claim: Ampere sm_80 上 src-size < cp-size 时剩余字节在 smem 填 0（zfill）；src-size 必须 ≤ cp-size，否则指令未定义。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: sm80_cp_async_not_mbarrier
+    claim: Ampere sm_80 用 commit_group 完成异步拷贝，没有 Hopper 的 mbarrier.expect_tx；在 sm_80 上对该拷贝用 mbarrier 完成信号汇编失败。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+    kind: feature
+  - id: sm80_cp_async_shared_only
+    claim: Ampere sm_80 的 cp.async 目的状态空间必须是 shared，不能直接异步拷到寄存器或全局；dst 为 .global 非法。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: feature
+  - id: sm80_cp_async_sm70_no
+    claim: Volta sm_70 没有 cp.async，该 intrinsic/PTX 最低 Ampere sm_80；对 sm_70 编译会失败，只能用同步 smem 加载。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 2
+    kind: feature
+- id: sm80_mma_sparse
+  name: SM80 MMA 与 2:4 稀疏
+  leaves:
+  - id: sm80_mma_sparse_shape
+    claim: Ampere sm_80 的 mma.sync.aligned.m16n8k16.f16 要求 warp 32 线程全体参与且 A/B/C 寄存器碎片布局固定，不能用 16 线程的
+      sub-warp 发该指令。
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    kind: feature
+  - id: sm80_mma_sparse_24
+    claim: Ampere sm_80 结构稀疏 Tensor Core 只接受 2:4 模式（每 4 个元素恰好 2 个非零）并需 mma.sp 元数据寄存器，1:2 或随机稀疏不能走该硬件路径。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: sm80_mma_sparse_ldmatrix
+    claim: Ampere sm_80 ldmatrix.sync.aligned.x4 要求 smem 源 16B 对齐，否则指令未定义；它把 8×8 矩阵碎片装入寄存器供随后 mma.sync
+      使用。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: sm80_mma_sparse_no_wgmma
+    claim: Ampere sm_80 没有 wgmma.mma_async：该指令最低 Hopper sm_90a，在 sm_80 目标上汇编失败，必须停留在 warp 级 mma.sync。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: sm80_mma_sparse_meta_bits
+    claim: Ampere sm_80 的 mma.sp 元数据按每 4 个连续元素 2 bit 选择非零位置；错误 metadata 仍会执行但数值不等于稠密参考。
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sm80_mma_sparse_k_double
+    claim: Ampere sm_80 稀疏 MMA 的 K 维相对稠密同形状加倍：m16n8k32.sp 对应稠密 k16 的非零吞吐，K 必须匹配稀疏原子。
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: feature
+  - id: sm80_mma_sparse_sm70_no
+    claim: Volta sm_70 Tensor Core 无 2:4 结构稀疏；mma.sp 在 sm_70 上非法，稀疏必须在软件端用零元素的稠密 mma。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: sm80_mma_sparse_tf32
+    claim: Ampere sm_80 的 mma.sync.aligned.m16n8k8.f32.tf32 要求 A/B 先截到 TF32；未 cvt 的 IEEE f32 寄存器直接当 tf32
+      操作数未定义。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: sm80_mma_sparse_no_fp64_sp
+    claim: Ampere sm_80 没有 FP64 的 mma.sp；稀疏 Tensor Core 覆盖 f16/bf16/tf32/int8 等，FP64 只能走稠密路径或 CUDA core。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: sm80_mma_sparse_align_a
+    claim: Ampere sm_80 稀疏 A 的压缩存储仍须满足 ldmatrix 16B 对齐；把 2:4 压缩矩阵紧挨着放到 8B 对齐地址会使 mma.sp 未定义。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+- id: sm90_tma_cluster
+  name: SM90 TMA 与 Cluster
+  leaves:
+  - id: sm90_tma_cluster_align
+    claim: Hopper sm_90 TMA（cp.async.bulk.tensor）要求 smem 目的 128B 对齐、gmem 基址 16B 对齐、gmem stride 为 16B 倍数，否则
+      tensor map 创建或拷贝未定义。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sm90_tma_cluster_size
+    claim: Hopper sm_90 线程块 cluster 最大 16 个 CTA，且 launch 的 clusterDim 必须整除 gridDim；cluster 17 非法。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: sm90_tma_cluster_mbarrier
+    claim: Hopper sm_90 TMA 完成信号走 8B 对齐的 shared mbarrier；cuda::barrier 保证该对齐，手工 int 数组若仅 4B 对齐则 mbarrier.init
+      非法。
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: feature
+  - id: sm90_tma_cluster_arch_a
+    claim: Hopper 的 TMA/cluster 加速指令需编译为 sm_90a；仅 sm_90 的可移植 PTX 不启用 wgmma/TMA 专用形态，运行时不会出现 UTMALDG。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: sm90_tma_cluster_portable8
+    claim: Hopper sm_90 可移植 cluster 上限是 8 个 CTA；要 9–16 必须 cudaFuncSetAttribute NonPortableClusterSizeAllowed=1，否则
+      launch 失败。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: sm90_tma_cluster_sm80_no
+    claim: Ampere sm_80 没有 thread block cluster：cudaLaunchKernelEx 设 clusterDim 在 sm_80 上失败，也不存在 map_shared_cluster。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: sm90_tma_cluster_multicast
+    claim: Hopper sm_90 TMA multicast 只能发到同一 cluster 内的 CTA；clusterDim=1 时 multicast mask 无同伴，不能当广播到任意
+      SM。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sm90_tma_cluster_dsmem
+    claim: Hopper sm_90 分布式共享内存用 mapa 把本 CTA smem 映射到 cluster 同伴；映射地址只在 cluster.sync 之后对同伴可见，未同步解引用非法。
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sm90_tma_cluster_divide
+    claim: Hopper sm_90 要求 gridDim 各维能被 clusterDim 整除：grid=(10,1,1) cluster=(8,1,1) 非法，必须改 grid 为 8 或
+      16。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: sm90_tma_cluster_expect_tx
+    claim: Hopper sm_90 上 TMA 完成必须 mbarrier.arrive.expect_tx 把预期字节数写入；漏 expect_tx 只 arrive 会造成永久等待或早放行。
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+- id: sm90_wgmma
+  name: SM90 WGMMA
+  leaves:
+  - id: sm90_wgmma_128_threads
+    claim: Hopper sm_90a 的 wgmma.mma_async 必须由连续 4 warp=128 线程的 warpgroup 集体发出，单 warp 32 线程发该指令非法。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sm90_wgmma_m64_smem_b
+    claim: Hopper WGMMA 稠密混合精度形状固定 M=64，B 操作数必须来自 smem descriptor（128B swizzle 模式之一），不能把 B 放在通用寄存器当 mma.sync
+      用。
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sm90_wgmma_acc_regs
+    claim: Hopper 最大 wgmma 形状 m64n256k16 的 FP32 累加器是 64×256 个值，由 128 线程分摊 → 每线程 128 个寄存器，超过 255/thread
+      硬件上限的更大 N 不存在。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sm90_wgmma_commit_wait
+    claim: Hopper wgmma 是异步的：wgmma.fence、一组 mma_async、wgmma.commit_group 与 wgmma.wait_group 必须成对；wait
+      之前读累加寄存器得到旧值。
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sm90_wgmma_sm80_no
+    claim: Ampere sm_80 汇编 wgmma.mma_async 失败；Hopper 的 warpgroup MMA 不能作为 sm_80 的运行时快路径。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: sm90_wgmma_desc_swizzle
+    claim: Hopper sm_90a WGMMA smem descriptor 的 swizzle 必须是 32/64/128B 模式之一且与实际 smem 布局一致；错误 swizzle
+      使 MMA 读错 tile。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 4
+    kind: feature
+  - id: sm90_wgmma_fp8
+    claim: Hopper sm_90a 的 wgmma 支持 e4m3/e5m2 FP8 操作数；Ampere sm_80 无 FP8 Tensor Core，同一 PTX 在 sm_80 上非法。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: sm90_wgmma_a_smem_or_reg
+    claim: Hopper WGMMA 的 A 可来自 smem descriptor 或寄存器碎片，B 必须 smem；把 B 放寄存器发 wgmma 非法。
+    types:
+    - layout
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sm90_wgmma_sm100_removed
+    claim: Blackwell sm_100a 删除 wgmma.mma_async，Hopper WGMMA 源码在 sm_100a 上 ptxas 失败，必须改写 tcgen05。
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sm90_wgmma_i8
+    claim: Hopper sm_90a 整数 wgmma 的 K 与类型组合固定（如 s8 的 k32 类形状）；任意 K=24 的 int8 wgmma 不存在。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+- id: sm100_tmem
+  name: SM100 TMEM
+  leaves:
+  - id: sm100_tmem_shape
+    claim: Blackwell sm_100a 的 Tensor Memory 为 128 lane × 512 列 × 4B=256 KB/SM，不能当通用 smem 用，必须经 tcgen05.ld/st
+      访问。
+    types:
+    - conceptual
+    - layout
+    difficulty:
+    - 4
+    kind: feature
+  - id: sm100_tmem_lane_restrict
+    claim: Blackwell TMEM 按 warpgroup 寻址：一个 warp 只能碰自己那组 lane，跨 lane 的 tcgen05.ld 违反硬件约束，数据未定义。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+  - id: sm100_tmem_alloc
+    claim: Blackwell 上 TMEM 容量由 CTA 显式 alloc/dealloc，未分配列上执行 tcgen05.mma 非法；释放后仍把累加器当活的寄存器使用会读到回收后的内容。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 4
+    kind: feature
+  - id: sm100_tmem_not_on_sm90
+    claim: TMEM 与 tcgen05.ld 只存在于 Blackwell sm_100a/sm_103a，Hopper sm_90a 没有该存储层次，在 sm_90a 上汇编 tcgen05
+      失败。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sm100_tmem_not_generic
+    claim: Blackwell sm_100a 不能对 TMEM 做普通 ld/st.shared；用 smem 指针算术去碰 TMEM 列是非法地址。
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 4
+    kind: feature
+  - id: sm100_tmem_sm120_no
+    claim: 消费级 Blackwell sm_120/sm_120a 没有 TMEM；tcgen05.ld 在 sm_120 目标上失败，应使用寄存器累加的 mma.sync。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sm100_tmem_columns_share
+    claim: Blackwell sm_100a 每 SM 512 列 TMEM 由驻留 CTA 共享；两 CTA 各 alloc 256 列后第三份 alloc 失败，不是自动换出到 smem。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+  - id: sm100_tmem_utccp
+    claim: Blackwell sm_100a 的 UTCCP 把 smem 常量/scale 搬进 TMEM，要求与当前 cta_group（1 或 2）一致；cg1 的 UTCCP 不能喂
+      cg2 MMA。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 4
+    kind: feature
+  - id: sm100_tmem_epilogue_ld
+    claim: Blackwell sm_100a 写回全局前必须 tcgen05.ld 把 TMEM 累加器搬到寄存器；没有从 TMEM 直达 gmem 的通用 st。
+    types:
+    - code_complete
+    - layout
+    difficulty:
+    - 4
+    kind: feature
+  - id: sm100_tmem_addr_fields
+    claim: Blackwell TMEM 地址高 16 bit 为 lane、低 16 bit 为列；软件构造超出 127 lane 或 511 列的地址违反 sm_100a 硬件约束。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 4
+    kind: feature
+- id: sm100_umma
+  name: SM100 UMMA / tcgen05
+  leaves:
+  - id: sm100_umma_single_thread
+    claim: Blackwell sm_100a 的 tcgen05.mma（UMMA）由 CTA 内单线程代表发射，累加器在 TMEM 而非寄存器；其余线程不得各发一条自己的 mma。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+  - id: sm100_umma_cta_group2
+    claim: Blackwell 2SM MMA 使用 .cta_group::2，要求一对 CTA 同属一个 TPC 并在 cluster 中配对；单 CTA launch（cluster=1
+      且无配对）不能发 2SM 形状。
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 4
+    kind: feature
+  - id: sm100_umma_no_wgmma
+    claim: Blackwell sm_100a/sm_103a/sm_120a 删除 wgmma.mma_async，Hopper WGMMA 源码在这些目标上 ptxas 失败，必须改写为 tcgen05
+      或 sm_120 的 mma.sync。
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sm100_umma_portable_ptx
+    claim: 无后缀的 sm_100 可移植 PTX 既没有 tcgen05 也没有 wgmma；Blackwell Tensor Core 路径只在 sm_100a 等 arch-specific
+      目标上合法。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+  - id: sm100_umma_b_smem
+    claim: Blackwell sm_100a UMMA 的 B 必须在 smem，A 可在 smem 或 TMEM，累加器必须在 TMEM；三操作数都放寄存器的 Ampere 风格非法。
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+  - id: sm100_umma_k16_f16
+    claim: Blackwell sm_100a 对 16-bit 类型的 tcgen05.mma K=16（或文档列出的固定 K）；K=8 的 Hopper wgmma 形状不能直接当 UMMA
+      原子。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+  - id: sm100_umma_m256_cg2
+    claim: Blackwell sm_100a 的 M=256 UMMA 需要 cta_group::2；在 cluster=1 的单 CTA 上发 m256 形状非法。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 4
+    kind: feature
+  - id: sm100_umma_sm120_mma_sync
+    claim: 消费级 Blackwell sm_120 用 warp 级 mma.sync 而非 tcgen05 UMMA；把 sm_100a UMMA kernel 当 sm_120 运行会缺指令。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sm100_umma_mix_cg
+    claim: Blackwell sm_100a 同一 kernel 不得混用 cta_group::1 与 cta_group::2 的 tcgen05.mma；混用违反硬件约束。
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 4
+    kind: feature
+  - id: sm100_umma_scale
+    claim: Blackwell sm_100a 的 mxFP4/FP8 UMMA 需要块缩放因子在 TMEM/smem 的规定布局；缺 scale 操作数的 mxf8f6f4 MMA 非法。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 4
+    kind: feature
+- id: dp4a_int
+  name: dp4a 与整数点积
+  leaves:
+  - id: dp4a_int_sm61
+    claim: Pascal sm_61 引入 __dp4a(a,b,c)：四对 8-bit 点积加到 32-bit 累加器；sm_50 上该 intrinsic 不存在。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: feature
+  - id: dp4a_int_pack
+    claim: sm_61+ 的 __dp4a 把两个 int 各解释为 4 个 packed 8-bit；对未打包的 char4 误用 int 加载但字节序不对会得到错误点积。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: dp4a_int_ptx
+    claim: PTX dp4a.s32.s32 最低 sm_61；在 sm_80 上仍合法，但 Ampere 大块 INT8 GEMM 应改 mma.sync 而不是手工 dp4a。
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: dp4a_int_dp2a
+    claim: sm_61 还有 __dp2a 做 2×16-bit 点积；在 sm_61 上把 16-bit 对塞进 __dp4a 的 8-bit 通道数值错误。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: dp4a_int_sm80_imma
+    claim: Ampere sm_80 的 mma.sync.i8 是 warp 级 INT8 Tensor Core，要求 32 线程与固定碎片；不能用单线程 __dp4a 冒充该 MMA。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: dp4a_int_sat
+    claim: sm_61 __dp4a 累加在 32-bit 整数上环绕，不自动饱和到 8-bit；要饱和必须另用 VADD/VSET 类指令或手工 clamp。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: dp4a_int_ampere_still
+    claim: Ampere sm_80 与 Hopper sm_90 仍实现 dp4a；编译目标 sm_80 时 __dp4a 合法，但 sm_30 目标非法。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    kind: feature
+  - id: dp4a_int_align4
+    claim: sm_61+ 从全局加载 packed int 做 dp4a 要求 4B 对齐；1B 对齐的 int8 缓冲必须先对齐拷到寄存器，否则向量加载未定义。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+- id: cache_policy
+  name: 缓存策略
+  leaves:
+  - id: cache_policy_sm80_evict
+    claim: Ampere sm_80（PTX ISA 7.4+）的 ld.global.L1::evict_first/evict_last 设置 L1 逐出优先级；sm_70 无这些修饰符。
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 3
+    kind: feature
+  - id: cache_policy_createpolicy
+    claim: Ampere sm_80 的 createpolicy.fractional.L2::evict_last 生成 64-bit cache-policy 操作数，供带 .L2::cache_hint
+      的 ld/cp.async 使用；sm_70 无 createpolicy。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: cache_policy_cp_async_cg
+    claim: Ampere sm_80 的 cp.async.cg 只在 L2 缓存数据、不填 L1，且 size 必须 16B；.ca 才填 L1+L2。
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 3
+    kind: feature
+  - id: cache_policy_access_window
+    claim: Ampere sm_80 CUDA 11 的 cudaAccessPolicyWindow 经流属性设置 L2 persisting 窗口，hitRatio 在 (0,1]；窗口字节超过
+      l2CacheSize 被拒或截断。
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 3
+    kind: feature
+  - id: cache_policy_no_allocate
+    claim: Ampere sm_80 的 ld.global.L1::no_allocate 提示不在 L1 分配行；把它写进 sm_60 PTX 非法。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: cache_policy_hint_perf
+    claim: Ampere/Hopper 的 cache operator（.ca/.cg/.cs）是性能提示，不改变 CUDA 内存模型可见性；用 .cg 不能代替 __threadfence。
+    types:
+    - conceptual
+    - counterfactual
+    difficulty:
+    - 3
+    kind: feature
+  - id: cache_policy_sm90_evict
+    claim: Hopper sm_90 继承 sm_80 的 L1/L2 eviction qualifier，并与 TMA 的 L2 hint 组合；TMA 描述符里的 cache 策略不能用
+      Ampere cp.async 的 commit_group 表达。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: cache_policy_dlcm
+    claim: 对 Ampere sm_80+ 传 -Xptxas -dlcm=cg 使默认 ld.global 旁路 L1；与 sm_80 上 __ldcg 等价，不适用于 sm_30 的独立编译器默认。
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+- id: cluster_cta
+  name: Thread block cluster
+  leaves:
+  - id: cluster_cta_sm90_only
+    claim: Thread block cluster 最低 Hopper sm_90；Ampere sm_80 的 cudaLaunchKernelEx 若带 cluster 维度失败。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: cluster_cta_max16
+    claim: Hopper sm_90 / Blackwell sm_100 硬件 cluster 最大 16 CTA；portable 默认最大 8，超过 8 必须非可移植 opt-in。
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 3
+    kind: feature
+  - id: cluster_cta_sync
+    claim: Hopper sm_90 的 cluster.sync / barrier.cluster 必须由 cluster 内全部 CTA 的对应线程参与；缺一个 CTA 则死等。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: cluster_cta_launch_attr
+    claim: Hopper sm_90 要用 cudaLaunchAttributeClusterDimension 或 Cooperative Groups cluster 接口在 launch
+      时给定 dim3；kernel 内不能动态改 cluster 大小。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: cluster_cta_gpc
+    claim: Hopper sm_90 cluster 保证同 GPC 共调度；cluster 大于 GPC 内 SM 数时 launch 失败，不能跨 GPC 硬拼 16。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: cluster_cta_sm100_fallback
+    claim: Blackwell sm_100 支持 preferred cluster 与 fallback cluster 尺寸，fallback 常为 1 或 2 以吃尽剩余 SM；Hopper
+      sm_90 无这套 preferred/fallback 属性。
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 4
+    kind: feature
+  - id: cluster_cta_rank
+    claim: Hopper sm_90 的 block_rank_in_cluster ∈ [0, cluster_size)；用它索引 dsmem 同伴时越界 rank 是非法映射。
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    kind: feature
+  - id: cluster_cta_no_cga_sm80
+    claim: Ampere sm_80 没有 cluster.sync 与 distributed smem：在 sm_80 上写 barrier.cluster 汇编失败。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+- id: fp8_tensor
+  name: FP8 Tensor Core
+  leaves:
+  - id: fp8_tensor_sm90
+    claim: Hopper sm_90a 首次提供 e4m3/e5m2 FP8 Tensor Core（wgmma）；Ampere sm_80 无 FP8 MMA，只能 CUDA core 模拟。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: fp8_tensor_cuda118
+    claim: cuda_fp8.h 的 __nv_fp8_e4m3 类型随 CUDA 11.8+ 提供；更早 toolkit 没有该头，即使编译 sm_90 也缺类型。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: feature
+  - id: fp8_tensor_cvt
+    claim: Hopper sm_90 的 cvt.rn.satfinite.e4m3x2.f32 把两个 f32 饱和转换到 packed FP8；无 satfinite 的普通 cvt 溢出行为不同。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: fp8_tensor_scale
+    claim: Hopper sm_90 FP8 GEMM 通常需要逐张量 scale（cuBLASLt 描述符）；把 e4m3 当 IEEE 无 scale 输入会得到错误动态范围。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: fp8_tensor_sm100_mx
+    claim: Blackwell sm_100a 的 tcgen05 支持微缩放 FP8/FP4（mxf8f6f4 等）；Hopper sm_90a wgmma 无 FP4 UMMA 形状。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+  - id: fp8_tensor_acc_f32
+    claim: Hopper sm_90a FP8 wgmma 累加器是 FP32 寄存器；不能把累加器声明为 e4m3 再 wgmma.wait 后当 FP8 读。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: fp8_tensor_e5m2_vs_e4m3
+    claim: Hopper sm_90 的 e5m2 动态范围更大、尾数更少，与 e4m3 不能在同一 wgmma 原子里混装 A/B 类型，除非 PTX 列出的混合形状。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: fp8_tensor_sm80_compile
+    claim: 含 wgmma FP8 的源若只编译 sm_80，ptxas 失败；必须提供 sm_90a 二进制或运行时拒绝该路径。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+- id: green_ctx
+  name: Green context
+  leaves:
+  - id: green_ctx_cuda124
+    claim: CUDA 12.4 引入 cuGreenCtxCreate；CUDA 12.3 及更早无绿上下文 API，链接会缺符号。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: green_ctx_sm90_min8
+    claim: Hopper sm_90+ 绿上下文 SM 分区 minCount 必须 ≥8 且为 8 的倍数；请求 4 个 SM 会被上取整或拆分失败。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: green_ctx_sm80_min4
+    claim: Ampere sm_80 绿上下文最小 4 个 SM 且为 2 的倍数；请求 1 个 SM 不满足 sm_80 硬约束。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: green_ctx_sm70_min2
+    claim: Volta/Turing sm_70/sm_75 绿上下文最小 2 个 SM 且为 2 的倍数；与 Hopper 的 8 对齐规则不同。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: green_ctx_sm100_stream
+    claim: CUDA 12.4+ 提交到绿上下文必须使用该上下文创建的流（cuGreenCtxCreate 后从该 ctx 建流）；primary context 的默认流不受该 SM 分区约束。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: green_ctx_split_sum
+    claim: 各绿上下文 SM 份数之和不能超过该 GPU 的 multiProcessorCount；Hopper H100 132 SM 上两份 80 非法。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: green_ctx_cluster
+    claim: Hopper sm_90 在绿上下文上流上做 cluster launch 时，clusterDim 不能超过该绿上下文分到的 SM 数，也必须满足 coschedule 约束。
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 4
+    kind: feature
+  - id: green_ctx_destroy
+    claim: CUDA 12.4 的 cuGreenCtxDestroy 前必须完成该绿上下文流上的工作；仍有飞行 kernel 时销毁使后续同步看到非法上下文。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+- id: tma_tensormap
+  name: TMA tensor map
+  leaves:
+  - id: tma_tensormap_encode
+    claim: Hopper sm_90 的 cuTensorMapEncodeTiled 在 host 创建 CUtensorMap，设备 cp.async.bulk.tensor 使用该描述符；sm_80
+      无此 API 用途。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: tma_tensormap_smem128
+    claim: Hopper sm_90 TMA 存到 shared 的目的地址必须 128B 对齐；64B 对齐的 smem tile 基址使 tensor copy 未定义。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: tma_tensormap_gmem16
+    claim: Hopper sm_90 tensor map 的全局基址 16B 对齐、各维 stride 为 16B 倍数；byte stride=24 的 FP16 矩阵不能直接编码。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: tma_tensormap_rank5
+    claim: Hopper sm_90 CUtensorMap 最多 5 维；6 维张量必须合并维才能 EncodeTiled，否则创建失败。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: tma_tensormap_swizzle
+    claim: Hopper sm_90 tensor map swizzle ∈ {none,32B,64B,128B} 且须匹配 smem 布局；swizzle=128B 但 smem 按线性存放会使
+      TMA 写错 bank。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 4
+    kind: feature
+  - id: tma_tensormap_box
+    claim: Hopper sm_90 的 box 尺寸是单次 TMA 拷贝的坐标盒，必须 ≤ 该维 extent 且满足对齐；box 超过 remaining extent 的越界行为由 OOB
+      fill 模式决定，不是静默 clamp 到 CUDA array 纹理。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: tma_tensormap_device_modify
+    claim: Hopper sm_90 上设备可 tensormap.replace 改地址字段，但不能在设备上从零构造完整合法 map；初始 encode 仍在 host。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+  - id: tma_tensormap_sm100
+    claim: Blackwell sm_100a 仍用 TMA 把 gmem 搬到 smem 再 UMMA；没有 TMA 的 sm_80 路径不能靠换指令名在 Blackwell 上替代 tensormap。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+- id: async_bulk
+  name: cp.async.bulk
+  leaves:
+  - id: async_bulk_sm90
+    claim: cp.async.bulk 最低 Hopper sm_90；Ampere sm_80 只有 cp.async 4/8/16B，不能发 bulk 任意字节。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: async_bulk_mbarrier
+    claim: Hopper sm_90 的 cp.async.bulk 完成走 shared mbarrier.expect_tx，不是 sm_80 的 commit_group；混用两套完成协议会丢同步。
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: async_bulk_shared_cluster
+    claim: Hopper sm_90 的 cp.async.bulk 可把目的写成 shared::cluster 以写同伴 CTA smem；clusterDim=1 时 cluster 目的无意义且可能非法。
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: async_bulk_size_align
+    claim: Hopper sm_90 bulk 拷贝字节数必须满足 PTX 对齐（常见 16B 倍数）；size=1 的 bulk 非法，小拷贝应回退 sm_80 式 cp.async。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: async_bulk_tensor_vs_1d
+    claim: Hopper sm_90 的 cp.async.bulk.tensor 走 tensormap 多维盒；cp.async.bulk 一维字节拷贝不读 CUtensorMap，二者不能互换描述符。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+    kind: feature
+  - id: async_bulk_sm100
+    claim: Blackwell sm_100a 保留 TMA/bulk 作为 gmem→smem 路径，但 MMA 完成是 tcgen05 而非 wgmma.commit_group。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+  - id: async_bulk_prefetch
+    claim: Hopper sm_90 的 cp.async.bulk.prefetch 只填 L2 不写 smem；把它的完成当 smem 数据就绪在 sm_90 上是错误同步。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: async_bulk_cta_group
+    claim: Hopper sm_90 bulk 默认 CTA 范围；Blackwell sm_100 的 cta_group::2 TMA 需要配对 CTA，单 CTA bulk 不能替代 2SM
+      传输。
+    types:
+    - compare
+    - layout
+    difficulty:
+    - 4
+    kind: feature
+- id: sparse_tc
+  name: 结构稀疏 Tensor Core
+  leaves:
+  - id: sparse_tc_sm80_24
+    claim: 结构稀疏 Tensor Core 从 Ampere sm_80 开始，只硬件加速 2:4；sm_70 无 mma.sp。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: sparse_tc_sm90_wgmma_sp
+    claim: Hopper sm_90a 提供稀疏 wgmma（mma_async 的 sparse 形态），仍要求 2:4 metadata；不能把 CSR 不规则稀疏直接送进 wgmma.sp。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sparse_tc_cusparselt
+    claim: cuSPARSELt 的 2:4 路径要求 sm_80+；在 sm_75 上 prune/matmul 会因缺稀疏 Tensor Core 而失败或走不支持。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: sparse_tc_meta_reg
+    claim: Ampere sm_80 mma.sp 把 metadata 放在指定寄存器通道；Hopper 稀疏 wgmma 的 metadata 布局不同，sm_80 的碎片映射不能原样用于
+      sm_90a。
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+  - id: sparse_tc_k_even
+    claim: Ampere sm_80 2:4 稀疏 GEMM 的 K 必须匹配稀疏原子（压缩前 K 为原子 K 的相应倍数）；K=15 的 INT8 稀疏 MMA 不存在。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: sparse_tc_dense_ref
+    claim: Ampere/Hopper 稀疏 MMA 在 metadata 标明的位置外视作零；若压缩前那 4 元组实际有 3 个非零，硬件仍只取 2 个，数值不等于稠密参考。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: sparse_tc_sm100
+    claim: Blackwell sm_100a 稀疏/微缩放 MMA 走 tcgen05 而非 mma.sp；把 sm_80 的 mma.sp 内联进 sm_100a kernel 会缺指令。
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 4
+    kind: feature
+  - id: sparse_tc_prune_align
+    claim: Ampere sm_80 上 cuSPARSELt 剪枝输出的压缩矩阵与 metadata 必须 16B 对齐才能喂稀疏 TC；未对齐 prune 输出使后续 matmul 失败。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: feature

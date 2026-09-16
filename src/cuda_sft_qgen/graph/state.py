@@ -18,6 +18,9 @@ class PipelineState(TypedDict, total=False):
     batch_briefs: list[dict[str, Any]]
     steering_brief: dict[str, Any]
     last_diversity: dict[str, Any]
+    taxonomy_ticks: int
+    last_taxonomy_health: dict
+    last_taxonomy_facet: str
     done: bool
     status: str
     log: Annotated[list[str], operator.add]

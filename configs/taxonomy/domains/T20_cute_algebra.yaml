@@ -1,542 +1,908 @@
 id: T20
 name: CuTe 代数深水
 children:
-  - id: product_divide
-    name: product 与 divide
-    leaves:
-      - id: product_divide_logical_product
-        claim: "cute::logical_product(A, B) 把 tiler B 嵌进 layout A 的模式中，得到 (tile, rest) 层级，而不是把两个偏移做标量乘法。"
-        types: [layout, conceptual]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: product_divide_zipped
-        claim: "cute::zipped_divide(layout, tiler) 与 tiled_divide 都把坐标切成 (tile_coord, rest_coord)；zipped 保持成对模式，tiled 把 tiler 拍扁。"
-        types: [layout, syntax]
-        difficulty: [3, 4]
-        kind: api
-      - id: product_divide_size
-        claim: "若 B 是与 A 可兼容的 tiler，size(logical_product(A, B)) = size(A) * size(B)；size(layout) = 各阶 shape 之积。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: formula
-      - id: product_divide_cosize
-        claim: "cosize(layout) = 1 + 最大偏移；紧凑 layout 满足 cosize = size，有洞的 stride 使 cosize > size。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: numeric
-      - id: product_divide_logical_divide
-        claim: "cute::logical_divide(A, tiler) 把 A 拆成 (tile, rest)；当 size(tiler) 整除 size(A) 时 size(rest) = size(A) / size(tiler)。"
-        types: [layout, conceptual]
-        difficulty: [3, 4]
-        kind: formula
-      - id: product_divide_not_comm
-        claim: "logical_product 不交换：logical_product(A,B) ≠ logical_product(B,A)，嵌套的 (tile, rest) 模式对调后偏移不同。"
-        types: [layout, compare]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: product_divide_incompat
-        claim: "tiler 的 size 不能整除 layout size 时 logical_divide 静态失败，不能靠运行时截断坐标补救。"
-        types: [debug, counterfactual]
-        difficulty: [3, 4]
-        kind: failure
-        hints: ["logical_divide(Layout<_16>, Layout<_24>)", "先 coalesce 再 divide"]
-      - id: product_divide_rank
-        claim: "rank(logical_product(A,B)) 通常大于 rank(A)，因为 B 被嵌成层级，而不是把两 layout 的模拍扁相加。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: product_divide_tiled_api
-        claim: "tiled_divide(A, tiler) 把 tiler 侧拍成单模 tile；要保留多模 tile 应用 zipped_divide，不能对 tiled 结果做 get<0,1> 当 zipped。"
-        types: [syntax, layout]
-        difficulty: [3, 4]
-        kind: api
-  - id: composition_assoc
-    name: composition 结合律
-    leaves:
-      - id: composition_assoc_eval
-        claim: "composition(A, B)(c) = A(B(c))：先用 B 把逻辑坐标变成中间偏移，再经 A 映到最终偏移。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: formula
-      - id: composition_assoc_assoc
-        claim: "CuTe composition 结合：composition(A, composition(B, C)) 与 composition(composition(A, B), C) 在定义域一致时逐点相等，但不交换：composition(A,B) ≠ composition(B,A)。"
-        types: [layout, conceptual]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: composition_assoc_api
-        claim: "cute::composition(layoutA, layoutB) 要求 size(layoutA) 覆盖 layoutB 的余域；不兼容时静态断言或产生错误 stride。"
-        types: [syntax, debug]
-        difficulty: [3, 4]
-        kind: api
-      - id: composition_assoc_size_mismatch
-        claim: "把 size=32 的 inner layout 合成进 size=16 的 outer，是非法 composition，不能靠运行时截断坐标来补救。"
-        types: [debug, counterfactual]
-        difficulty: [3, 4]
-        kind: failure
-        hints: ["composition(Layout<_16,_1>, Layout<_32,_1>)", "先 coalesce 再 composition"]
-      - id: composition_assoc_identity
-        claim: "composition(L, identity_layout(shape(L))) 在定义域内逐点等于 L；identity 的 colex stride 为 1, s0, s0*s1, ...。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: formula
-      - id: composition_assoc_swizzle
-        claim: "composition(swizzle_layout, L) 把 XOR 作用到 L 的偏移；composition(L, swizzle_layout) 先 XOR 逻辑坐标，两者一般不等。"
-        types: [layout, compare]
-        difficulty: [4]
-        kind: mechanism
-      - id: composition_assoc_rank
-        claim: "rank(composition(A,B)) = rank(B)；不是 rank(A)+rank(B)。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: formula
-      - id: composition_assoc_offset
-        claim: "若 B(c)=k 且 A(k)=o，则 composition(A,B)(c)=o；这是逐点定义，不依赖打印出的嵌套 Shape。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: formula
-      - id: composition_assoc_coalesce
-        claim: "合成后再 coalesce 可能合并相邻模，但不改变任一逻辑坐标的偏移值。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: mechanism
-  - id: swizzle_algebra
-    name: swizzle 代数
-    leaves:
-      - id: swizzle_algebra_xor
-        claim: "Swizzle<BBits,MBase,SShift>::apply(addr) = addr XOR shiftr(addr & yyy_msk, SShift)，其中 yyy_msk = ((1<<BBits)-1) << (MBase + max(0,SShift))。"
-        types: [layout, conceptual]
-        difficulty: [3, 4]
-        kind: formula
-      - id: swizzle_algebra_bijection
-        claim: "该 XOR 在完整 2^(BBits+MBase+|SShift|) 对齐的地址块上是双射：不合并不同逻辑元素、也不写出块外。"
-        types: [layout, conceptual]
-        difficulty: [4]
-        kind: mechanism
-      - id: swizzle_algebra_sw128
-        claim: "Hopper wgmma 常用字节域 Swizzle<3,4,3>（128B 行）：apply(addr) = addr XOR ((addr & 0x380) >> 3)，把行号低 3 位异或进 16B chunk 号。"
-        types: [layout, optimization]
-        difficulty: [3, 4]
-        kind: numeric
-      - id: swizzle_algebra_sm90_atom
-        claim: "sm_90 的 SM80_16x32b_ColMajor 类 swizzle atom 是为 TMA/wgmma 128B 对齐设计的；拿到 sm_80 mma.sync kernel 上不会自动变成 ldmatrix 友好布局。"
-        types: [layout, compare]
-        difficulty: [4]
-        kind: feature
-      - id: swizzle_algebra_bank
-        claim: "32-bank 下 Swizzle 改的是 smem 字节地址低位，把同 bank 冲突打散到不同 bank；它不改变逻辑 Shape。"
-        types: [layout, optimization]
-        difficulty: [3]
-        kind: mechanism
-      - id: swizzle_algebra_mbase
-        claim: "MBase 是 XOR 作用的最低 bit；Swizzle<3,4,3> 从 bit 4 起的 3 bit 参与，对应 16B 粒度（2^4=16）。"
-        types: [layout, conceptual]
-        difficulty: [3, 4]
-        kind: formula
-      - id: swizzle_algebra_sm80_ldsm
-        claim: "sm_80 ldmatrix 常用 8×8 元素 swizzle atom，与 Hopper 128B Swizzle<3,4,3> 不互换。"
-        types: [layout, compare]
-        difficulty: [3, 4]
-        kind: feature
-      - id: swizzle_algebra_involution
-        claim: "同一 Swizzle 再 apply 一次等于恒等：apply(apply(a))=a，因为 XOR 是对合。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: formula
-      - id: swizzle_algebra_tma
-        claim: "TMA 描述符的 32B/64B/128B swizzle 模式必须与 smem layout 的 Swizzle 一致，否则 TMA 写入与 wgmma 描述符解读错位。"
-        types: [layout, debug]
-        difficulty: [4]
-        kind: mechanism
-  - id: predication
-    name: 越界谓词
-    leaves:
-      - id: predication_copy_if
-        claim: "cute::copy_if(pred, src, dst) 只在 pred(coord)==true 的元素上发出 copy atom，假值线程不写 dst，避免 OOB store。"
-        types: [layout, debug]
-        difficulty: [3]
-        kind: mechanism
-      - id: predication_identity
-        claim: "cute::make_identity_tensor(shape) 生成坐标张量，elem(coord)==coord，常与 pred = elem < problem_shape 组合做边界掩码。"
-        types: [syntax, layout]
-        difficulty: [3]
-        kind: api
-      - id: predication_bound
-        claim: "二维 tile 谓词 pred(m,n) = (block_m*BM+m < M) && (block_n*BN+n < N)；缺任一维比较会在尾块写出问题域外。"
-        types: [debug, code_complete]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: predication_tma_oob
-        claim: "TMA descriptor 的 OOB fill 在 sm_90 上由硬件完成，不能再用 copy_if 的线程谓词去关 TMA 指令本身；关错会导致整个 box 不发。"
-        types: [debug, conceptual]
-        difficulty: [4]
-        kind: feature
-      - id: predication_elem_less
-        claim: "identity tensor 上 pred = t < make_coord(M,N) 按坐标字典序/逐模比较，不是比较线性 offset。"
-        types: [layout, debug]
-        difficulty: [3]
-        kind: mechanism
-      - id: predication_atom_width
-        claim: "copy_if 仍按 Copy_Atom 宽度发射；atom=16B 但谓词按 2B 元素时，尾部可能整 atom 被关而漏写合法元素。"
-        types: [debug, layout]
-        difficulty: [3, 4]
-        kind: numeric
-      - id: predication_transform
-        claim: "cute::transform 无谓词，OOB 仍会读 src；边界 tile 要用 copy_if 或显式 min(coord, bound)。"
-        types: [debug, syntax]
-        difficulty: [3]
-        kind: api
-      - id: predication_warp_issue
-        claim: "谓词在 warp 内分叉仍占用发射槽，只是关闭该线程内存事务；pred=false 不能替代 __syncwarp。"
-        types: [optimization, conceptual]
-        difficulty: [3]
-        kind: mechanism
-  - id: tv_layout
-    name: TV layout
-    leaves:
-      - id: tv_layout_modes
-        claim: "MMA/Copy atom 的 TV layout 把坐标分成 T（线程）与 V（每线程值）；partition 按 T 把数据发给 lane，按 V 填 fragment。"
-        types: [layout, conceptual]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: tv_layout_partition
-        claim: "TiledMMA::partition_fragment_A(tensor) 用 atom 的 LayoutA_TV 切源张量，返回的 fragment layout 必须与 mma 指令寄存器映射一致。"
-        types: [syntax, layout]
-        difficulty: [3, 4]
-        kind: api
-      - id: tv_layout_get
-        claim: "对 TV layout L，get<0>(L) 是 thread 模式、get<1>(L) 是 value 模式；sm_80 mma.sync 要求 size(get<0>(L))=32，sm_90 wgmma 要求 128。"
-        types: [layout, conceptual]
-        difficulty: [3, 4]
-        kind: feature
-      - id: tv_layout_wrong_atom
-        claim: "把 sm_80 m16n8k16 的 TV 映射套到 sm_90 wgmma m64n256 fragment 上，寄存器编号错位，累加结果静默错误。"
-        types: [debug, counterfactual]
-        difficulty: [4]
-        kind: failure
-        hints: ["partition_fragment 后 print fragment layout", "混用 GMMA_16x8x16 与 SM90_64x128x16"]
-      - id: tv_layout_size_v
-        claim: "size(get<1>(TV)) 是每线程值个数；sm_80 m16n8k16 的 F16 A fragment 每线程 8 个 f16。"
-        types: [layout, conceptual]
-        difficulty: [3, 4]
-        kind: numeric
-      - id: tv_layout_thr_stride
-        claim: "T 模式的 stride 决定 lane 到坐标的映射；只改 stride 不改 MMA atom 会让 fragment 对错元素。"
-        types: [layout, debug]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: tv_layout_copy_tv
-        claim: "Copy_Atom 也有 TV layout；TiledCopy::partition_S/D 必须与该 atom 的 TV 一致，否则向量宽度对不上。"
-        types: [syntax, layout]
-        difficulty: [3, 4]
-        kind: api
-      - id: tv_layout_order
-        claim: "print(layout) 的 T/V 顺序是 (thread, value)；把它当 (value, thread) 去手动索引寄存器会取错。"
-        types: [layout, debug]
-        difficulty: [3]
-        kind: mechanism
-      - id: tv_layout_wgmma_n
-        claim: "sm_90 wgmma m64n256 的 N 向 V 宽于 m64n64；复用 m64n64 的 TV 只会覆盖 64 列。"
-        types: [layout, compare]
-        difficulty: [4]
-        kind: feature
-  - id: complement_alg
-    name: complement
-    leaves:
-      - id: complement_alg_def
-        claim: "complement(L, N) 构造把 [0,N) 中未被 L 占用的偏移填满的 layout，使 L 与其 complement 一起铺 cotarget。"
-        types: [layout, conceptual]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: complement_alg_size
-        claim: "对紧凑 L，当 size(L) 整除 N 时 size(complement(L, N)) = N / size(L)。"
-        types: [layout, conceptual]
-        difficulty: [3, 4]
-        kind: formula
-      - id: complement_alg_smem
-        claim: "常用 complement(thr_layout, size(smem_layout)) 得到每线程 rest 模式，把 CTA 线程铺进 tile。"
-        types: [layout, optimization]
-        difficulty: [3, 4]
-        kind: api
-      - id: complement_alg_cotarget
-        claim: "cute::complement(layout) 缺省 cotarget 为 cosize(layout)；显式 N 必须 ≥ cosize(layout)。"
-        types: [syntax, debug]
-        difficulty: [3, 4]
-        kind: formula
-      - id: complement_alg_compose
-        claim: "composition(L, complement(L, N)) 不是恒等映射；complement 的坐标空间与原 L 不同。"
-        types: [layout, compare]
-        difficulty: [4]
-        kind: mechanism
-      - id: complement_alg_fail
-        claim: "N < cosize(L) 时 complement 不能合法覆盖 cotarget，属于非法参数而不是静默截断。"
-        types: [debug, counterfactual]
-        difficulty: [3, 4]
-        kind: failure
-      - id: complement_alg_rank
-        claim: "complement 结果的 Shape 层级由空洞分布决定，rank 不必等于 rank(L)。"
-        types: [layout, conceptual]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: complement_alg_divide
-        claim: "zipped_divide 的 rest 常由 complement 构造；手写 rest stride 若与 complement 不一致，tile 索引会撞进 tile 内偏移。"
-        types: [layout, debug]
-        difficulty: [4]
-        kind: mechanism
-  - id: hierarchical_shape
-    name: 层级 Shape
-    leaves:
-      - id: hierarchical_shape_size
-        claim: "size(Shape<_2, Shape<_4,_8>>) = 2*4*8 = 64，与拍扁 Shape<_2,_4,_8> 的 size 相同。"
-        types: [layout, conceptual]
-        difficulty: [2, 3]
-        kind: formula
-      - id: hierarchical_shape_rank
-        claim: "rank(Shape<_2, Shape<_4,_8>>)=2，而 rank(Shape<_2,_4,_8>)=3；size 相同但 get<> 索引不同。"
-        types: [layout, conceptual]
-        difficulty: [2, 3]
-        kind: formula
-      - id: hierarchical_shape_get
-        claim: "get<1,0>(Shape<_2,Shape<_4,_8>>)=4；get<1> 返回 Shape<_4,_8> 而不是整数 4。"
-        types: [syntax, layout]
-        difficulty: [3]
-        kind: api
-      - id: hierarchical_shape_depth
-        claim: "depth 计嵌套层数；flatten 之后 depth=1，但 size 不变。"
-        types: [layout, conceptual]
-        difficulty: [2, 3]
-        kind: formula
-      - id: hierarchical_shape_stride
-        claim: "层级 Shape 必须配层级 Stride 才能保持模式；Stride 拍扁而 Shape 仍嵌套时 composition 语义改变。"
-        types: [layout, debug]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: hierarchical_shape_make
-        claim: "make_shape(_2{}, make_shape(_4{},_8{})) 构造嵌套静态 Shape；Shape<int,int> 是运行时二维。"
-        types: [syntax, code_complete]
-        difficulty: [2, 3]
-        kind: api
-      - id: hierarchical_shape_tile
-        claim: "内层 Shape 表示 tile 内坐标、外层表示 tile 索引，这是 tiler/TV 层级的来源；拍扁后无法一次 get 出整个 tile 模。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: hierarchical_shape_neq
-        claim: "静态 Shape<_64> 与 Shape<_8,_8> 的 size 都是 64，但默认 colex stride 不同，不能当同一 layout 用。"
-        types: [layout, compare]
-        difficulty: [2, 3]
-        kind: numeric
-  - id: cosize_vs_size
-    name: cosize 与 size
-    leaves:
-      - id: cosize_vs_size_def
-        claim: "size(L)=∏ shape_i；cosize(L)=1+max_c L(c)，即覆盖最大偏移所需的最小上界。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: formula
-      - id: cosize_vs_size_compact
-        claim: "紧凑 layout 满足 cosize(L)==size(L) 且偏移覆盖 [0,size)。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: formula
-      - id: cosize_vs_size_hole
-        claim: "Layout<Shape<_4>, Stride<_2>> 的 size=4、偏移 0,2,4,6，因此 cosize=7 > 4。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: numeric
-      - id: cosize_vs_size_alloc
-        claim: "分配 smem 字节数必须 ≥ cosize(layout)*sizeof(T)；按 size*sizeof(T) 会在有洞 stride 时越界。"
-        types: [debug, layout]
-        difficulty: [3]
-        kind: failure
-      - id: cosize_vs_size_coalesce
-        claim: "coalesce 不减少 cosize，只合并 stride_i = stride_{i-1}*shape_{i-1} 的相邻模。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: cosize_vs_size_api
-        claim: "cute::size(L) 与 cute::cosize(L) 是不同函数；循环次数用 size，存储覆盖用 cosize。"
-        types: [syntax, compare]
-        difficulty: [2, 3]
-        kind: api
-      - id: cosize_vs_size_loop
-        claim: "合法逻辑坐标个数是 size 不是 cosize；用 cosize 当循环上界会访问不存在的逻辑元。"
-        types: [debug, counterfactual]
-        difficulty: [3]
-        kind: failure
-      - id: cosize_vs_size_pad
-        claim: "给二维 tile 加 1 列 padding 使 stride 出现洞：逻辑 size 仍是 M*N，cosize 增大。"
-        types: [layout, optimization]
-        difficulty: [3]
-        kind: numeric
-  - id: zipped_layouts
-    name: zipped layouts
-    leaves:
-      - id: zipped_layouts_divide
-        claim: "zipped_divide(A, tiler) 结果的 shape 成对 ((tiler_modes),(rest_modes))，而不是扁平 concat。"
-        types: [layout, conceptual]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: zipped_layouts_product
-        claim: "zipped_product 把两 layout 的模式成对拉链，不是按模拼接。"
-        types: [layout, syntax]
-        difficulty: [3, 4]
-        kind: api
-      - id: zipped_layouts_vs_tiled
-        claim: "tiled_divide 把 tiler 侧拍扁成一个 tile 模；zipped 保留多模以便 get<0,i> 取 tiler 第 i 模。"
-        types: [layout, compare]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: zipped_layouts_get
-        claim: "对 zipped_divide 结果，get<0>(L) 是 tile 内 layout，get<1>(L) 是 tile 索引 layout。"
-        types: [syntax, layout]
-        difficulty: [3]
-        kind: api
-      - id: zipped_layouts_tensor
-        claim: "zipped_divide(tensor, tiler)(tile_idx) 得到第 tile_idx 个局部张量视图，不拷贝数据。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: zipped_layouts_size
-        claim: "当 B 是合法 tiler 时 size(get<0>(zipped_divide(A,B))) = size(B)。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: formula
-      - id: zipped_layouts_mismatch
-        claim: "把 tiled_divide 的扁平 rest 当成 zipped 的成对坐标去做 get<0,1> 会取错模式。"
-        types: [debug, counterfactual]
-        difficulty: [3, 4]
-        kind: failure
-      - id: zipped_layouts_local_tile
-        claim: "local_tile(tensor, tile_shape, coord) 建立在 divide 之上，coord 选择 rest；越界 rest 仍指向 gmem 地址。"
-        types: [syntax, layout]
-        difficulty: [3]
-        kind: api
-  - id: coalesce_flatten
-    name: coalesce / flatten
-    leaves:
-      - id: coalesce_flatten_coalesce
-        claim: "当 stride_i = stride_{i-1} * shape_{i-1} 时 coalesce 合并这两模；否则保持分开。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: formula
-      - id: coalesce_flatten_filter
-        claim: "filter(L) 去掉 size=1 的模式，不改变剩余坐标对应的偏移。"
-        types: [layout, conceptual]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: coalesce_flatten_flatten
-        claim: "flatten 去掉 Shape/Stride 嵌套但保留所有模，size(flatten(L))=size(L)。"
-        types: [layout, conceptual]
-        difficulty: [2, 3]
-        kind: formula
-      - id: coalesce_flatten_api
-        claim: "cute::coalesce / cute::filter / cute::flatten 是纯 layout 变换，不搬 Engine 里的数据。"
-        types: [syntax, conceptual]
-        difficulty: [2, 3]
-        kind: api
-      - id: coalesce_flatten_rank1
-        claim: "全合并后可变成 rank-1；再按二维 MMA atom 去 partition 会缺模而静态失败或错切。"
-        types: [debug, layout]
-        difficulty: [3]
-        kind: failure
-      - id: coalesce_flatten_profile
-        claim: "coalesce(L, trg_profile) 可限制合并，以免把要独立 partition 的模并掉。"
-        types: [syntax, layout]
-        difficulty: [3, 4]
-        kind: api
-      - id: coalesce_flatten_size
-        claim: "size(coalesce(L))=size(L) 且 cosize 也不变；它不是压缩存储的 realloc。"
-        types: [layout, compare]
-        difficulty: [3]
-        kind: formula
-      - id: coalesce_flatten_holes
-        claim: "对有洞 stride，coalesce 不能把 cosize 压成 size；洞仍然在。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: mechanism
-  - id: int_tuple_crd
-    name: IntTuple 与坐标
-    leaves:
-      - id: int_tuple_crd_inner
-        claim: "crd2idx(c, shape, stride) = 逐模点积 ⟨c, stride⟩（层级则递归）。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: formula
-      - id: int_tuple_crd_idx2crd
-        claim: "idx2crd(i, shape) 按 colex 把线性 i 拆成坐标，要求 0 ≤ i < size(shape)。"
-        types: [layout, conceptual]
-        difficulty: [3]
-        kind: formula
-      - id: int_tuple_crd_make
-        claim: "make_coord(i,j) 与 make_shape 同构为 IntTuple；混用裸 int 与 tuple 时要用 cute::get 取模。"
-        types: [syntax, layout]
-        difficulty: [2, 3]
-        kind: api
-      - id: int_tuple_crd_rank
-        claim: "rank(coord) 必须等于 rank(layout) 才能 L(coord)；rank 不够是编译期错误，不会隐式补 0。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-      - id: int_tuple_crd_arith
-        claim: "IntTuple 加减按模进行，不是把整包当标量；Shape<_2,_4>+1 在未定义广播时非法。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: failure
-      - id: int_tuple_crd_product
-        claim: "size(shape)=各模之积；product_each 用于从 Shape 生成 colex stride。"
-        types: [layout, conceptual]
-        difficulty: [2, 3]
-        kind: formula
-      - id: int_tuple_crd_static
-        claim: "_32{} 是 cute::C<32> 编译期整数；int{32} 是运行时值，会阻断静态 assert 与完全 unroll。"
-        types: [syntax, compare]
-        difficulty: [2, 3]
-        kind: api
-      - id: int_tuple_crd_underscore
-        claim: "把某模写成 Underscore{} 做 partial apply，得到切片 layout；用字面量 -1 当占位不是 CuTe 的 slice 语法。"
-        types: [syntax, layout]
-        difficulty: [3]
-        kind: api
-  - id: cute_tensor_ops
-    name: Tensor 操作
-    leaves:
-      - id: cute_tensor_ops_make
-        claim: "make_tensor(ptr, layout) 不拥有内存；ptr 必须覆盖 cosize(layout) 个元素。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: cute_tensor_ops_recast
-        claim: "recast<uint128_t>(tensor) 要求原字节数能被 16 整除，否则向量化视图非法。"
-        types: [layout, debug]
-        difficulty: [3]
-        kind: formula
-      - id: cute_tensor_ops_local_tile
-        claim: "local_tile(gmem, TileShape, blk_coord) 切出本 CTA tile；越界部分仍指向 gmem 地址，需谓词。"
-        types: [layout, debug]
-        difficulty: [3]
-        kind: mechanism
-      - id: cute_tensor_ops_partition
-        claim: "local_partition(tensor, thr_layout, tid) 按线程 layout 取切片；tid 必须 < size(thr_layout)。"
-        types: [syntax, layout]
-        difficulty: [3]
-        kind: api
-      - id: cute_tensor_ops_copy
-        claim: "cute::copy(src, dst) 要求 size 兼容且 atom 对齐；shape 不同不能靠隐式 broadcast。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-      - id: cute_tensor_ops_engine
-        claim: "Tensor = Engine + Layout；改 layout 不移动 Engine 指针，只改坐标→偏移映射。"
-        types: [conceptual, layout]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: cute_tensor_ops_counting
-        claim: "make_tensor(layout) 无指针的 counting/identity 张量，把它当 gmem 解引用是 UB。"
-        types: [debug, counterfactual]
-        difficulty: [3]
-        kind: failure
-      - id: cute_tensor_ops_print
-        claim: "print_tensor 按逻辑坐标顺序打印，不是按物理偏移排序；有洞 layout 会出现跳号偏移。"
-        types: [layout, conceptual]
-        difficulty: [2, 3]
-        kind: mechanism
+- id: product_divide
+  name: product 与 divide
+  leaves:
+  - id: product_divide_logical_product
+    claim: cute::logical_product(A, B) 把 tiler B 嵌进 layout A 的模式中，得到 (tile, rest) 层级，而不是把两个偏移做标量乘法。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: product_divide_zipped
+    claim: cute::zipped_divide(layout, tiler) 与 tiled_divide 都把坐标切成 (tile_coord, rest_coord)；zipped 保持成对模式，tiled
+      把 tiler 拍扁。
+    types:
+    - layout
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: product_divide_size
+    claim: 若 B 是与 A 可兼容的 tiler，size(logical_product(A, B)) = size(A) * size(B)；size(layout) = 各阶 shape
+      之积。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: product_divide_cosize
+    claim: cosize(layout) = 1 + 最大偏移；紧凑 layout 满足 cosize = size，有洞的 stride 使 cosize > size。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: product_divide_logical_divide
+    claim: cute::logical_divide(A, tiler) 把 A 拆成 (tile, rest)；当 size(tiler) 整除 size(A) 时 size(rest) =
+      size(A) / size(tiler)。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: product_divide_not_comm
+    claim: logical_product 不交换：logical_product(A,B) ≠ logical_product(B,A)，嵌套的 (tile, rest) 模式对调后偏移不同。
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: product_divide_incompat
+    claim: tiler 的 size 不能整除 layout size 时 logical_divide 静态失败，不能靠运行时截断坐标补救。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+    hints:
+    - logical_divide(Layout<_16>, Layout<_24>)
+    - 先 coalesce 再 divide
+  - id: product_divide_rank
+    claim: rank(logical_product(A,B)) 通常大于 rank(A)，因为 B 被嵌成层级，而不是把两 layout 的模拍扁相加。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: product_divide_tiled_api
+    claim: tiled_divide(A, tiler) 把 tiler 侧拍成单模 tile；要保留多模 tile 应用 zipped_divide，不能对 tiled 结果做 get<0,1>
+      当 zipped。
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: api
+- id: composition_assoc
+  name: composition 结合律
+  leaves:
+  - id: composition_assoc_eval
+    claim: composition(A, B)(c) = A(B(c))：先用 B 把逻辑坐标变成中间偏移，再经 A 映到最终偏移。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: composition_assoc_assoc
+    claim: CuTe composition 结合：composition(A, composition(B, C)) 与 composition(composition(A, B), C) 在定义域一致时逐点相等，但不交换：composition(A,B)
+      ≠ composition(B,A)。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: composition_assoc_api
+    claim: cute::composition(layoutA, layoutB) 要求 size(layoutA) 覆盖 layoutB 的余域；不兼容时静态断言或产生错误 stride。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: composition_assoc_size_mismatch
+    claim: 把 size=32 的 inner layout 合成进 size=16 的 outer，是非法 composition，不能靠运行时截断坐标来补救。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+    hints:
+    - composition(Layout<_16,_1>, Layout<_32,_1>)
+    - 先 coalesce 再 composition
+  - id: composition_assoc_identity
+    claim: composition(L, identity_layout(shape(L))) 在定义域内逐点等于 L；identity 的 colex stride 为 1, s0, s0*s1,
+      ...。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: composition_assoc_swizzle
+    claim: composition(swizzle_layout, L) 把 XOR 作用到 L 的偏移；composition(L, swizzle_layout) 先 XOR 逻辑坐标，两者一般不等。
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: composition_assoc_rank
+    claim: rank(composition(A,B)) = rank(B)；不是 rank(A)+rank(B)。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: composition_assoc_offset
+    claim: 若 B(c)=k 且 A(k)=o，则 composition(A,B)(c)=o；这是逐点定义，不依赖打印出的嵌套 Shape。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: composition_assoc_coalesce
+    claim: 合成后再 coalesce 可能合并相邻模，但不改变任一逻辑坐标的偏移值。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+- id: swizzle_algebra
+  name: swizzle 代数
+  leaves:
+  - id: swizzle_algebra_xor
+    claim: Swizzle<BBits,MBase,SShift>::apply(addr) = addr XOR shiftr(addr & yyy_msk, SShift)，其中 yyy_msk
+      = ((1<<BBits)-1) << (MBase + max(0,SShift))。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: swizzle_algebra_bijection
+    claim: 该 XOR 在完整 2^(BBits+MBase+|SShift|) 对齐的地址块上是双射：不合并不同逻辑元素、也不写出块外。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: swizzle_algebra_sw128
+    claim: Hopper wgmma 常用字节域 Swizzle<3,4,3>（128B 行）：apply(addr) = addr XOR ((addr & 0x380) >> 3)，把行号低
+      3 位异或进 16B chunk 号。
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+  - id: swizzle_algebra_sm90_atom
+    claim: sm_90 的 SM80_16x32b_ColMajor 类 swizzle atom 是为 TMA/wgmma 128B 对齐设计的；拿到 sm_80 mma.sync kernel
+      上不会自动变成 ldmatrix 友好布局。
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+  - id: swizzle_algebra_bank
+    claim: 32-bank 下 Swizzle 改的是 smem 字节地址低位，把同 bank 冲突打散到不同 bank；它不改变逻辑 Shape。
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: swizzle_algebra_mbase
+    claim: MBase 是 XOR 作用的最低 bit；Swizzle<3,4,3> 从 bit 4 起的 3 bit 参与，对应 16B 粒度（2^4=16）。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: swizzle_algebra_sm80_ldsm
+    claim: sm_80 ldmatrix 常用 8×8 元素 swizzle atom，与 Hopper 128B Swizzle<3,4,3> 不互换。
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: swizzle_algebra_involution
+    claim: 同一 Swizzle 再 apply 一次等于恒等：apply(apply(a))=a，因为 XOR 是对合。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: swizzle_algebra_tma
+    claim: TMA 描述符的 32B/64B/128B swizzle 模式必须与 smem layout 的 Swizzle 一致，否则 TMA 写入与 wgmma 描述符解读错位。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 4
+    kind: mechanism
+- id: predication
+  name: 越界谓词
+  leaves:
+  - id: predication_copy_if
+    claim: cute::copy_if(pred, src, dst) 只在 pred(coord)==true 的元素上发出 copy atom，假值线程不写 dst，避免 OOB store。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: predication_identity
+    claim: cute::make_identity_tensor(shape) 生成坐标张量，elem(coord)==coord，常与 pred = elem < problem_shape
+      组合做边界掩码。
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    kind: api
+  - id: predication_bound
+    claim: 二维 tile 谓词 pred(m,n) = (block_m*BM+m < M) && (block_n*BN+n < N)；缺任一维比较会在尾块写出问题域外。
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: predication_tma_oob
+    claim: TMA descriptor 的 OOB fill 在 sm_90 上由硬件完成，不能再用 copy_if 的线程谓词去关 TMA 指令本身；关错会导致整个 box 不发。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+  - id: predication_elem_less
+    claim: identity tensor 上 pred = t < make_coord(M,N) 按坐标字典序/逐模比较，不是比较线性 offset。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: predication_atom_width
+    claim: copy_if 仍按 Copy_Atom 宽度发射；atom=16B 但谓词按 2B 元素时，尾部可能整 atom 被关而漏写合法元素。
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+  - id: predication_transform
+    claim: cute::transform 无谓词，OOB 仍会读 src；边界 tile 要用 copy_if 或显式 min(coord, bound)。
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: predication_warp_issue
+    claim: 谓词在 warp 内分叉仍占用发射槽，只是关闭该线程内存事务；pred=false 不能替代 __syncwarp。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+- id: tv_layout
+  name: TV layout
+  leaves:
+  - id: tv_layout_modes
+    claim: MMA/Copy atom 的 TV layout 把坐标分成 T（线程）与 V（每线程值）；partition 按 T 把数据发给 lane，按 V 填 fragment。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: tv_layout_partition
+    claim: TiledMMA::partition_fragment_A(tensor) 用 atom 的 LayoutA_TV 切源张量，返回的 fragment layout 必须与 mma
+      指令寄存器映射一致。
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: tv_layout_get
+    claim: 对 TV layout L，get<0>(L) 是 thread 模式、get<1>(L) 是 value 模式；sm_80 mma.sync 要求 size(get<0>(L))=32，sm_90
+      wgmma 要求 128。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: tv_layout_wrong_atom
+    claim: 把 sm_80 m16n8k16 的 TV 映射套到 sm_90 wgmma m64n256 fragment 上，寄存器编号错位，累加结果静默错误。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 4
+    kind: failure
+    hints:
+    - partition_fragment 后 print fragment layout
+    - 混用 GMMA_16x8x16 与 SM90_64x128x16
+  - id: tv_layout_size_v
+    claim: size(get<1>(TV)) 是每线程值个数；sm_80 m16n8k16 的 F16 A fragment 每线程 8 个 f16。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+  - id: tv_layout_thr_stride
+    claim: T 模式的 stride 决定 lane 到坐标的映射；只改 stride 不改 MMA atom 会让 fragment 对错元素。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: tv_layout_copy_tv
+    claim: Copy_Atom 也有 TV layout；TiledCopy::partition_S/D 必须与该 atom 的 TV 一致，否则向量宽度对不上。
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: tv_layout_order
+    claim: print(layout) 的 T/V 顺序是 (thread, value)；把它当 (value, thread) 去手动索引寄存器会取错。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: tv_layout_wgmma_n
+    claim: sm_90 wgmma m64n256 的 N 向 V 宽于 m64n64；复用 m64n64 的 TV 只会覆盖 64 列。
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+- id: complement_alg
+  name: complement
+  leaves:
+  - id: complement_alg_def
+    claim: complement(L, N) 构造把 [0,N) 中未被 L 占用的偏移填满的 layout，使 L 与其 complement 一起铺 cotarget。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: complement_alg_size
+    claim: 对紧凑 L，当 size(L) 整除 N 时 size(complement(L, N)) = N / size(L)。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: complement_alg_smem
+    claim: 常用 complement(thr_layout, size(smem_layout)) 得到每线程 rest 模式，把 CTA 线程铺进 tile。
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: complement_alg_cotarget
+    claim: cute::complement(layout) 缺省 cotarget 为 cosize(layout)；显式 N 必须 ≥ cosize(layout)。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: complement_alg_compose
+    claim: composition(L, complement(L, N)) 不是恒等映射；complement 的坐标空间与原 L 不同。
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: complement_alg_fail
+    claim: N < cosize(L) 时 complement 不能合法覆盖 cotarget，属于非法参数而不是静默截断。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: complement_alg_rank
+    claim: complement 结果的 Shape 层级由空洞分布决定，rank 不必等于 rank(L)。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: complement_alg_divide
+    claim: zipped_divide 的 rest 常由 complement 构造；手写 rest stride 若与 complement 不一致，tile 索引会撞进 tile 内偏移。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 4
+    kind: mechanism
+- id: hierarchical_shape
+  name: 层级 Shape
+  leaves:
+  - id: hierarchical_shape_size
+    claim: size(Shape<_2, Shape<_4,_8>>) = 2*4*8 = 64，与拍扁 Shape<_2,_4,_8> 的 size 相同。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: hierarchical_shape_rank
+    claim: rank(Shape<_2, Shape<_4,_8>>)=2，而 rank(Shape<_2,_4,_8>)=3；size 相同但 get<> 索引不同。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: hierarchical_shape_get
+    claim: get<1,0>(Shape<_2,Shape<_4,_8>>)=4；get<1> 返回 Shape<_4,_8> 而不是整数 4。
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    kind: api
+  - id: hierarchical_shape_depth
+    claim: depth 计嵌套层数；flatten 之后 depth=1，但 size 不变。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: hierarchical_shape_stride
+    claim: 层级 Shape 必须配层级 Stride 才能保持模式；Stride 拍扁而 Shape 仍嵌套时 composition 语义改变。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: hierarchical_shape_make
+    claim: make_shape(_2{}, make_shape(_4{},_8{})) 构造嵌套静态 Shape；Shape<int,int> 是运行时二维。
+    types:
+    - syntax
+    - code_complete
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: hierarchical_shape_tile
+    claim: 内层 Shape 表示 tile 内坐标、外层表示 tile 索引，这是 tiler/TV 层级的来源；拍扁后无法一次 get 出整个 tile 模。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: hierarchical_shape_neq
+    claim: 静态 Shape<_64> 与 Shape<_8,_8> 的 size 都是 64，但默认 colex stride 不同，不能当同一 layout 用。
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+- id: cosize_vs_size
+  name: cosize 与 size
+  leaves:
+  - id: cosize_vs_size_def
+    claim: size(L)=∏ shape_i；cosize(L)=1+max_c L(c)，即覆盖最大偏移所需的最小上界。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: cosize_vs_size_compact
+    claim: 紧凑 layout 满足 cosize(L)==size(L) 且偏移覆盖 [0,size)。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: cosize_vs_size_hole
+    claim: Layout<Shape<_4>, Stride<_2>> 的 size=4、偏移 0,2,4,6，因此 cosize=7 > 4。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cosize_vs_size_alloc
+    claim: 分配 smem 字节数必须 ≥ cosize(layout)*sizeof(T)；按 size*sizeof(T) 会在有洞 stride 时越界。
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    kind: failure
+  - id: cosize_vs_size_coalesce
+    claim: coalesce 不减少 cosize，只合并 stride_i = stride_{i-1}*shape_{i-1} 的相邻模。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cosize_vs_size_api
+    claim: cute::size(L) 与 cute::cosize(L) 是不同函数；循环次数用 size，存储覆盖用 cosize。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cosize_vs_size_loop
+    claim: 合法逻辑坐标个数是 size 不是 cosize；用 cosize 当循环上界会访问不存在的逻辑元。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    kind: failure
+  - id: cosize_vs_size_pad
+    claim: 给二维 tile 加 1 列 padding 使 stride 出现洞：逻辑 size 仍是 M*N，cosize 增大。
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+- id: zipped_layouts
+  name: zipped layouts
+  leaves:
+  - id: zipped_layouts_divide
+    claim: zipped_divide(A, tiler) 结果的 shape 成对 ((tiler_modes),(rest_modes))，而不是扁平 concat。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: zipped_layouts_product
+    claim: zipped_product 把两 layout 的模式成对拉链，不是按模拼接。
+    types:
+    - layout
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: zipped_layouts_vs_tiled
+    claim: tiled_divide 把 tiler 侧拍扁成一个 tile 模；zipped 保留多模以便 get<0,i> 取 tiler 第 i 模。
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: zipped_layouts_get
+    claim: 对 zipped_divide 结果，get<0>(L) 是 tile 内 layout，get<1>(L) 是 tile 索引 layout。
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    kind: api
+  - id: zipped_layouts_tensor
+    claim: zipped_divide(tensor, tiler)(tile_idx) 得到第 tile_idx 个局部张量视图，不拷贝数据。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: zipped_layouts_size
+    claim: 当 B 是合法 tiler 时 size(get<0>(zipped_divide(A,B))) = size(B)。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: zipped_layouts_mismatch
+    claim: 把 tiled_divide 的扁平 rest 当成 zipped 的成对坐标去做 get<0,1> 会取错模式。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: zipped_layouts_local_tile
+    claim: local_tile(tensor, tile_shape, coord) 建立在 divide 之上，coord 选择 rest；越界 rest 仍指向 gmem 地址。
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    kind: api
+- id: coalesce_flatten
+  name: coalesce / flatten
+  leaves:
+  - id: coalesce_flatten_coalesce
+    claim: 当 stride_i = stride_{i-1} * shape_{i-1} 时 coalesce 合并这两模；否则保持分开。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: coalesce_flatten_filter
+    claim: filter(L) 去掉 size=1 的模式，不改变剩余坐标对应的偏移。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: coalesce_flatten_flatten
+    claim: flatten 去掉 Shape/Stride 嵌套但保留所有模，size(flatten(L))=size(L)。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: coalesce_flatten_api
+    claim: cute::coalesce / cute::filter / cute::flatten 是纯 layout 变换，不搬 Engine 里的数据。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: coalesce_flatten_rank1
+    claim: 全合并后可变成 rank-1；再按二维 MMA atom 去 partition 会缺模而静态失败或错切。
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    kind: failure
+  - id: coalesce_flatten_profile
+    claim: coalesce(L, trg_profile) 可限制合并，以免把要独立 partition 的模并掉。
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: coalesce_flatten_size
+    claim: size(coalesce(L))=size(L) 且 cosize 也不变；它不是压缩存储的 realloc。
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 3
+    kind: formula
+  - id: coalesce_flatten_holes
+    claim: 对有洞 stride，coalesce 不能把 cosize 压成 size；洞仍然在。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+- id: int_tuple_crd
+  name: IntTuple 与坐标
+  leaves:
+  - id: int_tuple_crd_inner
+    claim: crd2idx(c, shape, stride) = 逐模点积 ⟨c, stride⟩（层级则递归）。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: int_tuple_crd_idx2crd
+    claim: idx2crd(i, shape) 按 colex 把线性 i 拆成坐标，要求 0 ≤ i < size(shape)。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: int_tuple_crd_make
+    claim: make_coord(i,j) 与 make_shape 同构为 IntTuple；混用裸 int 与 tuple 时要用 cute::get 取模。
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: int_tuple_crd_rank
+    claim: rank(coord) 必须等于 rank(layout) 才能 L(coord)；rank 不够是编译期错误，不会隐式补 0。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: int_tuple_crd_arith
+    claim: IntTuple 加减按模进行，不是把整包当标量；Shape<_2,_4>+1 在未定义广播时非法。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: int_tuple_crd_product
+    claim: size(shape)=各模之积；product_each 用于从 Shape 生成 colex stride。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: int_tuple_crd_static
+    claim: _32{} 是 cute::C<32> 编译期整数；int{32} 是运行时值，会阻断静态 assert 与完全 unroll。
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: int_tuple_crd_underscore
+    claim: 把某模写成 Underscore{} 做 partial apply，得到切片 layout；用字面量 -1 当占位不是 CuTe 的 slice 语法。
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    kind: api
+- id: cute_tensor_ops
+  name: Tensor 操作
+  leaves:
+  - id: cute_tensor_ops_make
+    claim: make_tensor(ptr, layout) 不拥有内存；ptr 必须覆盖 cosize(layout) 个元素。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cute_tensor_ops_recast
+    claim: recast<uint128_t>(tensor) 要求原字节数能被 16 整除，否则向量化视图非法。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: formula
+  - id: cute_tensor_ops_local_tile
+    claim: local_tile(gmem, TileShape, blk_coord) 切出本 CTA tile；越界部分仍指向 gmem 地址，需谓词。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cute_tensor_ops_partition
+    claim: local_partition(tensor, thr_layout, tid) 按线程 layout 取切片；tid 必须 < size(thr_layout)。
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    kind: api
+  - id: cute_tensor_ops_copy
+    claim: cute::copy(src, dst) 要求 size 兼容且 atom 对齐；shape 不同不能靠隐式 broadcast。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: cute_tensor_ops_engine
+    claim: Tensor = Engine + Layout；改 layout 不移动 Engine 指针，只改坐标→偏移映射。
+    types:
+    - conceptual
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: cute_tensor_ops_counting
+    claim: make_tensor(layout) 无指针的 counting/identity 张量，把它当 gmem 解引用是 UB。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    kind: failure
+  - id: cute_tensor_ops_print
+    claim: print_tensor 按逻辑坐标顺序打印，不是按物理偏移排序；有洞 layout 会出现跳号偏移。
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism

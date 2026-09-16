@@ -106,9 +106,10 @@ class Deduper:
                 hamming=best_h,
             )
         if semantic_gray and template_gray:
+            # Both in gray zone: escalate to chair, don't auto-reject
             return DupDecision(
-                verdict="dup",
-                reason="L2_semantic+L1_template",
+                verdict="gray",
+                reason="semantic_and_template_gray",
                 nearest_id=nearest_id or best_tid,
                 nearest_cosine=nearest_cosine,
                 template_jaccard=best_j,

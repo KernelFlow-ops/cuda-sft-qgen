@@ -132,7 +132,8 @@ children:
     - 3
     kind: failure
   - id: cluster_rank
-    claim: block_rank_in_cluster 是 cluster 内线性编号，multicast 掩码按该 rank 置位；用 blockIdx.x 当 rank 在 2D cluster 上会错
+    claim: block_rank_in_cluster 是 cluster 内线性编号，multicast 掩码按该 rank 置位；用 blockIdx.x 当 rank 在 2D cluster
+      上会错
     types:
     - conceptual
     - debug
@@ -279,7 +280,8 @@ children:
     - 4
     kind: numeric
   - id: blackwell_sm120
-    claim: GeForce Blackwell sm_120 没有 TMEM 也没有 tcgen05.*，必须回退 mma.sync/wgmma，不能把 sm_100a cubin 当 sm_120 跑
+    claim: GeForce Blackwell sm_120 没有 TMEM 也没有 tcgen05.*，必须回退 mma.sync/wgmma，不能把 sm_100a cubin 当 sm_120
+      跑
     types:
     - compare
     - conceptual
@@ -407,7 +409,8 @@ children:
     - 4
     kind: numeric
   - id: tmem_alloc_256kib
-    claim: sm_100 每个 SM 的 TMEM = 128 lanes × 512 columns × 4 bytes = 256 KiB，最大单 CTA 累加器常用 256 columns（128 KiB）
+    claim: sm_100 每个 SM 的 TMEM = 128 lanes × 512 columns × 4 bytes = 256 KiB，最大单 CTA 累加器常用 256 columns（128
+      KiB）
     types:
     - conceptual
     - optimization
@@ -559,7 +562,8 @@ children:
     - 4
     kind: feature
   - id: tma_bulk_cga
-    claim: cluster 级 bulk copy 的 mbarrier 必须位于执行 TMA 的 CTA 的 smem；在远端 CTA 的 barrier 上 expect 不会收到本地 TMA 完成
+    claim: cluster 级 bulk copy 的 mbarrier 必须位于执行 TMA 的 CTA 的 smem；在远端 CTA 的 barrier 上 expect 不会收到本地 TMA
+      完成
     types:
     - debug
     - conceptual

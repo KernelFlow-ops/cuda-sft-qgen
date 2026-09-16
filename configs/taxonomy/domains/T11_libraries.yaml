@@ -13,7 +13,8 @@ children:
     - 2
     - 3
   - id: cublas_lt_epilogue_layout
-    claim: cuBLASLt epilogue gelu 要求 C/D 的 leading dimension 与 order 匹配；row-major C 配 col-major epilogue 会拒绝或算错
+    claim: cuBLASLt epilogue gelu 要求 C/D 的 leading dimension 与 order 匹配；row-major C 配 col-major epilogue
+      会拒绝或算错
     types:
     - syntax
     - optimization

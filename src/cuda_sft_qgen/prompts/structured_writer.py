@@ -91,6 +91,14 @@ class StructuredPrompt:
         self._quality = load_prompt("quality")
         self._context = load_prompt("context")
         self._cot = load_prompt("cot")
+        try:
+            self._writer_policy = load_prompt("writer_policy")
+        except FileNotFoundError:
+            self._writer_policy = ""
+        try:
+            self._evolver_policy = load_prompt("evolver_policy")
+        except FileNotFoundError:
+            self._evolver_policy = ""
 
     def build(self, brief: QuestionBrief, steering: SteeringBrief) -> PromptBundle:
         gen = self.settings.generation
@@ -154,6 +162,9 @@ class StructuredPrompt:
             "l3_claim": brief.l3_claim,
             "instance_hint": brief.instance_hint or brief.must_include or brief.l3_claim,
             "seed_question": brief.seed_question or "",
+            "breadth_or_depth_signal": brief.breadth_or_depth,
+            "breadth_or_depth_guidance": self._breadth_guidance(brief),
+            "strong_token_examples": self._example_strong_tokens(brief),
         }
 
         role_key = "evolver" if brief.role == "evolver" and brief.seed_question else "writer"
@@ -188,6 +199,11 @@ class StructuredPrompt:
         ]
         if use_cot:
             dynamic_parts.append(_render(self._cot, mapping).strip())
+        policy = self._evolver_policy if role_key == "evolver" else self._writer_policy
+        if policy:
+            rendered_policy = _render(policy, mapping).strip()
+            if rendered_policy:
+                dynamic_parts.append(rendered_policy)
         dynamic_parts.append(_render(self._context, mapping).strip())
         dynamic_parts.append(
             f'Reminder: len in [{mapping["min_chars"]}, {mapping["max_chars"]}]; '
@@ -296,3 +312,17 @@ class StructuredPrompt:
         if isinstance(must_not, list) and must_not:
             extra.append("Must not:\n" + _bullet(must_not))
         return "\n".join(extra)
+
+    def _breadth_guidance(self, brief: QuestionBrief) -> str:
+        if brief.breadth_or_depth == "BREADTH":
+            return "Explore a different facet of the claim; vary the angle or constraint type"
+        else:
+            return "Go deeper on one facet with harder numeric constraints or edge cases"
+
+    def _example_strong_tokens(self, brief: QuestionBrief) -> str:
+        from cuda_sft_qgen.review.consistency import _strong_tokens
+        tokens = _strong_tokens(brief.l3_claim, brief.l3_id)
+        if tokens:
+            return ", ".join(tokens[:5])
+        return "API names, architecture names (sm_90, Hopper), PTX instructions"
+

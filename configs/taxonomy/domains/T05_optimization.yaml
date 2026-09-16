@@ -291,7 +291,8 @@ children:
     - 2
     kind: mechanism
   - id: txn_count_ncu
-    claim: NCU l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum 计的是 sector 不是请求次数；用它反推合并效率 = 理想 sector / 实测
+    claim: NCU l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum 计的是 sector 不是请求次数；用它反推合并效率 = 理想 sector /
+      实测
     types:
     - profiling
     difficulty:

@@ -6,7 +6,7 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 
 from cuda_sft_qgen.config import Settings
-from cuda_sft_qgen.graph.nodes.architect import architect_node
+from cuda_sft_qgen.graph.nodes.architect import architect_node, taxonomy_manager_node
 from cuda_sft_qgen.graph.nodes.bootstrap import bootstrap_node
 from cuda_sft_qgen.graph.nodes.generate import generate_batch_node
 from cuda_sft_qgen.graph.nodes.planner import planner_node
@@ -18,6 +18,7 @@ from cuda_sft_qgen.graph.routing import (
     route_after_drain,
     route_after_generate,
     route_after_salvage,
+    route_after_taxonomy,
 )
 from cuda_sft_qgen.graph.state import PipelineState
 from cuda_sft_qgen.runtime import Runtime, build_runtime, reset_runtime, set_runtime
@@ -36,6 +37,7 @@ def build_graph():
     g.add_node("review_score", review_score_node)
     g.add_node("review_chair", review_chair_node)
     g.add_node("archive", archive_node)
+    g.add_node("taxonomy_manager", taxonomy_manager_node)
 
     g.add_edge(START, "bootstrap")
     g.add_conditional_edges("bootstrap", route_after_bootstrap)
@@ -47,6 +49,7 @@ def build_graph():
     g.add_edge("review_score", "review_chair")
     g.add_edge("review_chair", "archive")
     g.add_conditional_edges("archive", route_after_archive)
+    g.add_conditional_edges("taxonomy_manager", route_after_taxonomy)
     return g.compile()
 
 

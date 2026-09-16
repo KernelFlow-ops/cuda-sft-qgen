@@ -540,7 +540,8 @@ children:
   name: Cluster 同步
   leaves:
   - id: cluster_sync_this_cluster
-    claim: this_cluster().sync() 同步 cluster 内全部 CTA，仅 sm_90+ cluster launch 合法；普通 launch 里调用没有 cluster 栅栏
+    claim: this_cluster().sync() 同步 cluster 内全部 CTA，仅 sm_90+ cluster launch 合法；普通 launch 里调用没有 cluster
+      栅栏
     types:
     - syntax
     - debug
@@ -597,7 +598,8 @@ children:
     - 4
     kind: failure
   - id: cluster_sync_launch_api
-    claim: 未在 cudaLaunchKernelEx 设置 ClusterDimension 时，硬件不组成 cluster，this_cluster() 行为不是“大小为 1 的合法 cluster sync”
+    claim: 未在 cudaLaunchKernelEx 设置 ClusterDimension 时，硬件不组成 cluster，this_cluster() 行为不是“大小为 1 的合法 cluster
+      sync”
     types:
     - debug
     - syntax
@@ -840,7 +842,8 @@ children:
     - 3
     kind: api
   - id: semaphore_lib_binary_sem
-    claim: cuda::binary_semaphore / counting_semaphore 的 acquire/release 按 C++ 语义，但 GPU 上 busy-wait 会占着 warp
+    claim: cuda::binary_semaphore / counting_semaphore 的 acquire/release 按 C++ 语义，但 GPU 上 busy-wait 会占着
+      warp
     types:
     - optimization
     - conceptual

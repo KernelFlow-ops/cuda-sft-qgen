@@ -1,33 +1,33 @@
-version: 2
+version: 3
 name: nvidia_cuda_knowledge
 include:
-  - domains/T01_programming_model.yaml
-  - domains/T02_memory.yaml
-  - domains/T03_warp_occupancy.yaml
-  - domains/T04_sync.yaml
-  - domains/T05_optimization.yaml
-  - domains/T06_tensor_core.yaml
-  - domains/T07_cutlass_cute.yaml
-  - domains/T08_hopper_blackwell.yaml
-  - domains/T09_toolchain.yaml
-  - domains/T10_multi_gpu.yaml
-  - domains/T11_libraries.yaml
-  - domains/T12_profiling.yaml
-  - domains/T13_algorithms.yaml
-  - domains/T14_runtime_graphs.yaml
-  - domains/T15_numeric.yaml
-  - domains/T16_memory_model.yaml
-  - domains/T17_sm_microarch.yaml
-  - domains/T18_ptx_isa.yaml
-  - domains/T19_libcu.yaml
-  - domains/T20_cute_algebra.yaml
-  - domains/T21_cutlass_pipeline.yaml
-  - domains/T22_vmm_alloc.yaml
-  - domains/T23_cuda_python.yaml
-  - domains/T24_device_comm.yaml
-  - domains/T25_perf_model.yaml
-  - domains/T26_texture_surface.yaml
-  - domains/T27_cdp_launch.yaml
-  - domains/T28_errors_determinism.yaml
-  - domains/T29_math_libs.yaml
-  - domains/T30_arch_features.yaml
+- domains/T01_programming_model.yaml
+- domains/T02_memory.yaml
+- domains/T03_warp_occupancy.yaml
+- domains/T04_sync.yaml
+- domains/T05_optimization.yaml
+- domains/T06_tensor_core.yaml
+- domains/T07_cutlass_cute.yaml
+- domains/T08_hopper_blackwell.yaml
+- domains/T09_toolchain.yaml
+- domains/T10_multi_gpu.yaml
+- domains/T11_libraries.yaml
+- domains/T12_profiling.yaml
+- domains/T13_algorithms.yaml
+- domains/T14_runtime_graphs.yaml
+- domains/T15_numeric.yaml
+- domains/T16_memory_model.yaml
+- domains/T17_sm_microarch.yaml
+- domains/T18_ptx_isa.yaml
+- domains/T19_libcu.yaml
+- domains/T20_cute_algebra.yaml
+- domains/T21_cutlass_pipeline.yaml
+- domains/T22_vmm_alloc.yaml
+- domains/T23_cuda_python.yaml
+- domains/T24_device_comm.yaml
+- domains/T25_perf_model.yaml
+- domains/T26_texture_surface.yaml
+- domains/T27_cdp_launch.yaml
+- domains/T28_errors_determinism.yaml
+- domains/T29_math_libs.yaml
+- domains/T30_arch_features.yaml

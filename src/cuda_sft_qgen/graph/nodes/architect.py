@@ -68,3 +68,75 @@ def architect_node(state: PipelineState) -> dict:
             "status": "taxonomy_ready",
             "log": [f"architect skipped due to error: {exc}"],
         }
+
+
+def _make_taxonomy_manager(rt):
+    from cuda_sft_qgen.taxonomy_manager import manager_from_runtime
+
+    return manager_from_runtime(rt)
+
+
+def _diversity_from_state(state: PipelineState):
+    payload = state.get("last_diversity") or {}
+    if not isinstance(payload, dict):
+        return None
+    report = payload.get("report")
+    if not report:
+        return None
+    try:
+        from cuda_sft_qgen.models import DiversityReport
+
+        return DiversityReport.model_validate(report)
+    except Exception:  # noqa: BLE001
+        return report
+
+
+def taxonomy_health_node(state: PipelineState) -> dict:
+    """Sidecar taxonomy health tick. Fail-open; never touches pending or steering."""
+    try:
+        rt = get_runtime()
+        manager = _make_taxonomy_manager(rt)
+        result = manager.run_tick(
+            accepted=rt.store.load_accepted(),
+            rejected=rt.store.load_rejected(),
+            diversity_report=_diversity_from_state(state),
+            apply=not rt.settings.fake_llm,
+            last_facet=state.get("last_taxonomy_facet"),
+            data_dir=rt.settings.data_dir,
+            fake_llm=rt.settings.fake_llm,
+        )
+        if not isinstance(result, dict):
+            result = {}
+        score = result.get("health_score")
+        added = result.get("total_added")
+        mission = result.get("mission")
+        facet = result.get("facet")
+        status = result.get("status") or "taxonomy_health_checked"
+        ticks = int(state.get("taxonomy_ticks") or 0) + 1
+        msg = (
+            f"taxonomy_manager status={status} health_score={score} "
+            f"added={added} facet={facet}"
+        )
+        logger.info(msg)
+        return {
+            "status": status,
+            "health_score": score,
+            "taxonomy_ticks": ticks,
+            "last_taxonomy_health": {
+                "score": score,
+                "added": added,
+                "mission": mission,
+            },
+            "last_taxonomy_facet": facet,
+            "log": [msg],
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("taxonomy manager failed: %s", exc)
+        return {
+            "status": "taxonomy_health_checked",
+            "log": [f"taxonomy manager error: {exc}"],
+        }
+
+
+taxonomy_manager_node = taxonomy_health_node
+

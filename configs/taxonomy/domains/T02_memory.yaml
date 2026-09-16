@@ -219,7 +219,8 @@ children:
     - 2
     kind: mechanism
   - id: uvm_concurrent_attr
-    claim: cudaDevAttrConcurrentManagedAccess=0（Pascal 部分 SKU/Windows）上 CPU 访问未同步的 managed 会隐式同步设备；Volta+ =1 才支持真正并发
+    claim: cudaDevAttrConcurrentManagedAccess=0（Pascal 部分 SKU/Windows）上 CPU 访问未同步的 managed 会隐式同步设备；Volta+
+      =1 才支持真正并发
     types:
     - debug
     - compare
@@ -607,7 +608,8 @@ children:
     - 2
     kind: api
   - id: malloc_api_host_malloc
-    claim: 设备 kernel 里 malloc 来自 device heap，与 host cudaMalloc 不是同一分配器；host cudaFree 不能释放 device malloc 指针
+    claim: 设备 kernel 里 malloc 来自 device heap，与 host cudaMalloc 不是同一分配器；host cudaFree 不能释放 device malloc
+      指针
     types:
     - debug
     - compare
@@ -687,7 +689,8 @@ children:
   name: 拷贝方向与异步
   leaves:
   - id: memcpy_kind_enum
-    claim: cudaMemcpyHostToDevice/DeviceToHost/DeviceToDevice/Default 选错方向会 InvalidValue 或静默拷错；Default 依赖 UVA 推断
+    claim: cudaMemcpyHostToDevice/DeviceToHost/DeviceToDevice/Default 选错方向会 InvalidValue 或静默拷错；Default
+      依赖 UVA 推断
     types:
     - syntax
     - debug

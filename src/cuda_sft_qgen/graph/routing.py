@@ -75,6 +75,8 @@ def route_after_salvage(state: PipelineState) -> str:
 def route_after_drain(state: PipelineState) -> str:
     if _should_salvage(state):
         return "salvage"
+    if should_taxonomy_tick(state):
+        return "taxonomy_manager"
     return _route_continue(state)
 
 
@@ -95,7 +97,46 @@ def _route_continue(state: PipelineState) -> str:
     return "planner"
 
 
+def should_taxonomy_tick(state: PipelineState) -> bool:
+    try:
+        rt = get_runtime()
+    except Exception:
+        return False
+    if rt.settings.fake_llm:
+        return False
+    mgr = rt.settings.taxonomy_manager_cfg
+    if not bool(mgr.get("enabled", True)):
+        return False
+    accepted = int(state.get("accepted_count") or 0)
+    target = int(state.get("target") or 0)
+    if accepted >= target:
+        return False
+    review_rounds = int(state.get("review_rounds") or 0)
+    if review_rounds <= 0:
+        return False
+    every_k = int(mgr.get("every_k_reviews", 5) or 0)
+    if every_k <= 0:
+        return False
+    return review_rounds >= every_k and review_rounds % every_k == 0
+
+
 def route_after_archive(state: PipelineState) -> str:
+    accepted = int(state.get("accepted_count") or 0)
+    target = int(state.get("target") or 0)
+    iteration = int(state.get("iteration") or 0)
+    max_iter = int(state.get("max_iterations") or 200)
+    if accepted >= target:
+        return END
+    if iteration >= max_iter:
+        return END
+    if _should_drain(state):
+        return "retry_drain"
+    if should_taxonomy_tick(state):
+        return "taxonomy_manager"
+    return "planner"
+
+
+def route_after_taxonomy(state: PipelineState) -> str:
     accepted = int(state.get("accepted_count") or 0)
     target = int(state.get("target") or 0)
     iteration = int(state.get("iteration") or 0)

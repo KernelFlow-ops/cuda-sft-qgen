@@ -272,7 +272,8 @@ children:
     - 3
     kind: mechanism
   - id: abi_regs_occupancy
-    claim: 占用 = min(floor(RF/(regs*threads)), smem, warp 槽, maxCTA)；ptxas 报 128 寄存器、block=256 时每 CTA 用 32768 槽
+    claim: 占用 = min(floor(RF/(regs*threads)), smem, warp 槽, maxCTA)；ptxas 报 128 寄存器、block=256 时每 CTA 用
+      32768 槽
     types:
     - optimization
     - profiling
@@ -728,7 +729,8 @@ children:
     - 4
     kind: feature
   - id: nvrtc_name_expr
-    claim: nvrtcAddNameExpression + nvrtcGetLoweredName 才能拿到模板 kernel 的 mangled 名；硬猜符号会 cuModuleGetFunction 失败
+    claim: nvrtcAddNameExpression + nvrtcGetLoweredName 才能拿到模板 kernel 的 mangled 名；硬猜符号会 cuModuleGetFunction
+      失败
     types:
     - syntax
     - debug

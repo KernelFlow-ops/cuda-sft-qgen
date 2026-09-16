@@ -27,7 +27,8 @@ children:
     - 3
     kind: formula
   - id: gemm_k_stages
-    claim: K pipeline stages 增加 outstanding TMA，藏 DRAM 延迟，但 smem 乘 stages；stages=4 在 164KB 预算下可能挤掉 epilogue smem
+    claim: K pipeline stages 增加 outstanding TMA，藏 DRAM 延迟，但 smem 乘 stages；stages=4 在 164KB 预算下可能挤掉 epilogue
+      smem
     types:
     - optimization
     difficulty:
@@ -158,7 +159,8 @@ children:
     - 3
     - 4
   - id: attn_online_m_state
-    claim: online softmax 的 running m 必须先 warp-max 再 rescale running l，m_new=max(m_old,m_tile)；先加后 max 会破坏数值稳定
+    claim: online softmax 的 running m 必须先 warp-max 再 rescale running l，m_new=max(m_old,m_tile)；先加后 max
+      会破坏数值稳定
     types:
     - conceptual
     - code_complete
@@ -451,7 +453,8 @@ children:
     - 3
     kind: mechanism
   - id: attn_arith_smem_qkv
-    claim: smem ≈ (Br*d + Bc*d)*sizeof(Q/K) + Br*Bc*sizeof(S或acc)；S 不物化则去掉 Br*Bc 项，d=128 FP16 Br=Bc=64 约 32KB
+    claim: smem ≈ (Br*d + Bc*d)*sizeof(Q/K) + Br*Bc*sizeof(S或acc)；S 不物化则去掉 Br*Bc 项，d=128 FP16 Br=Bc=64
+      约 32KB
     types:
     - optimization
     - layout

@@ -523,7 +523,7 @@ children:
     - 3
     kind: numeric
   - id: ncu_source_unroll
-    claim: "#pragma unroll 把循环摊开后热点分散到多个 PC；按循环行看会误判为变快"
+    claim: '#pragma unroll 把循环摊开后热点分散到多个 PC；按循环行看会误判为变快'
     types:
     - profiling
     - optimization
@@ -701,7 +701,7 @@ children:
     - 3
     kind: failure
   - id: sanitizer_mem_leak
-    claim: "--leak-check full 在进程退出时报未释放 device 堆；图捕获中的 cudaMallocAsync 需按流寿命判断，不是立即泄漏"
+    claim: --leak-check full 在进程退出时报未释放 device 堆；图捕获中的 cudaMallocAsync 需按流寿命判断，不是立即泄漏
     types:
     - debug
     - conceptual
@@ -928,7 +928,7 @@ children:
     - 3
     kind: numeric
   - id: profiler_filter_launch_count
-    claim: "--launch-count 1 只测第一次；JIT/warmup 第一次不能代表稳态 SOL"
+    claim: --launch-count 1 只测第一次；JIT/warmup 第一次不能代表稳态 SOL
     types:
     - profiling
     - optimization

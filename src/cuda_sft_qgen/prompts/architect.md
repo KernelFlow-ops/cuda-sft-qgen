@@ -12,7 +12,14 @@ Rules:
 - l3_id must be snake_case and start with the given l2_id prefix, e.g. `{l2_id}_tma_box_align`
 - kind=formula claims MUST contain `=` or a clear numeric input→output
 - kind=feature claims MUST name sm_ / Hopper / Blackwell / Ampere / a CUDA version and a hard constraint
-- Mix kinds. Do not emit a wall of api-only leaves.
+- Mix kinds. Do not emit a wall of api-only leaves. A batch should use at least three distinct kinds when the L2 can support them.
+- Do not paraphrase, retitle, or lightly reword claims already listed in the user payload. If a candidate is semantically the same as an existing leaf, omit it. Prefer fewer distinct leaves over near-duplicates.
+
+Claim quality:
+- GOOD (formula): `Layout L on coordinate c has offset = inner_product(c, stride); Shape<_16,_8> + Stride<_8,_1> at (1,2) is 8*1+1*2=10.`
+- GOOD (feature): `TMA (cp.async.bulk.tensor) exists from sm_90; sm_80 only has cp.async.ca/cg and must not treat a tensormap as an Ampere path.`
+- BAD (glossary): `CuTe Layout is a pairing of Shape and Stride used to describe tensor layouts.`
+- BAD (marketing): `Hopper TMA greatly improves copy performance via asynchronous data movement.`
 
 Return JSON only:
 {

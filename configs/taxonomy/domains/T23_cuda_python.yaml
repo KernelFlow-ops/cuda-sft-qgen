@@ -1,535 +1,950 @@
 id: T23
 name: CUDA Python 与 DSL
 children:
-  - id: cuda_core
-    name: cuda.core
-    leaves:
-      - id: cuda_core_singleton
-        claim: "cuda.core.Device 是按设备号的单例入口，set_current() 之后该进程里后续 cuda.core 分配与启动都绑到这一上下文。"
-        types: [conceptual, debug]
-        difficulty: [2]
-        kind: mechanism
-      - id: cuda_core_api
-        claim: "Device.create_stream() 与 Device.allocate(nbytes, stream=stream) 是推荐 API；直接构造 Stream() 被文档禁止，因无法消歧义默认流。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: cuda_core_buffer_size
-        claim: "dev.allocate(n, stream=s) 得到的 Buffer.size = n 字节，不按元素计数；元素个数 = n / dtype.itemsize。"
-        types: [syntax, conceptual]
-        difficulty: [2]
-        kind: formula
-      - id: cuda_core_stream_protocol
-        claim: "cuda.core 识别 __cuda_stream__ 协议：对象方法返回 (0, int(cudaStream_t 地址)) 才能被 Device.create_stream(obj) 包装。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: feature
-      - id: cuda_core_set_current
-        claim: "Device(id) 只拿到单例，不切换上下文；未 set_current() 就 allocate/create_stream 会失败或落到别的当前设备。这与 cudaSetDevice 是同一当前上下文。"
-        types: [debug, conceptual]
-        difficulty: [2]
-        kind: mechanism
-      - id: cuda_core_launch_sig
-        claim: "稳定 API 是 launch(stream, LaunchConfig(...), kernel, *args)，stream 为第一位置参；写成 launch(kernel, config, stream=...) 不是 cuda.core 1.x 签名。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: cuda_core_memory_resource
-        claim: "DeviceMemoryResource 走 CUDA 11.2+ 流序 mempool；VirtualMemoryResource 走 cuMemCreate/Map。Device.allocate 默认前者，不会静默换成 VMM。"
-        types: [conceptual, compare]
-        difficulty: [3]
-        kind: mechanism
-      - id: cuda_core_program
-        claim: "Program(code, 'ptx'|'c++') 经 NVRTC/ptxas 得到 ObjectCode，再加载为 Kernel；arch 由 ProgramOptions 指定，例如 sm_90。这不是 nvcc 命令行包装器。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: api
-      - id: cuda_core_default_stream
-        claim: "LEGACY_DEFAULT_STREAM 与所有非空流隐式同步；CUDA 7 起的 PER_THREAD_DEFAULT_STREAM 可与 nonblocking 流并发。cuda.core 不鼓励把 None 当 legacy 默认流。"
-        types: [compare, conceptual]
-        difficulty: [2, 3]
-        kind: feature
-      - id: cuda_core_buffer_close
-        claim: "Buffer 记录 deallocation stream；close() 按该流序 cudaFreeAsync。换 set_deallocation_stream 不插入同步，调用者必须自己用 event 保证最后一次访问 happens-before free。"
-        types: [debug, conceptual]
-        difficulty: [3]
-        kind: failure
-        hints: ["kernel 还在用就 buffer.close()", "换 dealloc stream 后立刻 GC"]
-  - id: cute_dsl
-    name: CuTe DSL
-    leaves:
-      - id: cute_dsl_trace
-        claim: "CUTLASS 4.x CuTe DSL 在 @cute.kernel 追踪 Python 数据流生成 IR，再编译成 cubin；运行时 Python 对象不会自动进 device 寄存器。"
-        types: [conceptual, debug]
-        difficulty: [3, 4]
-        kind: mechanism
-      - id: cute_dsl_compile
-        claim: "cute.compile(kernel, ...) 或等价 JIT 入口针对指定 sm_ 生成可启动对象；每次改 shape 常量可能触发重编译。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: api
-      - id: cute_dsl_cutlass4
-        claim: "CuTe Python DSL 属于 CUTLASS 4.x（cute.core / cutlass.cute），不是 cuda.core 的一部分，也不能在只装 cuda-python 的环境里 import 到。"
-        types: [conceptual, compare]
-        difficulty: [3]
-        kind: feature
-      - id: cute_dsl_capture_host
-        claim: "在 @cute.kernel 里捕获普通 Python list/Tensor 主机对象当闭包，编译期失败或生成非法地址，必须改成 cute.Tensor 或显式 pointer 参数。"
-        types: [debug, counterfactual]
-        difficulty: [3, 4]
-        kind: failure
-        hints: ["闭包捕获 numpy.ndarray", "把 torch.Tensor 当 smem"]
-      - id: cute_dsl_jit_vs_kernel
-        claim: "@cute.jit 编译 host 侧入口（可 launch kernel），@cute.kernel 才是 device 核；在 @cute.jit 里写 cute.arch.thread_idx() 没有 CTA 线程，语义非法。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-      - id: cute_dsl_from_dlpack
-        claim: "cute.from_dlpack(t) 把 PyTorch/CuPy tensor 变成 cute.Tensor 视图，共享设备指针；它不拷贝、不改 dtype，只在 DLPack 元数据上建 layout。"
-        types: [conceptual, syntax]
-        difficulty: [3]
-        kind: mechanism
-      - id: cute_dsl_arch
-        claim: "cute.compile(..., options='--gpu-arch sm_90a') 或 sm_100a 决定能否发 TMA/WGMMA/UMMA；默认 arch 与当前 GPU 不一致时 JIT 失败或生成不可加载 cubin。"
-        types: [syntax, conceptual]
-        difficulty: [3, 4]
-        kind: feature
-      - id: cute_dsl_dynamic_loop
-        claim: "核内 Python for 若迭代次数在 trace 时是动态值，DSL 会生成设备循环；把 Python range(N) 的 N 当 host list 长度去索引闭包，仍会把主机对象编进核。"
-        types: [debug, conceptual]
-        difficulty: [4]
-        kind: mechanism
-      - id: cute_dsl_smem
-        claim: "共享内存必须经 DSL 的 smem allocator / cute.make_fragment 一类 API 声明，不能在 @cute.kernel 里 new 一个 Python 数组当 __shared__。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-      - id: cute_dsl_no_cache
-        claim: "装饰器 no_cache=True 时每次调用都重新 lowering；默认缓存按函数+常量特化键命中。shape 从 128 改到 256 会使缓存键变化并再次 JIT。"
-        types: [optimization, conceptual]
-        difficulty: [3]
-        kind: formula
-  - id: cutlass_python
-    name: CUTLASS Python
-    leaves:
-      - id: cutlass_python_op
-        claim: "cutlass 的 Python GEMM 前端（cutlass.op.Gemm 或 4.x cute GEMM helper）在 host 侧拼 CollectiveBuilder 参数并 launch，不是 cuBLAS 句柄包装。"
-        types: [conceptual, compare]
-        difficulty: [3]
-        kind: mechanism
-      - id: cutlass_python_gemm
-        claim: "Python 侧指定 element_a/b/c、layout 与 tile/cluster 后 compile，缺 alignment 或 arch 不匹配会在 JIT 时失败而非运行时静默降到 SIMT。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-      - id: cutlass_python_align
-        claim: "Tensor Core GEMM 要求 leading dimension 对齐到 16B（fp16 为 8 个元素，fp32 TF32 为 4 个元素）；Python 传入不齐的 ld 会无法选出 MMA atom。"
-        types: [debug, layout]
-        difficulty: [3]
-        kind: numeric
-      - id: cutlass_python_sm100
-        claim: "CUTLASS 4.x Python 可为 sm_100a 发出 UMMA/TMEM collective；同一脚本以 sm_90 编译不会分配 TMEM。"
-        types: [conceptual, compare]
-        difficulty: [4]
-        kind: feature
-      - id: cutlass_python_pkg
-        claim: "CUTLASS 4.x 官方包是 nvidia-cutlass / nvidia-cutlass-dsl；PyPI 上无 nvidia- 前缀的 cutlass 包与 NVIDIA CUTLASS 无关，import cutlass.cute 会失败。"
-        types: [syntax, conceptual]
-        difficulty: [2]
-        kind: feature
-      - id: cutlass_python_cluster
-        claim: "sm_90 GEMM 的 cluster_shape 例如 (2,1,1) 必须整除 grid；Python 传入 cluster=(2,2,1) 而设备不支持 multicast 时 compile/launch 失败，不会回退 1×1 cluster。"
-        types: [layout, debug]
-        difficulty: [3, 4]
-        kind: numeric
-      - id: cutlass_python_stream
-        claim: "Python GEMM run/launch 必须传入与 tensor 设备一致的 cuda stream（cuda.core.Stream、torch.cuda.Stream 或 bindings 句柄）；默认流上与 PyTorch 非默认流并发会数据竞争。"
-        types: [debug, syntax]
-        difficulty: [3]
-        kind: api
-      - id: cutlass_python_workspace
-        claim: "部分 schedule 需要 workspace 字节数 >0（split-K、某些 epilogue）；Python 侧未分配 workspace 就 run 会非法写或返回错误，不会自动 cudaMalloc。"
-        types: [debug, conceptual]
-        difficulty: [3]
-        kind: failure
-      - id: cutlass_python_layout
-        claim: "element_a 的 layout 是 row/column 的 CuTe 语义，不是 numpy 默认 C 连续就等于 row-major GEMM；转置标志与 ld 必须和 DLPack strides 一致。"
-        types: [layout, compare]
-        difficulty: [3]
-        kind: mechanism
-      - id: cutlass_python_cpu_tensor
-        claim: "把 device='cpu' 的 torch.Tensor 交给 CUTLASS Python GEMM 不会自动 H2D；要么显式 .cuda()，要么失败。DSL 不会替你调 cudaMemcpy。"
-        types: [debug, counterfactual]
-        difficulty: [2, 3]
-        kind: failure
-  - id: kernel_dtype
-    name: kernel dtype 绑定
-    leaves:
-      - id: kernel_dtype_match
-        claim: "device kernel 模板类型必须与 Buffer/DLPack 的元素宽度一致：fp16 kernel 读 fp32 buffer 会按半精度解译位型，数值全错。"
-        types: [debug, conceptual]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: kernel_dtype_names
-        claim: "CuTe DSL 用 cute.Float16/cute.Float32 等类型对象绑定；与 numpy.float16、torch.float16 名字相近但不是同一 Python 类型。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: kernel_dtype_itemsize
-        claim: "元素个数 N = nbytes / itemsize，其中 cute.Float16/cutlass.Float16 的 itemsize = 2，Float32 = 4，Float8 变体 = 1。"
-        types: [syntax, conceptual]
-        difficulty: [2]
-        kind: formula
-      - id: kernel_dtype_mismatch
-        claim: "把 torch.float32 的 DLPack 缓冲按 Float16 kernel 启动不会自动转换，属于静默错数，除非显式 copy/cast。"
-        types: [debug, counterfactual]
-        difficulty: [2, 3]
-        kind: failure
-      - id: kernel_dtype_bf16
-        claim: "__nv_bfloat16 / cute.BFloat16 的 itemsize=2，与 torch.bfloat16 位型兼容，但 numpy 无原生 bfloat16 时不能用 np.float16 缓冲区冒充。"
-        types: [compare, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: kernel_dtype_fp8
-        claim: "FP8 E4M3/E5M2 的 itemsize=1，CUTLASS/CuTe 还要配套 scale（如 UE8M0）；只改 Python dtype 名字不提供 scale tensor 不能在 sm_90/sm_100 Tensor Core 上正确累加。"
-        types: [conceptual, debug]
-        difficulty: [3, 4]
-        kind: feature
-      - id: kernel_dtype_typestr
-        claim: "__cuda_array_interface__ 的 typestr 如 '<f4' 表示小端 float32、itemsize=4；与 kernel 的 T=int32 宽度碰巧相同仍是错解释，检查的是类型字符不是长度。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: kernel_dtype_vector
-        claim: "kernel 参数写成 float4* 时，Python 侧仍按 16 字节/元素计 N_vec = nbytes / 16，且指针必须 16B 对齐；按 scalar float 的 N=nbytes/4 启动会越界或错向量化。"
-        types: [layout, syntax]
-        difficulty: [3]
-        kind: formula
-      - id: kernel_dtype_ptr_int
-        claim: "cuda.bindings 启动时常把设备指针以 Python int 传入；int 是地址不是标量实参。把 Buffer 对象直接塞进 cuLaunchKernel 的 kernelParams 类型不匹配。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-      - id: kernel_dtype_complex
-        claim: "cuFloatComplex / complex64 的 itemsize=8（两个 float）；CAI typestr 为 '<c8'。按 float32 kernel 读会把实部虚部拆成相邻线程的两个元素。"
-        types: [debug, conceptual]
-        difficulty: [3]
-        kind: numeric
-  - id: launch_interop
-    name: 启动与互操作
-    leaves:
-      - id: launch_interop_config
-        claim: "cuda.core.launch(kernel, LaunchConfig(grid, block, ...), *args, stream=stream) 按该 stream 顺序入队；grid/block 是线程格而非 CTA 字节。"
-        types: [syntax, conceptual]
-        difficulty: [2]
-        kind: api
-      - id: launch_interop_dlpack
-        claim: "cuda.core.Buffer 实现 __dlpack__，cupy.from_dlpack / torch.from_dlpack 零拷贝视图共享同一设备指针与生命周期风险。"
-        types: [conceptual, debug]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: launch_interop_threads
-        claim: "LaunchConfig 总线程数 = grid.x*grid.y*grid.z * block.x*block.y*block.z；只设 block=256 而 grid=None 不会自动按 N 推导。"
-        types: [syntax, debug]
-        difficulty: [2]
-        kind: formula
-      - id: launch_interop_wrong_device
-        claim: "未 Device.set_current() 就 launch，或 stream 属于 GPU0 而 Buffer 在 GPU1，会抛设备不匹配或写入错误 GPU。"
-        types: [debug, counterfactual]
-        difficulty: [2, 3]
-        kind: failure
-      - id: launch_interop_dyn_smem
-        claim: "LaunchConfig.shmem_size 是动态共享内存字节，与核内 static __shared__ 相加 ≤ 设备每块上限；Python 漏设时动态 smem=0，核内 extern shared 读到空。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: launch_interop_cluster
-        claim: "sm_90+ LaunchConfig 可带 cluster 维；cluster 非 (1,1,1) 时必须 cooperative/cluster launch 路径，普通 launch 会忽略或失败，不会静默变成单 CTA。"
-        types: [syntax, conceptual]
-        difficulty: [3, 4]
-        kind: feature
-      - id: launch_interop_torch_ptr
-        claim: "PyTorch 设备指针是 tensor.data_ptr() 返回的 Python int；与 cuda.core.Buffer.handle 一样都是 CUdeviceptr 宽度的地址，不是 numel。"
-        types: [syntax, conceptual]
-        difficulty: [2]
-        kind: api
-      - id: launch_interop_cupy_ptr
-        claim: "CuPy 用 ndarray.data.ptr（int）作为设备地址；launch 前必须保证该数组未搬回主机。对已 .get() 的 numpy 副本取 ptr 是主机地址。"
-        types: [debug, conceptual]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: launch_interop_occupancy
-        claim: "Python 侧可查 max_active_blocks，但 LaunchConfig.block 仍须满足寄存器/smem 约束；超限时 launch 返回 cudaErrorLaunchOutOfResources，不会自动降 block。"
-        types: [optimization, debug]
-        difficulty: [3]
-        kind: failure
-      - id: launch_interop_arg_count
-        claim: "kernel 形参数量必须与 launch 的 *args 一致；少传导致读未定义参数，多传被忽略或 Driver API 报 invalid。Python 默认参数不会自动填进设备核。"
-        types: [debug, syntax]
-        difficulty: [2, 3]
-        kind: failure
-  - id: cuda_bindings
-    name: cuda.bindings
-    leaves:
-      - id: cuda_bindings_layers
-        claim: "cuda.bindings 提供 Driver/Runtime/NVRTC/nvJitLink/NVVM/cuFile/NVML 的 1:1 低层绑定；cuda.core 是其上层 Pythonic API，不是另一套 C ABI。"
-        types: [conceptual, compare]
-        difficulty: [2]
-        kind: mechanism
-      - id: cuda_bindings_tuple
-        claim: "多数 cuda.bindings.driver.cu* 返回 (CUresult, *outputs)；忽略 err 只解包指针会在失败时用垃圾句柄。这与抛异常的 cuda.core 不同。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: cuda_bindings_cuinit
-        claim: "使用 cuda.bindings.driver 必须先 cuInit(0) 再 cuDeviceGet/cuCtxCreate 或保留 primary context；只 import 模块不会创建上下文。"
-        types: [syntax, conceptual]
-        difficulty: [2]
-        kind: api
-      - id: cuda_bindings_runtime_vs_driver
-        claim: "cuda.bindings.runtime.cudaMalloc 走 Runtime primary context；driver.cuMemAlloc 走当前 CUcontext。混用且当前 ctx ≠ primary 时指针不能互相 cudaFree/cuMemFree。"
-        types: [compare, debug]
-        difficulty: [3]
-        kind: mechanism
-      - id: cuda_bindings_nvrtc
-        claim: "cuda.bindings.nvrtc.nvrtcCreateProgram/nvrtcCompileProgram 在 Python 里 JIT CUDA C++；arch 用选项 '--gpu-architecture=sm_80'。它不启动核，只产出 PTX/cubin。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: api
-      - id: cuda_bindings_cuda12
-        claim: "cuda.bindings 的符号随 CUDA Toolkit 走：CUDA 12.x 绑定没有 CUDA 13 才加入的 driver 入口；版本检查要用 cudaDriverGetVersion，不能假设 pip 包自带完整驱动。"
-        types: [conceptual, syntax]
-        difficulty: [2, 3]
-        kind: feature
-      - id: cuda_bindings_deviceptr
-        claim: "CUdeviceptr 在绑定里常是 Python int，宽度 = 64 bit 地址；把它当 np.int32 截断后 cuMemcpy 会变成非法低 32 位地址。"
-        types: [debug, conceptual]
-        difficulty: [2, 3]
-        kind: numeric
-      - id: cuda_bindings_launch
-        claim: "cuLaunchKernel 的 kernelParams 是 void** 风格的参数数组，Python 侧需按绑定文档构造；不能把 dict 或 ctypes 结构体直接当 args 元组塞给 cuda.core.launch。"
-        types: [syntax, code_complete]
-        difficulty: [3]
-        kind: api
-      - id: cuda_bindings_error_ignore
-        claim: "err != CUDA_SUCCESS 仍继续 cuMemFree 下一个句柄，会在错误上下文里二次失败并把 sticky error 留给 Runtime。应用必须先查 err 再使用 out 参数。"
-        types: [debug, counterfactual]
-        difficulty: [2, 3]
-        kind: failure
-      - id: cuda_bindings_not_dsl
-        claim: "cuda.bindings 不是 kernel DSL：不能在 Python 函数上加装饰器得到 device 核。写核仍需 NVRTC 字符串、预编译 cubin，或 CuTe/Numba 等编译器。"
-        types: [conceptual, compare]
-        difficulty: [2]
-        kind: mechanism
-  - id: array_interface
-    name: CUDA Array Interface
-    leaves:
-      - id: array_interface_keys
-        claim: "__cuda_array_interface__ 必须含 shape、typestr、data、version；缺 data 或 version 的对象不是合法 CAI，cuda.core/Numba 应拒绝而不是猜指针。"
-        types: [syntax, conceptual]
-        difficulty: [2]
-        kind: api
-      - id: array_interface_v3_stream
-        claim: "CAI v3 的可选键 stream 描述生产者流：None 表示无需同步，1=legacy 默认流，2=per-thread 默认流，其它 int=cudaStream_t 地址。"
-        types: [conceptual, syntax]
-        difficulty: [3]
-        kind: feature
-      - id: array_interface_stream_zero
-        claim: "CAI 禁止 stream=0，因 0 无法区分 None、legacy 与 per-thread 默认流；实现若返回 0，消费者同步语义未定义。"
-        types: [debug, counterfactual]
-        difficulty: [3]
-        kind: failure
-      - id: array_interface_data
-        claim: "data 是 (ptr:int, readonly:bool)；ptr 为设备地址。readonly=True 时消费者不得写入，否则相对生产者是 data race，CAI 本身不插入 fence。"
-        types: [conceptual, debug]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: array_interface_strides
-        claim: "strides=None 表示 C 连续，nbytes = product(shape) * itemsize(typestr)；显式 strides 以字节计。把元素 stride 当字节 stride 会按 dtype 放大偏移。"
-        types: [layout, syntax]
-        difficulty: [2, 3]
-        kind: formula
-      - id: array_interface_vs_dlpack
-        claim: "DLPack 经 __dlpack__(stream=...) 建立流序；CAI v3 用字典里的 stream 键。cuda.core 的 StridedMemoryView 先试 DLPack 再 CAI，两者都没有则 BufferError。"
-        types: [compare, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: array_interface_typestr
-        claim: "typestr 遵循 NumPy 数组接口：'<f2' 为小端 fp16、itemsize=2。与 kernel dtype 比较应看 typestr 而不是 Python 变量名 dtype。"
-        types: [syntax, debug]
-        difficulty: [2]
-        kind: api
-      - id: array_interface_version
-        claim: "当前规范 version=3；只实现 v2 的导出者没有 stream 键，消费者不得把缺失当成 legacy 默认流，应视为无需同步或拒绝。"
-        types: [conceptual, compare]
-        difficulty: [3]
-        kind: feature
-      - id: array_interface_mask
-        claim: "可选 mask 描述有效元素；Numba CUDA 对带 mask 的 CAI 对象 raise NotImplementedError。有 mask 时不能当 dense 缓冲 launch。"
-        types: [debug, conceptual]
-        difficulty: [3]
-        kind: failure
-      - id: array_interface_shape0
-        claim: "shape 含 0 维时 product=0，ptr 仍可能非空；kernel 不得用 ptr[0] 探活。N = ∏ shape_i，grid 应按 N=0 走空 launch 而不是假设至少 1 元素。"
-        types: [debug, conceptual]
-        difficulty: [2, 3]
-        kind: numeric
-  - id: stream_objects
-    name: Python 流对象
-    leaves:
-      - id: stream_objects_protocol
-        claim: "__cuda_stream__ 协议当前 version=0：方法返回 (0, handle_int)，handle_int 为 cudaStream_t 的指针值。返回 (handle,) 或缺 version 不能被 cuda.core 包装。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: api
-      - id: stream_objects_from_handle
-        claim: "Stream.from_handle(int) 把已有 cudaStream_t 包成不拥有生命周期的 cuda.core.Stream；关闭该包装不得 cuStreamDestroy 外部库仍持有的流。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-      - id: stream_objects_torch
-        claim: "PyTorch 2.10+ 的 torch.cuda.Stream 实现 __cuda_stream__，可直接 Device.create_stream(torch.cuda.current_stream())；更早版本要 .cuda_stream 句柄手动包。"
-        types: [conceptual, syntax]
-        difficulty: [2, 3]
-        kind: feature
-      - id: stream_objects_cupy
-        claim: "cupy.cuda.ExternalStream(ptr) 或 Stream.ptr 提供运行时句柄；CuPy 默认流与 cuda.core LEGACY_DEFAULT_STREAM 不是自动同一队列，混用要显式 wait。"
-        types: [compare, debug]
-        difficulty: [3]
-        kind: mechanism
-      - id: stream_objects_nonblocking
-        claim: "Device.create_stream(options=StreamOptions(nonblocking=True)) 对应 cudaStreamNonBlocking，不与 legacy 默认流隐式同步；漏设则与默认流互相串行。"
-        types: [optimization, syntax]
-        difficulty: [2, 3]
-        kind: api
-      - id: stream_objects_priority
-        claim: "StreamOptions.priority 落在 cudaDeviceGetStreamPriorityRange 返回的 [least, greatest]；超出范围被钳位或创建失败，不会变成另一个设备的流。"
-        types: [syntax, conceptual]
-        difficulty: [3]
-        kind: numeric
-      - id: stream_objects_wait
-        claim: "stream.wait(event_or_stream) 在该流上插入等待；传入实现了 __cuda_stream__ 的对象按流处理。host 上 Python 的 stream.sync() 才是 CPU 阻塞。"
-        types: [conceptual, debug]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: stream_objects_no_ctor
-        claim: "直接 Stream() 构造在 cuda.core 中被禁止，因为无法区分 legacy/per-thread/新流；必须 Device.create_stream 或 from_handle。"
-        types: [syntax, counterfactual]
-        difficulty: [2]
-        kind: failure
-      - id: stream_objects_capture
-        claim: "在 cuda.core GraphBuilder / stream capture 期间，该 Stream 上的 launch 与 mallocAsync 被录进图；在另一未捕获 Stream 上操作不会进图，图与即时执行交错。"
-        types: [debug, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: stream_objects_numba
-        claim: "numba.cuda.stream() 创建的是 Numba 自己的流包装，需 .handle 或 __cuda_stream__ 才能给 cuda.core.launch；把 Numba stream 对象当第一位置 int 传入 bindings 会类型错误。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-  - id: cupy_numba_runtime
-    name: CuPy/Numba 运行时约束
-    leaves:
-      - id: cupy_numba_runtime_context
-        claim: "CuPy 默认用 Runtime primary context，Numba CUDA 走 Driver 当前上下文；两者未指向同一 CUcontext 时，CuPy 数组指针在 Numba kernel 里是非法地址。"
-        types: [debug, conceptual]
-        difficulty: [3]
-        kind: mechanism
-      - id: cupy_numba_runtime_pool
-        claim: "CuPy MemoryPool 缓存自己的 cudaMalloc 块，与 CUDA 11.2 mempool（cudaMallocAsync）默认不是同一池；两边峰值显存相加，cudaFree 不能回收对方缓存。"
-        types: [optimization, compare]
-        difficulty: [3]
-        kind: mechanism
-      - id: cupy_numba_runtime_cai
-        claim: "cupy.ndarray 导出 __cuda_array_interface__，Numba 可零拷贝读该指针；生命周期仍由 CuPy 池管理，Numba 核尚未结束就让 ndarray 出作用域会 use-after-free。"
-        types: [debug, conceptual]
-        difficulty: [2, 3]
-        kind: failure
-      - id: cupy_numba_runtime_stream
-        claim: "cupy.cuda.Stream 与 numba.cuda.stream 互不等价；跨库要在消费者流上 wait 生产者流。仅 Python 线程 join 不建立 CUDA happens-before。"
-        types: [debug, compare]
-        difficulty: [3]
-        kind: mechanism
-      - id: cupy_numba_runtime_device
-        claim: "cupy.cuda.Device(1).use() 与 numba.cuda.select_device(1) 都必须调用，只设 CUDA_VISIBLE_DEVICES 不会把已创建在 GPU0 的数组搬到 GPU1。"
-        types: [syntax, debug]
-        difficulty: [2, 3]
-        kind: api
-      - id: cupy_numba_runtime_copy
-        claim: "numba.cuda.to_device(h) 发起 H2D 拷贝；对已在设备上的 CuPy 数组再 to_device 会再分配并拷贝，而不是认 CAI 零拷贝，除非用 as_cuda_array。"
-        types: [compare, conceptual]
-        difficulty: [2, 3]
-        kind: api
-      - id: cupy_numba_runtime_smem
-        claim: "Numba @cuda.jit 的 stream.shared.array 受每块 smem 上限约束（如 sm_80 每块最多 99/164 KiB 配置）；超限 compile/launch 失败，CuPy ElementwiseKernel 同样受该硬件上限。"
-        types: [optimization, debug]
-        difficulty: [3]
-        kind: numeric
-      - id: cupy_numba_runtime_sync
-        claim: "CuPy 在读回主机（.get()/print）时会同步其当前流；Numba 默认在 kernel 后不自动 sync。混用时 host 读 CuPy 视图可能早于 Numba kernel 完成。"
-        types: [debug, counterfactual]
-        difficulty: [2, 3]
-        kind: failure
-      - id: cupy_numba_runtime_async_alloc
-        claim: "若把 CuPy 配置到 CUDA 11.2+ cudaMallocAsync 分配器，块的可用性是流序的；Numba 在另一流上立刻用该指针仍需 wait。这是 CUDA runtime 约束，不是 CuPy 特有 bug。"
-        types: [conceptual, debug]
-        difficulty: [3]
-        kind: feature
-      - id: cupy_numba_runtime_visible
-        claim: "CUDA_VISIBLE_DEVICES=1 时 CuPy/Numba 的 device 0 是物理 GPU1；cuda.core.Device(0) 在同一进程里也是这张卡。用 nvidia-smi 序号直接 Device(1) 会越界。"
-        types: [debug, conceptual]
-        difficulty: [2]
-        kind: formula
-  - id: tvm_triton_lowering
-    name: TVM/Triton 降到 CUDA
-    leaves:
-      - id: tvm_triton_lowering_not_api
-        claim: "Triton IR / tl.program_id / tl.store 不是 CUDA Runtime API；它们经编译器变成 PTX/cubin，再由 CUDA driver 加载。不能把 tl.device_print 当成 cudaPrintf API 文档。"
-        types: [conceptual, compare]
-        difficulty: [2, 3]
-        kind: mechanism
-      - id: tvm_triton_lowering_ptx
-        claim: "Triton 最终调用 ptxas/driver JIT 得到 sm_xx cubin，受该 arch 的寄存器、smem、TMA 能力约束；Triton 语言特性不增加硬件上限。"
-        types: [conceptual, optimization]
-        difficulty: [3]
-        kind: mechanism
-      - id: tvm_triton_lowering_smem_cap
-        claim: "Triton kernel 声明的 smem 字节必须 ≤ 当前设备每块上限（例如 A100 默认 164 KiB、H100 228 KiB）；超限在 compile 或 launch 失败，不是 Triton 再向 CUDA 申请一块独立 smem 堆。"
-        types: [debug, optimization]
-        difficulty: [3]
-        kind: numeric
-      - id: tvm_triton_lowering_launch
-        claim: "Triton/TVM 的 grid 最终走 cuLaunchKernel/cudaLaunchKernel；grid 维仍是 CTA 数，block 由编译器固定。Python 里的 triton.autotune 不能突破 maxGridSize。"
-        types: [syntax, conceptual]
-        difficulty: [2, 3]
-        kind: api
-      - id: tvm_triton_lowering_tvm_codegen
-        claim: "TVM CUDA codegen 产出 CUDA C++/PTX 再 nvcc/nvrtc；device API 映射到 cudaMalloc/cudaMemcpy/stream。TVM 的 tir.Call 不是可在 Python 直接调的 CUDA 符号。"
-        types: [conceptual, syntax]
-        difficulty: [3]
-        kind: mechanism
-      - id: tvm_triton_lowering_stream
-        claim: "tvm.runtime.Device 或 Triton 的 torch.cuda.current_stream() 最终仍是 cudaStream_t；与 cuda.core 互操作必须走句柄/协议，不能假设 TVM runtime 认识 Stream 对象。"
-        types: [syntax, debug]
-        difficulty: [3]
-        kind: api
-      - id: tvm_triton_lowering_no_device_malloc
-        claim: "Triton kernel 内不能调用 cudaMalloc；设备堆分配是 CDP/device runtime 路径，Triton 降核默认不含设备 malloc。需要临时缓冲应在 host 侧分配再当指针传入。"
-        types: [debug, counterfactual]
-        difficulty: [3]
-        kind: failure
-      - id: tvm_triton_lowering_arch
-        claim: "Triton 的 target 如 cuda:90 必须 ≤ 实际 GPU 的 compute capability；在 sm_80 设备上加载 sm_90 cubin 失败。这是 CUDA 模块加载规则，与 Triton 调度器无关。"
-        types: [debug, conceptual]
-        difficulty: [2, 3]
-        kind: feature
-      - id: tvm_triton_lowering_occupancy
-        claim: "降核后的寄存器/smem 决定 occupancy，公式与手写 CUDA 相同：warps_per_sm = min(硬件上限, floor(reg_file/(regs_per_thread*32)), floor(smem_cap/smem_per_block)*warps_per_block)。"
-        types: [optimization, profiling]
-        difficulty: [3]
-        kind: formula
-      - id: tvm_triton_lowering_driver
-        claim: "加载 Triton/TVM cubin 仍要求合法 CUDA context；无 GPU、驱动过旧或权限不足时失败点在 cuModuleLoadData，不是 IR verifier。把这类错误当 DSL 语法问题会调错方向。"
-        types: [debug, conceptual]
-        difficulty: [2, 3]
-        kind: failure
+- id: cuda_core
+  name: cuda.core
+  leaves:
+  - id: cuda_core_singleton
+    claim: cuda.core.Device 是按设备号的单例入口，set_current() 之后该进程里后续 cuda.core 分配与启动都绑到这一上下文。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: cuda_core_api
+    claim: Device.create_stream() 与 Device.allocate(nbytes, stream=stream) 是推荐 API；直接构造 Stream() 被文档禁止，因无法消歧义默认流。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cuda_core_buffer_size
+    claim: dev.allocate(n, stream=s) 得到的 Buffer.size = n 字节，不按元素计数；元素个数 = n / dtype.itemsize。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+  - id: cuda_core_stream_protocol
+    claim: cuda.core 识别 __cuda_stream__ 协议：对象方法返回 (0, int(cudaStream_t 地址)) 才能被 Device.create_stream(obj)
+      包装。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: cuda_core_set_current
+    claim: Device(id) 只拿到单例，不切换上下文；未 set_current() 就 allocate/create_stream 会失败或落到别的当前设备。这与 cudaSetDevice
+      是同一当前上下文。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: cuda_core_launch_sig
+    claim: 稳定 API 是 launch(stream, LaunchConfig(...), kernel, *args)，stream 为第一位置参；写成 launch(kernel, config,
+      stream=...) 不是 cuda.core 1.x 签名。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cuda_core_memory_resource
+    claim: DeviceMemoryResource 走 CUDA 11.2+ 流序 mempool；VirtualMemoryResource 走 cuMemCreate/Map。Device.allocate
+      默认前者，不会静默换成 VMM。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cuda_core_program
+    claim: Program(code, 'ptx'|'c++') 经 NVRTC/ptxas 得到 ObjectCode，再加载为 Kernel；arch 由 ProgramOptions 指定，例如
+      sm_90。这不是 nvcc 命令行包装器。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: cuda_core_default_stream
+    claim: LEGACY_DEFAULT_STREAM 与所有非空流隐式同步；CUDA 7 起的 PER_THREAD_DEFAULT_STREAM 可与 nonblocking 流并发。cuda.core
+      不鼓励把 None 当 legacy 默认流。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: cuda_core_buffer_close
+    claim: Buffer 记录 deallocation stream；close() 按该流序 cudaFreeAsync。换 set_deallocation_stream 不插入同步，调用者必须自己用
+      event 保证最后一次访问 happens-before free。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+    hints:
+    - kernel 还在用就 buffer.close()
+    - 换 dealloc stream 后立刻 GC
+- id: cute_dsl
+  name: CuTe DSL
+  leaves:
+  - id: cute_dsl_trace
+    claim: CUTLASS 4.x CuTe DSL 在 @cute.kernel 追踪 Python 数据流生成 IR，再编译成 cubin；运行时 Python 对象不会自动进 device
+      寄存器。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: cute_dsl_compile
+    claim: cute.compile(kernel, ...) 或等价 JIT 入口针对指定 sm_ 生成可启动对象；每次改 shape 常量可能触发重编译。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: cute_dsl_cutlass4
+    claim: CuTe Python DSL 属于 CUTLASS 4.x（cute.core / cutlass.cute），不是 cuda.core 的一部分，也不能在只装 cuda-python
+      的环境里 import 到。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: cute_dsl_capture_host
+    claim: 在 @cute.kernel 里捕获普通 Python list/Tensor 主机对象当闭包，编译期失败或生成非法地址，必须改成 cute.Tensor 或显式 pointer 参数。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+    hints:
+    - 闭包捕获 numpy.ndarray
+    - 把 torch.Tensor 当 smem
+  - id: cute_dsl_jit_vs_kernel
+    claim: '@cute.jit 编译 host 侧入口（可 launch kernel），@cute.kernel 才是 device 核；在 @cute.jit 里写 cute.arch.thread_idx()
+      没有 CTA 线程，语义非法。'
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: cute_dsl_from_dlpack
+    claim: cute.from_dlpack(t) 把 PyTorch/CuPy tensor 变成 cute.Tensor 视图，共享设备指针；它不拷贝、不改 dtype，只在 DLPack
+      元数据上建 layout。
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cute_dsl_arch
+    claim: cute.compile(..., options='--gpu-arch sm_90a') 或 sm_100a 决定能否发 TMA/WGMMA/UMMA；默认 arch 与当前 GPU
+      不一致时 JIT 失败或生成不可加载 cubin。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: cute_dsl_dynamic_loop
+    claim: 核内 Python for 若迭代次数在 trace 时是动态值，DSL 会生成设备循环；把 Python range(N) 的 N 当 host list 长度去索引闭包，仍会把主机对象编进核。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: cute_dsl_smem
+    claim: 共享内存必须经 DSL 的 smem allocator / cute.make_fragment 一类 API 声明，不能在 @cute.kernel 里 new 一个 Python
+      数组当 __shared__。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: cute_dsl_no_cache
+    claim: 装饰器 no_cache=True 时每次调用都重新 lowering；默认缓存按函数+常量特化键命中。shape 从 128 改到 256 会使缓存键变化并再次 JIT。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+- id: cutlass_python
+  name: CUTLASS Python
+  leaves:
+  - id: cutlass_python_op
+    claim: cutlass 的 Python GEMM 前端（cutlass.op.Gemm 或 4.x cute GEMM helper）在 host 侧拼 CollectiveBuilder
+      参数并 launch，不是 cuBLAS 句柄包装。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cutlass_python_gemm
+    claim: Python 侧指定 element_a/b/c、layout 与 tile/cluster 后 compile，缺 alignment 或 arch 不匹配会在 JIT 时失败而非运行时静默降到
+      SIMT。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: cutlass_python_align
+    claim: Tensor Core GEMM 要求 leading dimension 对齐到 16B（fp16 为 8 个元素，fp32 TF32 为 4 个元素）；Python 传入不齐的
+      ld 会无法选出 MMA atom。
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cutlass_python_sm100
+    claim: CUTLASS 4.x Python 可为 sm_100a 发出 UMMA/TMEM collective；同一脚本以 sm_90 编译不会分配 TMEM。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+  - id: cutlass_python_pkg
+    claim: CUTLASS 4.x 官方包是 nvidia-cutlass / nvidia-cutlass-dsl；PyPI 上无 nvidia- 前缀的 cutlass 包与 NVIDIA
+      CUTLASS 无关，import cutlass.cute 会失败。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: feature
+  - id: cutlass_python_cluster
+    claim: sm_90 GEMM 的 cluster_shape 例如 (2,1,1) 必须整除 grid；Python 传入 cluster=(2,2,1) 而设备不支持 multicast
+      时 compile/launch 失败，不会回退 1×1 cluster。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+  - id: cutlass_python_stream
+    claim: Python GEMM run/launch 必须传入与 tensor 设备一致的 cuda stream（cuda.core.Stream、torch.cuda.Stream 或
+      bindings 句柄）；默认流上与 PyTorch 非默认流并发会数据竞争。
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: cutlass_python_workspace
+    claim: 部分 schedule 需要 workspace 字节数 >0（split-K、某些 epilogue）；Python 侧未分配 workspace 就 run 会非法写或返回错误，不会自动
+      cudaMalloc。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: cutlass_python_layout
+    claim: element_a 的 layout 是 row/column 的 CuTe 语义，不是 numpy 默认 C 连续就等于 row-major GEMM；转置标志与 ld 必须和 DLPack
+      strides 一致。
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cutlass_python_cpu_tensor
+    claim: 把 device='cpu' 的 torch.Tensor 交给 CUTLASS Python GEMM 不会自动 H2D；要么显式 .cuda()，要么失败。DSL 不会替你调 cudaMemcpy。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+- id: kernel_dtype
+  name: kernel dtype 绑定
+  leaves:
+  - id: kernel_dtype_match
+    claim: device kernel 模板类型必须与 Buffer/DLPack 的元素宽度一致：fp16 kernel 读 fp32 buffer 会按半精度解译位型，数值全错。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: kernel_dtype_names
+    claim: CuTe DSL 用 cute.Float16/cute.Float32 等类型对象绑定；与 numpy.float16、torch.float16 名字相近但不是同一 Python
+      类型。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: kernel_dtype_itemsize
+    claim: 元素个数 N = nbytes / itemsize，其中 cute.Float16/cutlass.Float16 的 itemsize = 2，Float32 = 4，Float8
+      变体 = 1。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+  - id: kernel_dtype_mismatch
+    claim: 把 torch.float32 的 DLPack 缓冲按 Float16 kernel 启动不会自动转换，属于静默错数，除非显式 copy/cast。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: kernel_dtype_bf16
+    claim: __nv_bfloat16 / cute.BFloat16 的 itemsize=2，与 torch.bfloat16 位型兼容，但 numpy 无原生 bfloat16 时不能用
+      np.float16 缓冲区冒充。
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: kernel_dtype_fp8
+    claim: FP8 E4M3/E5M2 的 itemsize=1，CUTLASS/CuTe 还要配套 scale（如 UE8M0）；只改 Python dtype 名字不提供 scale tensor
+      不能在 sm_90/sm_100 Tensor Core 上正确累加。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: kernel_dtype_typestr
+    claim: __cuda_array_interface__ 的 typestr 如 '<f4' 表示小端 float32、itemsize=4；与 kernel 的 T=int32 宽度碰巧相同仍是错解释，检查的是类型字符不是长度。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: kernel_dtype_vector
+    claim: kernel 参数写成 float4* 时，Python 侧仍按 16 字节/元素计 N_vec = nbytes / 16，且指针必须 16B 对齐；按 scalar float
+      的 N=nbytes/4 启动会越界或错向量化。
+    types:
+    - layout
+    - syntax
+    difficulty:
+    - 3
+    kind: formula
+  - id: kernel_dtype_ptr_int
+    claim: cuda.bindings 启动时常把设备指针以 Python int 传入；int 是地址不是标量实参。把 Buffer 对象直接塞进 cuLaunchKernel 的 kernelParams
+      类型不匹配。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: kernel_dtype_complex
+    claim: cuFloatComplex / complex64 的 itemsize=8（两个 float）；CAI typestr 为 '<c8'。按 float32 kernel 读会把实部虚部拆成相邻线程的两个元素。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+- id: launch_interop
+  name: 启动与互操作
+  leaves:
+  - id: launch_interop_config
+    claim: cuda.core.launch(kernel, LaunchConfig(grid, block, ...), *args, stream=stream) 按该 stream 顺序入队；grid/block
+      是线程格而非 CTA 字节。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: launch_interop_dlpack
+    claim: cuda.core.Buffer 实现 __dlpack__，cupy.from_dlpack / torch.from_dlpack 零拷贝视图共享同一设备指针与生命周期风险。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: launch_interop_threads
+    claim: LaunchConfig 总线程数 = grid.x*grid.y*grid.z * block.x*block.y*block.z；只设 block=256 而 grid=None
+      不会自动按 N 推导。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: formula
+  - id: launch_interop_wrong_device
+    claim: 未 Device.set_current() 就 launch，或 stream 属于 GPU0 而 Buffer 在 GPU1，会抛设备不匹配或写入错误 GPU。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: launch_interop_dyn_smem
+    claim: LaunchConfig.shmem_size 是动态共享内存字节，与核内 static __shared__ 相加 ≤ 设备每块上限；Python 漏设时动态 smem=0，核内
+      extern shared 读到空。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: launch_interop_cluster
+    claim: sm_90+ LaunchConfig 可带 cluster 维；cluster 非 (1,1,1) 时必须 cooperative/cluster launch 路径，普通 launch
+      会忽略或失败，不会静默变成单 CTA。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: launch_interop_torch_ptr
+    claim: PyTorch 设备指针是 tensor.data_ptr() 返回的 Python int；与 cuda.core.Buffer.handle 一样都是 CUdeviceptr 宽度的地址，不是
+      numel。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: launch_interop_cupy_ptr
+    claim: CuPy 用 ndarray.data.ptr（int）作为设备地址；launch 前必须保证该数组未搬回主机。对已 .get() 的 numpy 副本取 ptr 是主机地址。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: launch_interop_occupancy
+    claim: Python 侧可查 max_active_blocks，但 LaunchConfig.block 仍须满足寄存器/smem 约束；超限时 launch 返回 cudaErrorLaunchOutOfResources，不会自动降
+      block。
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: launch_interop_arg_count
+    claim: kernel 形参数量必须与 launch 的 *args 一致；少传导致读未定义参数，多传被忽略或 Driver API 报 invalid。Python 默认参数不会自动填进设备核。
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+- id: cuda_bindings
+  name: cuda.bindings
+  leaves:
+  - id: cuda_bindings_layers
+    claim: cuda.bindings 提供 Driver/Runtime/NVRTC/nvJitLink/NVVM/cuFile/NVML 的 1:1 低层绑定；cuda.core 是其上层
+      Pythonic API，不是另一套 C ABI。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: cuda_bindings_tuple
+    claim: 多数 cuda.bindings.driver.cu* 返回 (CUresult, *outputs)；忽略 err 只解包指针会在失败时用垃圾句柄。这与抛异常的 cuda.core
+      不同。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cuda_bindings_cuinit
+    claim: 使用 cuda.bindings.driver 必须先 cuInit(0) 再 cuDeviceGet/cuCtxCreate 或保留 primary context；只 import
+      模块不会创建上下文。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: cuda_bindings_runtime_vs_driver
+    claim: cuda.bindings.runtime.cudaMalloc 走 Runtime primary context；driver.cuMemAlloc 走当前 CUcontext。混用且当前
+      ctx ≠ primary 时指针不能互相 cudaFree/cuMemFree。
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cuda_bindings_nvrtc
+    claim: cuda.bindings.nvrtc.nvrtcCreateProgram/nvrtcCompileProgram 在 Python 里 JIT CUDA C++；arch 用选项
+      '--gpu-architecture=sm_80'。它不启动核，只产出 PTX/cubin。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: cuda_bindings_cuda12
+    claim: cuda.bindings 的符号随 CUDA Toolkit 走：CUDA 12.x 绑定没有 CUDA 13 才加入的 driver 入口；版本检查要用 cudaDriverGetVersion，不能假设
+      pip 包自带完整驱动。
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: cuda_bindings_deviceptr
+    claim: CUdeviceptr 在绑定里常是 Python int，宽度 = 64 bit 地址；把它当 np.int32 截断后 cuMemcpy 会变成非法低 32 位地址。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: cuda_bindings_launch
+    claim: cuLaunchKernel 的 kernelParams 是 void** 风格的参数数组，Python 侧需按绑定文档构造；不能把 dict 或 ctypes 结构体直接当 args
+      元组塞给 cuda.core.launch。
+    types:
+    - syntax
+    - code_complete
+    difficulty:
+    - 3
+    kind: api
+  - id: cuda_bindings_error_ignore
+    claim: err != CUDA_SUCCESS 仍继续 cuMemFree 下一个句柄，会在错误上下文里二次失败并把 sticky error 留给 Runtime。应用必须先查 err 再使用
+      out 参数。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cuda_bindings_not_dsl
+    claim: cuda.bindings 不是 kernel DSL：不能在 Python 函数上加装饰器得到 device 核。写核仍需 NVRTC 字符串、预编译 cubin，或 CuTe/Numba
+      等编译器。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    kind: mechanism
+- id: array_interface
+  name: CUDA Array Interface
+  leaves:
+  - id: array_interface_keys
+    claim: __cuda_array_interface__ 必须含 shape、typestr、data、version；缺 data 或 version 的对象不是合法 CAI，cuda.core/Numba
+      应拒绝而不是猜指针。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: array_interface_v3_stream
+    claim: CAI v3 的可选键 stream 描述生产者流：None 表示无需同步，1=legacy 默认流，2=per-thread 默认流，其它 int=cudaStream_t 地址。
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 3
+    kind: feature
+  - id: array_interface_stream_zero
+    claim: CAI 禁止 stream=0，因 0 无法区分 None、legacy 与 per-thread 默认流；实现若返回 0，消费者同步语义未定义。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    kind: failure
+  - id: array_interface_data
+    claim: data 是 (ptr:int, readonly:bool)；ptr 为设备地址。readonly=True 时消费者不得写入，否则相对生产者是 data race，CAI 本身不插入
+      fence。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: array_interface_strides
+    claim: strides=None 表示 C 连续，nbytes = product(shape) * itemsize(typestr)；显式 strides 以字节计。把元素 stride
+      当字节 stride 会按 dtype 放大偏移。
+    types:
+    - layout
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: array_interface_vs_dlpack
+    claim: DLPack 经 __dlpack__(stream=...) 建立流序；CAI v3 用字典里的 stream 键。cuda.core 的 StridedMemoryView 先试
+      DLPack 再 CAI，两者都没有则 BufferError。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: array_interface_typestr
+    claim: typestr 遵循 NumPy 数组接口：'<f2' 为小端 fp16、itemsize=2。与 kernel dtype 比较应看 typestr 而不是 Python 变量名
+      dtype。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: array_interface_version
+    claim: 当前规范 version=3；只实现 v2 的导出者没有 stream 键，消费者不得把缺失当成 legacy 默认流，应视为无需同步或拒绝。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: array_interface_mask
+    claim: 可选 mask 描述有效元素；Numba CUDA 对带 mask 的 CAI 对象 raise NotImplementedError。有 mask 时不能当 dense 缓冲 launch。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: array_interface_shape0
+    claim: shape 含 0 维时 product=0，ptr 仍可能非空；kernel 不得用 ptr[0] 探活。N = ∏ shape_i，grid 应按 N=0 走空 launch 而不是假设至少
+      1 元素。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+- id: stream_objects
+  name: Python 流对象
+  leaves:
+  - id: stream_objects_protocol
+    claim: __cuda_stream__ 协议当前 version=0：方法返回 (0, handle_int)，handle_int 为 cudaStream_t 的指针值。返回 (handle,)
+      或缺 version 不能被 cuda.core 包装。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: stream_objects_from_handle
+    claim: Stream.from_handle(int) 把已有 cudaStream_t 包成不拥有生命周期的 cuda.core.Stream；关闭该包装不得 cuStreamDestroy
+      外部库仍持有的流。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: stream_objects_torch
+    claim: PyTorch 2.10+ 的 torch.cuda.Stream 实现 __cuda_stream__，可直接 Device.create_stream(torch.cuda.current_stream())；更早版本要
+      .cuda_stream 句柄手动包。
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: stream_objects_cupy
+    claim: cupy.cuda.ExternalStream(ptr) 或 Stream.ptr 提供运行时句柄；CuPy 默认流与 cuda.core LEGACY_DEFAULT_STREAM
+      不是自动同一队列，混用要显式 wait。
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: stream_objects_nonblocking
+    claim: Device.create_stream(options=StreamOptions(nonblocking=True)) 对应 cudaStreamNonBlocking，不与 legacy
+      默认流隐式同步；漏设则与默认流互相串行。
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: stream_objects_priority
+    claim: StreamOptions.priority 落在 cudaDeviceGetStreamPriorityRange 返回的 [least, greatest]；超出范围被钳位或创建失败，不会变成另一个设备的流。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: stream_objects_wait
+    claim: stream.wait(event_or_stream) 在该流上插入等待；传入实现了 __cuda_stream__ 的对象按流处理。host 上 Python 的 stream.sync()
+      才是 CPU 阻塞。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: stream_objects_no_ctor
+    claim: 直接 Stream() 构造在 cuda.core 中被禁止，因为无法区分 legacy/per-thread/新流；必须 Device.create_stream 或 from_handle。
+    types:
+    - syntax
+    - counterfactual
+    difficulty:
+    - 2
+    kind: failure
+  - id: stream_objects_capture
+    claim: 在 cuda.core GraphBuilder / stream capture 期间，该 Stream 上的 launch 与 mallocAsync 被录进图；在另一未捕获 Stream
+      上操作不会进图，图与即时执行交错。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: stream_objects_numba
+    claim: numba.cuda.stream() 创建的是 Numba 自己的流包装，需 .handle 或 __cuda_stream__ 才能给 cuda.core.launch；把 Numba
+      stream 对象当第一位置 int 传入 bindings 会类型错误。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+- id: cupy_numba_runtime
+  name: CuPy/Numba 运行时约束
+  leaves:
+  - id: cupy_numba_runtime_context
+    claim: CuPy 默认用 Runtime primary context，Numba CUDA 走 Driver 当前上下文；两者未指向同一 CUcontext 时，CuPy 数组指针在 Numba
+      kernel 里是非法地址。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cupy_numba_runtime_pool
+    claim: CuPy MemoryPool 缓存自己的 cudaMalloc 块，与 CUDA 11.2 mempool（cudaMallocAsync）默认不是同一池；两边峰值显存相加，cudaFree
+      不能回收对方缓存。
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cupy_numba_runtime_cai
+    claim: cupy.ndarray 导出 __cuda_array_interface__，Numba 可零拷贝读该指针；生命周期仍由 CuPy 池管理，Numba 核尚未结束就让 ndarray
+      出作用域会 use-after-free。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cupy_numba_runtime_stream
+    claim: cupy.cuda.Stream 与 numba.cuda.stream 互不等价；跨库要在消费者流上 wait 生产者流。仅 Python 线程 join 不建立 CUDA happens-before。
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cupy_numba_runtime_device
+    claim: cupy.cuda.Device(1).use() 与 numba.cuda.select_device(1) 都必须调用，只设 CUDA_VISIBLE_DEVICES 不会把已创建在
+      GPU0 的数组搬到 GPU1。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cupy_numba_runtime_copy
+    claim: numba.cuda.to_device(h) 发起 H2D 拷贝；对已在设备上的 CuPy 数组再 to_device 会再分配并拷贝，而不是认 CAI 零拷贝，除非用 as_cuda_array。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cupy_numba_runtime_smem
+    claim: Numba @cuda.jit 的 stream.shared.array 受每块 smem 上限约束（如 sm_80 每块最多 99/164 KiB 配置）；超限 compile/launch
+      失败，CuPy ElementwiseKernel 同样受该硬件上限。
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cupy_numba_runtime_sync
+    claim: CuPy 在读回主机（.get()/print）时会同步其当前流；Numba 默认在 kernel 后不自动 sync。混用时 host 读 CuPy 视图可能早于 Numba kernel
+      完成。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cupy_numba_runtime_async_alloc
+    claim: 若把 CuPy 配置到 CUDA 11.2+ cudaMallocAsync 分配器，块的可用性是流序的；Numba 在另一流上立刻用该指针仍需 wait。这是 CUDA runtime
+      约束，不是 CuPy 特有 bug。
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: cupy_numba_runtime_visible
+    claim: CUDA_VISIBLE_DEVICES=1 时 CuPy/Numba 的 device 0 是物理 GPU1；cuda.core.Device(0) 在同一进程里也是这张卡。用 nvidia-smi
+      序号直接 Device(1) 会越界。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+- id: tvm_triton_lowering
+  name: TVM/Triton 降到 CUDA
+  leaves:
+  - id: tvm_triton_lowering_not_api
+    claim: Triton IR / tl.program_id / tl.store 不是 CUDA Runtime API；它们经编译器变成 PTX/cubin，再由 CUDA driver
+      加载。不能把 tl.device_print 当成 cudaPrintf API 文档。
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: tvm_triton_lowering_ptx
+    claim: Triton 最终调用 ptxas/driver JIT 得到 sm_xx cubin，受该 arch 的寄存器、smem、TMA 能力约束；Triton 语言特性不增加硬件上限。
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: tvm_triton_lowering_smem_cap
+    claim: Triton kernel 声明的 smem 字节必须 ≤ 当前设备每块上限（例如 A100 默认 164 KiB、H100 228 KiB）；超限在 compile 或 launch
+      失败，不是 Triton 再向 CUDA 申请一块独立 smem 堆。
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: tvm_triton_lowering_launch
+    claim: Triton/TVM 的 grid 最终走 cuLaunchKernel/cudaLaunchKernel；grid 维仍是 CTA 数，block 由编译器固定。Python 里的
+      triton.autotune 不能突破 maxGridSize。
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: tvm_triton_lowering_tvm_codegen
+    claim: TVM CUDA codegen 产出 CUDA C++/PTX 再 nvcc/nvrtc；device API 映射到 cudaMalloc/cudaMemcpy/stream。TVM
+      的 tir.Call 不是可在 Python 直接调的 CUDA 符号。
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: tvm_triton_lowering_stream
+    claim: tvm.runtime.Device 或 Triton 的 torch.cuda.current_stream() 最终仍是 cudaStream_t；与 cuda.core 互操作必须走句柄/协议，不能假设
+      TVM runtime 认识 Stream 对象。
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: tvm_triton_lowering_no_device_malloc
+    claim: Triton kernel 内不能调用 cudaMalloc；设备堆分配是 CDP/device runtime 路径，Triton 降核默认不含设备 malloc。需要临时缓冲应在
+      host 侧分配再当指针传入。
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    kind: failure
+  - id: tvm_triton_lowering_arch
+    claim: Triton 的 target 如 cuda:90 必须 ≤ 实际 GPU 的 compute capability；在 sm_80 设备上加载 sm_90 cubin 失败。这是
+      CUDA 模块加载规则，与 Triton 调度器无关。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: tvm_triton_lowering_occupancy
+    claim: 降核后的寄存器/smem 决定 occupancy，公式与手写 CUDA 相同：warps_per_sm = min(硬件上限, floor(reg_file/(regs_per_thread*32)),
+      floor(smem_cap/smem_per_block)*warps_per_block)。
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: formula
+  - id: tvm_triton_lowering_driver
+    claim: 加载 Triton/TVM cubin 仍要求合法 CUDA context；无 GPU、驱动过旧或权限不足时失败点在 cuModuleLoadData，不是 IR verifier。把这类错误当
+      DSL 语法问题会调错方向。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure

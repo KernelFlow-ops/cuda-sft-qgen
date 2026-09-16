@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -28,6 +28,7 @@ class Leaf:
     difficulty: tuple[int, ...]
     hints: tuple[str, ...] = ()
     kind: str = ""
+    retired: bool = False
 
     @property
     def path(self) -> list[str]:
@@ -91,6 +92,7 @@ def _leaf_from_item(
         difficulty=tuple(item.get("difficulty") or [2]),
         hints=tuple(item.get("hints") or []),
         kind=kind,
+        retired=bool(item.get("retired") or False),
     )
 
 
@@ -212,6 +214,8 @@ def _leaf_record(item: dict[str, Any], l3_id: str, claim: str) -> dict[str, Any]
     hints = item.get("hints") or []
     if hints:
         rec["hints"] = list(hints)
+    if item.get("retired"):
+        rec["retired"] = True
     return rec
 
 
@@ -251,6 +255,8 @@ def merge_leaves(
                 child = c
                 break
         if child is None:
+            if not allow_new_domains:
+                continue
             child = {"id": l2_id, "name": item.get("l2_name", l2_id), "leaves": []}
             domain.setdefault("children", []).append(child)
         rec = _leaf_record(item, str(l3_id), str(claim))
@@ -267,3 +273,61 @@ def merge_leaves(
         existing.add(str(l3_id))
         added += 1
     return added
+
+
+def patch_leaf(
+    taxonomy: Taxonomy,
+    l3_id: str,
+    *,
+    claim: str | None = None,
+    hints: list[str] | None = None,
+) -> bool:
+    """Update claim/hints on an existing leaf. Return True if found."""
+    found = False
+    new_claim = str(claim).strip() if claim else None
+    new_hints = [str(h) for h in hints] if hints is not None else None
+    for i, leaf in enumerate(taxonomy.leaves):
+        if leaf.l3_id != l3_id:
+            continue
+        taxonomy.leaves[i] = replace(
+            leaf,
+            claim=new_claim if new_claim else leaf.claim,
+            hints=tuple(new_hints) if new_hints is not None else leaf.hints,
+        )
+        found = True
+        break
+    for domain in taxonomy.domains:
+        for child in domain.get("children") or []:
+            for item in child.get("leaves") or []:
+                if str(item.get("id")) != l3_id:
+                    continue
+                if new_claim:
+                    item["claim"] = new_claim
+                if new_hints is not None:
+                    if new_hints:
+                        item["hints"] = list(new_hints)
+                    else:
+                        item.pop("hints", None)
+                found = True
+    return found
+
+
+def set_leaf_retired(taxonomy: Taxonomy, l3_id: str, retired: bool = True) -> bool:
+    """Set retired on in-memory domains + Leaf list. Return True if found."""
+    found = False
+    for i, leaf in enumerate(taxonomy.leaves):
+        if leaf.l3_id == l3_id:
+            taxonomy.leaves[i] = replace(leaf, retired=retired)
+            found = True
+            break
+    for domain in taxonomy.domains:
+        for child in domain.get("children") or []:
+            for item in child.get("leaves") or []:
+                if str(item.get("id")) != l3_id:
+                    continue
+                if retired:
+                    item["retired"] = True
+                else:
+                    item.pop("retired", None)
+                found = True
+    return found

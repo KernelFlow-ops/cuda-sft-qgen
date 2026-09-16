@@ -52,24 +52,45 @@ _CUDA_APIS = tuple(
             "cp_async",
             "make_layout",
             "make_tensor",
-            "logical_divide",
-            "logical_product",
-            "tiled_partition",
-            "coalesced_group",
-            "TiledCopy",
-            "TiledMMA",
-            "Copy_Atom",
+            "make_shape",
+            "make_stride",
             "composition",
             "complement",
+            "coalesce",
+            "filter",
+            "dice",
+            "tile_to_shape",
+            "zipped_divide",
+            "logical_divide",
+            "logical_product",
+            "blocked_product",
+            "raked_product",
+            "flat_product",
+            "ranked_product",
+            "partition_S",
+            "partition_D",
+            "local_partition",
+            "tiled_partition",
+            "coalesced_group",
             "partition_fragment",
             "local_tile",
-            "local_partition",
+            "TiledCopy",
+            "TiledMMA",
+            "ThrCopy",
+            "ThrMMA",
+            "Copy_Atom",
             "wmma::",
             "mma.sync",
             "wgmma.mma_async",
             "cute::Tensor",
             "cute::Layout",
             "Swizzle",
+            "cutlass::gemm",
+            "cutlass::conv",
+            "cutlass::layout::RowMajor",
+            "cutlass::layout::ColumnMajor",
+            "cutlass::arch::Sm80",
+            "cutlass::arch::Sm90",
             "cublasLtMatmul",
             "ncclAllReduce",
             "cub::DeviceReduce",
@@ -137,6 +158,18 @@ def speech_act(text: str) -> str:
     return "other"
 
 
+def _length_bucket(length: int) -> str:
+    """Bucket length to reduce false matches between very different sized questions."""
+    if length < 100:
+        return "S"
+    elif length < 250:
+        return "M"
+    elif length < 500:
+        return "L"
+    else:
+        return "XL"
+
+
 def skeletonize(text: str) -> str:
     text = normalize_text(text)
     text = _CODE_FENCE.sub(" {CODE} ", text)
@@ -157,7 +190,8 @@ def skeletonize(text: str) -> str:
     text = re.sub(r"(?:\{ID\}\s*){2,}", "{ID} ", text)
     text = re.sub(r"\s+", " ", text).strip()
     act = speech_act(text)
-    return f"[{act}] {text}"
+    length_bucket = _length_bucket(len(text))
+    return f"[{act}][{length_bucket}] {text}"
 
 
 def skeleton_tokens(skeleton: str) -> set[str]:
