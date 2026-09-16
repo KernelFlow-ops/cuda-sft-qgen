@@ -1,0 +1,980 @@
+id: T08
+name: Hopper 与 Blackwell 新硬件
+children:
+- id: tma
+  name: TMA
+  leaves:
+  - id: tma_desc
+    claim: TMA descriptor 的 box size、stride、OOB fill 与 128B 对齐要求
+    types:
+    - syntax
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    hints:
+    - box size 与 global stride 不一致
+    - OOB fill 为 zero 时越界读
+    - 128B 对齐失败时 TMA 是否能发
+    kind: feature
+  - id: tma_multicast
+    claim: cluster 内 TMA multicast 到多个 CTA 的共享内存，以及 mbarrier 完成信号
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+  - id: tma_box_stride
+    claim: TMA descriptor 的 box size 是每次搬运的坐标盒，global stride 是元素步长；box.x * elemSize 必须满足 16B 对齐
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: tma_mbarrier_complete
+    claim: TMA 完成信号打在 mbarrier 上；consumer 必须 wait 同一个 barrier 事务计数，用 __syncthreads 代替会读到未完成数据
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: tma_gmem_align
+    claim: TMA 全局基址必须 16B 对齐；1B 对齐的 packed 量化缓冲不能直接当 tensor map 源
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    kind: failure
+  - id: tma_expect_tx
+    claim: 发 TMA 前 mbarrier.expect_tx 必须加上本次字节数 bytes；expect_tx == TMA 完成字节，少了 wait 会提前放行，多了会死等
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: tma_1d_vs_2d
+    claim: cp.async.bulk.tensor.1d 与 .2d 的 box 维数不同；用 1d 去搬 2d tile 会忽略第二维 stride，变成线性错切
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: tma_sm90_only
+    claim: TMA（cp.async.bulk.tensor）从 sm_90 起；sm_80 只有 cp.async.ca/cg，不能把 tensormap 当 Ampere 路径
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+- id: cluster
+  name: Thread Block Cluster
+  leaves:
+  - id: dsmem
+    claim: distributed shared memory 跨 CTA 访问的映射、延迟与死锁风险
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: cluster_launch
+    claim: cluster launch 维度必须整除、与 cooperative/grid 同步的关系
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: cluster_dsmem_map
+    claim: dsmem 把远端 CTA 的 smem 映射进本 CTA 地址空间，访问延迟高于本地 smem；在未 cluster.sync 前读远端是数据竞争
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: cluster_size_power
+    claim: Hopper cluster 尺寸每维须整除 grid，常用 2×1×1 或 2×2×1；8 个 CTA 的 cluster 受 SM 驻留与 multicast 资源限制
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cluster_max_sm90
+    claim: sm_90 上 cluster 内 CTA 数上限通常是 8（查询 cudaDevAttrMaxCtaPerCluster）；写成 16×1×1 会 launch 失败
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: cluster_sync
+    claim: cluster.sync 等待 cluster 内全部 CTA 到达；它不能替代 mbarrier 上的 TMA 事务计数
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 3
+    kind: failure
+  - id: cluster_rank
+    claim: block_rank_in_cluster 是 cluster 内线性编号，multicast 掩码按该 rank 置位；用 blockIdx.x 当 rank 在 2D cluster 上会错
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: formula
+  - id: cluster_grid_div
+    claim: gridDim 每维必须能被 clusterDim 整除；grid=3、cluster=2 是非法 launch
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+- id: warp_spec
+  name: Warp specialization
+  leaves:
+  - id: producer_consumer
+    claim: producer warp 做 TMA、consumer warp 做 MMA 的角色划分与 barrier 协议
+    types:
+    - optimization
+    - conceptual
+    - code_complete
+    difficulty:
+    - 3
+    - 4
+    hints:
+    - mbarrier arrive/wait 配对
+    - producer 未 wait 就让 consumer MMA
+    - warp-group 4+4 角色划分
+    kind: feature
+  - id: warp_spec_role_count
+    claim: producer warp 只做 TMA arrive，consumer warp-group 做 MMA；角色数必须与 mbarrier expect 计数一致，4+4 与 1+7
+      协议不同
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: warp_spec_early_mma
+    claim: consumer 在 producer 第一次 arrive 之前发 wgmma 会读空 smem，属于静默数值错误而非 launch 失败
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: warp_spec_elect
+    claim: elect.sync 选出 lane0 发 TMA；非 elected 线程必须跳过 tensormap 指令，否则重复 expect_tx
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: warp_spec_reg_split
+    claim: setmaxnreg 把寄存器预算在 producer/consumer 间重分配；producer 降到 24 寄存器、consumer 升到 232 一类配置是编译期约定
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+  - id: warp_spec_wg_align
+    claim: warp-group 必须 4 个连续 warp（128 线程）且 warp id 对齐到 4；用任意 4 个 warp 拼 wgmma 非法
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+  - id: warp_spec_barrier_id
+    claim: named barrier / mbarrier 的 id 按角色阶段分开；producer 的 empty 信号与 consumer 的 full 信号不能共用同一 id
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: warp_spec_pingpong
+    claim: pingpong 两个 consumer WG 各绑一套 pipeline stage 与 barrier；共用同一 mbarrier 对象会互相放行
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 4
+    kind: mechanism
+- id: blackwell
+  name: Blackwell TMEM / UMMA
+  leaves:
+  - id: tmem
+    claim: Tensor Memory (TMEM) 作为 MMA 累加器存储层次，不能当通用 smem 用
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+  - id: umma
+    claim: UMMA 指令与 TMEM 操作数、相对 Hopper WGMMA 的编程模型变化
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+  - id: blackwell_tmem_not_smem
+    claim: TMEM 是 MMA 累加器专用存储，不能用普通 ld/st.shared 寻址；容量按列分配，超分配会在编译或运行期失败
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+  - id: blackwell_umma_operand
+    claim: UMMA 的 A/B 可来自 smem 或 TMEM，累加器在 TMEM；把 Hopper WGMMA 的 smem-desc 原样拿来当 UMMA 操作数不合法
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 4
+    kind: feature
+  - id: blackwell_tcgen05
+    claim: sm_100a 的 UMMA 编码为 tcgen05.mma，由 CTA 内 elected 线程发射；sm_90 的 wgmma 不能寻址 TMEM
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+  - id: blackwell_shape_2x
+    claim: sm_100a tcgen05.mma 单 CTA 形状可达约 m128n256，面积约是 Hopper wgmma 最大 m64n256 的 2×
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 4
+    kind: numeric
+  - id: blackwell_sm120
+    claim: GeForce Blackwell sm_120 没有 TMEM 也没有 tcgen05.*，必须回退 mma.sync/wgmma，不能把 sm_100a cubin 当 sm_120 跑
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+  - id: blackwell_scale_ops
+    claim: sm_100 块缩放是 UMMA 操作数，不是 epilogue 后乘；Hopper FP8 无硬件块 scale，同一量化 layout 不能跨代 MMA
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+- id: tma_encode
+  name: TMA 描述符编码
+  leaves:
+  - id: tma_encode_oob
+    claim: TMA OOB fill 为 zero 时越界读返回 0，不会 fault；当成边界检查会漏过错误 box
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: tma_encode_interleave
+    claim: TMA 支持的 interleave/swizzle 模式是硬件枚举，任意 CuTe swizzle 不一定能直接当 TMA 模式
+    types:
+    - layout
+    - syntax
+    difficulty:
+    - 4
+    kind: api
+  - id: tma_encode_dim
+    claim: TMA 最多 5 维张量描述；更高维必须把尾维 fold 进 stride
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: tma_encode_elem
+    claim: descriptor 的 element size 必须匹配实际 dtype；half 当 float 配 box 会导致 2× 范围错误
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    kind: failure
+  - id: tma_encode_tensormap
+    claim: tensormap.replace / cudaTensormapReplace* 在运行时改 box 或地址；kernel 内改完需要 tensormap.cp_fence
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 4
+    kind: api
+  - id: tma_encode_swizzle_128
+    claim: TMA swizzle 128B 要求全局 stride 与 box 满足 128B 约束；32B swizzle 的 desc 不能喂给 128B wgmma 行
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+  - id: tma_encode_const_ptr
+    claim: tensormap 本身常放在 const/global，由 host 填好再传 kernel；把运行时算的 box 写进只读 map 会 fault
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: tma_encode_l2_hint
+    claim: TMA 可带 L2 eviction 提示；它只影响该次搬运的 cache 策略，不改变 tensormap 的几何
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+- id: tmem_alloc
+  name: TMEM 分配
+  leaves:
+  - id: tmem_alloc_columns
+    claim: Blackwell TMEM 按列分配给 CTA，UMMA 累加器占用列数由 shape 决定，超分配无法当 smem 溢出池
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 4
+    kind: feature
+  - id: tmem_alloc_not_generic
+    claim: 不能 cudaMalloc 出 TMEM；它不是全局堆，也不是 __shared__ 别名
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 4
+    kind: api
+  - id: tmem_alloc_pair
+    claim: 部分 SM100 配置下两个 CTA 配对共享 TMEM 视图，单 CTA kernel 假设独占会读到对方累加器
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: failure
+  - id: tmem_alloc_dtype
+    claim: TMEM 存的是 MMA 累加 dtype，把 FP32 累加器当 FP16 读出会截断而非类型提升
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: tmem_alloc_32col
+    claim: tcgen05.alloc 的列数必须是 32 的倍数；alloc 17 列非法。dealloc 前仍对该列发 tcgen05.mma 非法
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 4
+    kind: numeric
+  - id: tmem_alloc_256kib
+    claim: sm_100 每个 SM 的 TMEM = 128 lanes × 512 columns × 4 bytes = 256 KiB，最大单 CTA 累加器常用 256 columns（128 KiB）
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 4
+    kind: formula
+  - id: tmem_alloc_permit
+    claim: tcgen05.relinquish_alloc_permit 之后本 CTA 不能再 alloc；配对 CTA 的分配窗口也受此影响
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 4
+    kind: api
+  - id: tmem_alloc_addr
+    claim: TMEM 地址是列索引空间，不是 byte 指针；把列号当 smem 字节偏移去 ld.shared 是另一块存储
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 4
+    kind: failure
+- id: sm100_pair
+  name: SM100 CTA 配对
+  leaves:
+  - id: sm100_pair_cluster
+    claim: Blackwell 上部分 UMMA 路径依赖 CTA pair/cluster 拓扑，把 Hopper 的 1-CTA kernel 原样搬过来会缺操作数
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+  - id: sm100_pair_barrier
+    claim: 配对 CTA 之间需要约定 barrier，不能只用 CTA 内 __syncthreads 同步对方 TMEM 写
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 4
+    kind: failure
+  - id: sm100_pair_launch
+    claim: launch 维必须满足 pair 约束（偶数 CTA 等），奇数 grid 可能非法或留一个 CTA 无伙伴
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 4
+    kind: numeric
+  - id: sm100_pair_wgmma_gone
+    claim: UMMA+TMEM 取代 Hopper 的 wgmma+smem desc 作为累加路径，不是在原指令上加一个 flag
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: sm100_pair_tmem_view
+    claim: pair 模式下两 CTA 看到的 TMEM 列窗口可能交错或共享；各自按 0..N 独占列号会互相覆盖累加器
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 4
+    kind: failure
+  - id: sm100_pair_multicast
+    claim: 配对 CTA 的 TMA multicast 掩码必须覆盖伙伴；只填本 CTA 时伙伴 MMA 读空 smem
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 4
+    kind: feature
+  - id: sm100_pair_elect
+    claim: 每个 CTA 仍要 elect 自己的 TMA/UMMA 发射线程；不能假设伙伴 CTA 的 elect 对本 CTA 生效
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: sm100_pair_archtag
+    claim: CUTLASS Sm100 特化走 tcgen05/UMMA 与 TMEM 分配；ArchTag=Sm90 的同一 builder 不能生成 TMEM 主循环
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 4
+    kind: feature
+- id: tma_bulk
+  name: cp.async.bulk.tensor
+  leaves:
+  - id: tma_bulk_mbarrier
+    claim: cp.async.bulk.tensor.* 把完成事件发到指定 mbarrier，不经过 cp.async.commit_group 那套组计数
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: tma_bulk_shared_cta
+    claim: sm_90 上目的空间 shared::cluster 才能 multicast 到远端 CTA smem；shared::cta 只写本 CTA
+    types:
+    - conceptual
+    - layout
+    difficulty:
+    - 4
+    kind: feature
+  - id: tma_bulk_multicast_mask
+    claim: multicast 掩码是 cluster 内 CTA 位图；mask=0x1 只写 rank0，shape=(2,1) 时 rank1 得不到数据
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 4
+    kind: formula
+  - id: tma_bulk_prefetch
+    claim: cp.async.bulk.prefetch.tensor 只填 L2 不写 smem；把它当 TMA load 用，smem 仍是旧值
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: tma_bulk_reduce
+    claim: 部分 ISA 提供 bulk store/reduce 到 global；那不是 MMA 累加器归约，不能替代 epilogue 写 C
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 4
+    kind: api
+  - id: tma_bulk_smem_align
+    claim: 目的 smem 地址要满足 TMA 128B/swizzle 对齐；只 16B 对齐的动态 smem 切片可能无法当 128B swizzle box
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 4
+    kind: failure
+  - id: tma_bulk_im2col
+    claim: TMA im2col 模式按卷积窗口填 box，几何与普通 GEMM 2d box 不同；用 GEMM desc 做 conv 会读错 halo
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+  - id: tma_bulk_cga
+    claim: cluster 级 bulk copy 的 mbarrier 必须位于执行 TMA 的 CTA 的 smem；在远端 CTA 的 barrier 上 expect 不会收到本地 TMA 完成
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: failure
+- id: mbarrier_tx
+  name: mbarrier 事务计数
+  leaves:
+  - id: mbarrier_tx_init
+    claim: mbarrier.init 的 arrivingCount 是参与 arrive 的线程/warp 数，与 expect_tx 的字节计数是两套计数
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: mbarrier_tx_expect
+    claim: expect_tx(bytes) 把完成条件加上 bytes；TMA 完成硬件减相同字节，要求 expect_tx 字节 = 本次 TMA 字节
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: mbarrier_tx_try_wait
+    claim: mbarrier.try_wait / wait 基于 phase 奇偶；phase 不翻转就重 wait 会立刻“成功”并读到未完成数据
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 4
+    kind: failure
+  - id: mbarrier_tx_arrive
+    claim: arrive 减 arrivingCount，不减 tx 字节；只 arrive 不等 TMA 字节完成
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: mbarrier_tx_shared
+    claim: mbarrier 对象必须在 smem 且 8B 对齐；放寄存器或 global 上的“假 barrier”不会收到 TMA 完成
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: mbarrier_tx_cluster
+    claim: sm_90 cluster 范围的 mbarrier arrive 可通知远端 CTA；CTA 范围的 wait 看不见远端 arrive
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 4
+    kind: feature
+  - id: mbarrier_tx_parity
+    claim: 流水线每 stage 翻转 phase；复用同一 barrier 对象时必须把 phase 当循环变量，硬编码 phase=0 第二次会错
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: mbarrier_tx_vs_named
+    claim: named barrier (bar.sync/arrive) 没有 tx 字节计数，不能单独等待 TMA；TMA 路径必须用 mbarrier
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+- id: elect_one
+  name: elect 与单线程发射
+  leaves:
+  - id: elect_one_sync
+    claim: elect.sync 在当前 warp 选出一个 lane；只有该 lane 应发 TMA/UMMA，其他 lane 走 @!p 跳过
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: elect_one_not_tid0
+    claim: 用 threadIdx.x==0 代替 elect 在 warp-specialized 下可能选中非 TMA warp，导致无指令或重复发射
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: elect_one_umma
+    claim: tcgen05.mma 由 CTA 内单线程发射但效果覆盖整个 CTA 的 TMEM 视图；每个 warp 都发会重复 MMA
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 4
+    kind: feature
+  - id: elect_one_mask
+    claim: elect.sync 的成员掩码必须覆盖参与 warp 的活动 lane；发散时掩码不全会选不出或选出错误 lane
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: elect_one_desc_load
+    claim: tensormap 加载与 TMA 发射通常同一 elected lane；其他 lane 读 desc 寄存器没有定义副本
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: elect_one_wgmma
+    claim: wgmma.mma_async 不是 elect 单线程指令，必须 128 线程一起发；用 elect 只让 lane0 发 wgmma 非法
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: elect_one_alloc
+    claim: tcgen05.alloc 同样走 elect 单线程；多线程重复 alloc 会把列窗口推两次
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 4
+    kind: failure
+  - id: elect_one_producer_warp
+    claim: 惯例是 producer warp 的 elect lane 发 TMA；consumer warp 里 elect 发 TMA 会与 MMA 抢同一 smem stage
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+- id: tcgen05
+  name: tcgen05 ISA
+  leaves:
+  - id: tcgen05_mma
+    claim: tcgen05.mma 的累加器地址是 TMEM 列，不是寄存器列表 D；把 wgmma 的 d0,d1,… 约束套过来无法编码
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 4
+    kind: api
+  - id: tcgen05_ld
+    claim: tcgen05.ld 把 TMEM 列读进寄存器供 epilogue；在 MMA 完成前 ld 得到未完成累加
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: failure
+  - id: tcgen05_st
+    claim: tcgen05.st 把寄存器写进 TMEM，用于偏置/残差进累加器；它不是 st.shared
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 4
+    kind: api
+  - id: tcgen05_cp
+    claim: tcgen05.cp 在 TMEM 与 smem 之间搬数据；不能用它当 generic memcpy 到 global
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: tcgen05_commit
+    claim: UMMA 也有完成同步（wait/commit 类指令），不能用 wgmma.wait_group 等待 tcgen05.mma
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 4
+    kind: failure
+  - id: tcgen05_dtype_mx
+    claim: sm_100a 的 MXFP8/MXFP4 MMA 需要 scale 描述符操作数；缺省 scale 不等于全 1，而是非法编码
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+  - id: tcgen05_sm100a
+    claim: tcgen05.* 要求 sm_100a（或对应 arch-specific 目标）；portable sm_100 可能编不过这些指令
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+  - id: tcgen05_not_geforce
+    claim: 消费级 sm_120 无 tcgen05；CUTLASS Sm100 kernel 不能靠 -arch=sm_120 降级自动变 mma.sync
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 4
+    kind: feature
+- id: tmem_ldst
+  name: TMEM 加载存储
+  leaves:
+  - id: tmem_ldst_row_col
+    claim: TMEM 是 128 row × N col 的 32-bit 单元网格；ld 的向量长度必须贴合 row 分组，不能按任意 1D 字节偏移
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 4
+    kind: formula
+  - id: tmem_ldst_epilogue
+    claim: epilogue 必须先 tcgen05.ld 再做 visior/EVT；直接对 TMEM 地址做 cute::copy UniversalCopy 没有合法 atom
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 4
+    kind: failure
+  - id: tmem_ldst_pack
+    claim: f16 累加在 TMEM 中的打包与 f32 不同，同一列字节解释随 MMA dtype 变；混 dtype ld 会错 lane 映射
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: tmem_ldst_sync
+    claim: 对刚完成的 UMMA 做 ld 前要完成同步；TMEM 没有 __syncthreads 语义
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: failure
+  - id: tmem_ldst_narrow
+    claim: 按 32 列窗口 ld 再在寄存器里拼 256 列，是合法分块；一次 ld 超出分配列数非法
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 4
+    kind: numeric
+  - id: tmem_ldst_no_generic
+    claim: TMEM 列号不能转成 void* 再 cudaMemcpy；host 侧看不见 TMEM
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 4
+    kind: api
+  - id: tmem_ldst_reuse
+    claim: 同一列窗口可在下一 tile 复用，但必须在下一 UMMA 前把需要的 acc  ld 走，否则被覆盖
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: tmem_ldst_pred
+    claim: 边界列仍可能被 UMMA 写满 tile N；epilogue ld 后必须按问题 N 谓词 store，不能按 TMEM 列数全写
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 4
+    kind: failure
+- id: cluster_reduce
+  name: cluster 规约与 dsmem
+  leaves:
+  - id: cluster_reduce_dsmem_ld
+    claim: sm_90 经 mapa 得到的远端 smem 指针用 ld.shared 访问，延迟高于本地；在 cluster.sync 前读是竞争
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: cluster_reduce_atomic
+    claim: dsmem 上的 atomic 有 cluster 可见性；device-scope 的 global atomic 不能同步另一 CTA 的 smem 写
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: cluster_reduce_mma_partial
+    claim: cooperative 调度下两 CTA 各算部分 N，经 dsmem 拼 tile 再写 C；漏 sync 会写出半新半旧
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 4
+    kind: failure
+  - id: cluster_reduce_multicast_a
+    claim: multicast A 让 cluster 内 CTA 共享同一 A tile、各自不同 B，降低 gmem 带宽；cluster=(2,1) 才有意义
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: cluster_reduce_deadlock
+    claim: CTA0 等 CTA1 的 dsmem、CTA1 等 CTA0 的 named barrier 且到达计数不含对方，会集群级死锁
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: failure
+  - id: cluster_reduce_mapa
+    claim: mapa.shared::cluster 把远端 CTA rank + 本地 smem 偏移映射成地址；rank 超出 cluster 是非法地址
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: cluster_reduce_not_p2p
+    claim: dsmem 只在同一 cluster 的 CTA 间有效，不是 GPU 间 P2P；跨设备要用 NVLink/NCCL
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cluster_reduce_sm90_smem
+    claim: H100 每 SM smem 上限 228 KiB，cluster 内每 CTA 仍受自身 SM 配额限制，不能把 8 个 CTA 的 smem 当成一块 1.8MB
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+- id: setmaxnreg
+  name: 寄存器重分配
+  leaves:
+  - id: setmaxnreg_api
+    claim: setmaxnreg.inc/dec 在 warp-group 边界调整 RF 配额；必须整组执行，不能只让 producer 的一个 warp 调用
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 4
+    kind: api
+  - id: setmaxnreg_budget
+    claim: CTA 寄存器总量仍受 SM RF 限制；consumer 增加到 232 时 producer 必须降到互补值，否则占用直接掉到 0
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 4
+    kind: formula
+  - id: setmaxnreg_sm90
+    claim: 该重分配是 sm_90+ warp-specialized 路径的一部分；sm_80 没有对等指令，不能靠 launch_bounds 模拟
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: setmaxnreg_spill
+    claim: 降低配额后仍活着的寄存器会被 spill；producer 在 dec 之后还用大 fragment 会打 local
+    types:
+    - debug
+    - profiling
+    difficulty:
+    - 4
+    kind: failure
+  - id: setmaxnreg_order
+    claim: 必须先让将要放弃寄存器的 warp-group dec，再让另一组 inc；顺序反了会超发 RF
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: failure
+  - id: setmaxnreg_cutlass
+    claim: CUTLASS warp-specialized kernel 已把 setmaxnreg 编进 prologue；用户再插一条会与约定配额冲突
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: setmaxnreg_occupancy
+    claim: NCU 的寄存器/占用按 kernel 静态上限报；运行时 setmaxnreg 的瞬时配额不一定等于 ptxas 打印的 Registers
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: setmaxnreg_not_maxrregcount
+    claim: -maxrregcount 是编译器硬上限，与 setmaxnreg 动态调整正交；把 maxrregcount 设成 24 会把 consumer 也卡死
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 3
+    kind: api

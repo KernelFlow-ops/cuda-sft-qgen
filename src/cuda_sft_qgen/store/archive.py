@@ -12,6 +12,17 @@ from cuda_sft_qgen.models import Question, SteeringBrief
 from cuda_sft_qgen.store.jsonl import append_jsonl, read_jsonl, write_jsonl
 
 
+def is_rate_limit_reject_reason(reason: str | None) -> bool:
+    text = reason or ""
+    lowered = text.lower()
+    return (
+        "429" in text
+        or "too many requests" in lowered
+        or "rate limit" in lowered
+        or "temporarily overloaded" in lowered
+    )
+
+
 class Archive:
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = data_dir
@@ -25,6 +36,9 @@ class Archive:
         self.retry_path = data_dir / "retry_queue.jsonl"
         self.salvage_raw_path = data_dir / "salvage_raw.jsonl"
         self._lock = threading.Lock()
+        self._accepted: list[Question] | None = None
+        self._rejected: list[Question] | None = None
+        self._pending: list[Question] | None = None
 
     def load_questions(self, path: Path) -> list[Question]:
         out: list[Question] = []
@@ -36,26 +50,42 @@ class Archive:
         return out
 
     def load_accepted(self) -> list[Question]:
-        return self.load_questions(self.accepted_path)
+        with self._lock:
+            if self._accepted is None:
+                self._accepted = self.load_questions(self.accepted_path)
+            return list(self._accepted)
 
     def load_rejected(self) -> list[Question]:
-        return self.load_questions(self.rejected_path)
+        with self._lock:
+            if self._rejected is None:
+                self._rejected = self.load_questions(self.rejected_path)
+            return list(self._rejected)
 
     def load_pending(self) -> list[Question]:
-        return self.load_questions(self.pending_path)
+        with self._lock:
+            if self._pending is None:
+                self._pending = self.load_questions(self.pending_path)
+            return list(self._pending)
 
     def append_accepted(self, question: Question) -> None:
         question.review_status = "accepted"
         with self._lock:
+            if self._accepted is None:
+                self._accepted = self.load_questions(self.accepted_path)
+            self._accepted.append(question)
             append_jsonl(self.accepted_path, question.to_jsonl())
 
     def append_rejected(self, question: Question) -> None:
         question.review_status = "rejected"
         with self._lock:
+            if self._rejected is None:
+                self._rejected = self.load_questions(self.rejected_path)
+            self._rejected.append(question)
             append_jsonl(self.rejected_path, question.to_jsonl())
 
     def save_pending(self, questions: list[Question]) -> None:
         with self._lock:
+            self._pending = list(questions)
             write_jsonl(self.pending_path, [q.to_jsonl() for q in questions])
 
     def save_steering(self, brief: SteeringBrief) -> None:
@@ -116,10 +146,27 @@ class Archive:
         rejected = self.load_rejected()
         out: list[str] = []
         for q in reversed(rejected):
-            if q.reject_reason and q.reject_reason.startswith("L1"):
+            reason = q.reject_reason or ""
+            if reason.startswith("L1") or reason.startswith("L2") or reason.startswith(
+                "sieve_too_vague"
+            ):
                 if q.template_fingerprint:
                     out.append(q.template_fingerprint)
             if len(out) >= k:
+                break
+        return out
+
+    def iter_quality_rejected(self, limit: int = 200) -> list[Question]:
+        from cuda_sft_qgen.prompts.fewshot import is_quality_reject
+
+        out: list[Question] = []
+        for q in reversed(self.load_rejected()):
+            if not (q.question or "").strip():
+                continue
+            if not is_quality_reject(q.reject_reason):
+                continue
+            out.append(q)
+            if len(out) >= limit:
                 break
         return out
 
@@ -164,6 +211,21 @@ class Archive:
             if float(x.get("next_ok_at") or 0) <= now:
                 n += 1
         return n
+
+    def purge_rate_limit_rejects(self) -> int:
+        """Drop rejected rows that are rate-limit noise, not question quality."""
+        with self._lock:
+            kept: list[dict[str, Any]] = []
+            dropped = 0
+            for rec in read_jsonl(self.rejected_path):
+                if is_rate_limit_reject_reason(str(rec.get("reject_reason") or "")):
+                    dropped += 1
+                    continue
+                kept.append(rec)
+            if dropped:
+                write_jsonl(self.rejected_path, kept)
+                self._rejected = None
+        return dropped
 
     def compute_stats(self, extra: dict[str, Any] | None = None) -> dict[str, Any]:
         accepted = self.load_accepted()

@@ -1,0 +1,924 @@
+id: T06
+name: Tensor Core、MMA 与精度
+children:
+- id: wmma_mma
+  name: WMMA 与 MMA
+  leaves:
+  - id: wmma_fragment
+    claim: wmma fragment 的矩阵形状（m16n16k16 等）与 layout::row/col 约束
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: mma_sync_ptx
+    claim: mma.sync PTX 的 shape、dtype、saturate 与寄存器映射
+    types:
+    - syntax
+    - code_complete
+    difficulty:
+    - 3
+    kind: api
+  - id: wmma_mma_shape_16x16x16
+    claim: wmma m16n16k16.f16 的 A fragment 是 8 个 half 寄存器/线程，layout::row 与 col 不能对同一 fragment 混用
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: wmma_mma_acc_f32
+    claim: f16 输入 + f32 累加走 Tensor Core 的 FP32 累加器路径；f16 累加在大 K 上会溢出，不是同一条流水
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: wmma_mma_load_align
+    claim: wmma::load_matrix_sync 要求 ld 指针 256-bit 对齐（f16 16×16 为 32B）；未对齐时结果静默错而不是 trap
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: wmma_mma_store_c
+    claim: wmma::store_matrix_sync 写 C 的 layout 必须与 fragment 声明一致；row fragment 配 col store 会把 16×16 转置写错
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: wmma_mma_sm70_shapes
+    claim: sm_70 硬件 WMMA 形状只有 m16n16k16 / m8n32k16 / m32n8k16 的 f16；在 Volta 上发 m16n8k16 mma.sync 不是同一条 ISA
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: wmma_mma_fill_fragment
+    claim: wmma::fill_fragment(acc, 0) 清的是该线程持有的累加器寄存器，不是整块 16×16 C；漏调则 residual K 会叠脏值
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 2
+    - 3
+    kind: api
+- id: wgmma
+  name: WGMMA
+  leaves:
+  - id: wgmma_sm90
+    claim: Hopper wgmma.mma_async 需要 warp-group、desc 与 smem 对齐，不能当普通 mma 用
+    types:
+    - syntax
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: wgmma_desc_align
+    claim: Hopper wgmma 的 smem descriptor 基址必须 16B 对齐且 layout 满足 128B swizzle 约束，否则 MMA 读到错误 bank 映射
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: wgmma_warpgroup_4
+    claim: wgmma.mma_async 以 128 线程 warp-group 为发射单位；单个 warp 发 wgmma 是非法 PTX
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: wgmma_fence_before
+    claim: smem 写入之后、第一条 wgmma 之前必须 wgmma.fence；漏 fence 时异步 MMA 可能读到旧 smem
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: wgmma_commit_wait
+    claim: wgmma.commit_group 把已发 MMA 封成完成组；wgmma.wait_group N 等到未完成组数 ≤ N，wait_group 0 才保证累加器可见
+    types:
+    - syntax
+    - code_complete
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: wgmma_shape_m64n
+    claim: sm_90 wgmma 的 M 固定 64，N ∈ {8,16,…,256} 且为 8 的倍数；N=12 不能当合法 atom
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    kind: numeric
+  - id: wgmma_k_dtype
+    claim: sm_90 上 f16/bf16 的 wgmma K=16，tf32 的 K=8，s8/e4m3 的 K=32；混用 K 与 dtype 会在 ptxas 被拒
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: wgmma_scale_c
+    claim: wgmma 的 scale-D/C 立即数只能是 0 或 1；scale=0 丢弃累加器旧值当 β=0，不能编码任意 β
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+- id: precision
+  name: 混合精度
+  leaves:
+  - id: tf32_fp16_acc
+    claim: TF32 输入 + FP32 累加 vs FP16 累加的数值与 Tensor Core 吞吐差异
+    types:
+    - compare
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: fp8_fp4
+    claim: FP8/FP4 Tensor Core 的 scaling（UE8M0 等）与累加器精度选择
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: precision_tf32_mantissa
+    claim: TF32 输入只有 10-bit 尾数；开启 --tf32 后 FP32 Tensor Core 路径丢失低 13 bit，数值差不是随机噪声而是截断
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: precision_fp8_ue8m0
+    claim: Blackwell UE8M0 块缩放是 2^E 的幂，scale 必须沿 K 的指定块大小广播；把 E4M3 当无缩放 FP8 用会整体错一个指数
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: precision_bf16_vs_fp16
+    claim: bf16 与 fp16 同为 16-bit，但 bf16 是 8-bit 指数 + 7-bit 尾数；大动态范围累加更稳，尾数误差约为 fp16 的 8×
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: precision_e4m3_e5m2
+    claim: Hopper FP8 的 e4m3 偏精度、e5m2 偏范围；同一 MMA 指令的 A/B dtype 必须成对匹配，不能 A=e4m3 且 B=e5m2 混发一条
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: precision_fp4_e2m1
+    claim: sm_100 NVFP4 用 E2M1 存值再乘 UE8M0 块 scale；把 4-bit 当无符号整数直接 MMA 得到的不是量化浮点结果
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 4
+    kind: feature
+  - id: precision_tf32_cvt
+    claim: cvt.rna.tf32.f32 把 f32 舍入到 19-bit TF32；mma.sync.m16n8k8.f32.tf32 吃的是转换后的寄存器，不是静默截断 load
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+- id: mma_shapes
+  name: MMA 形状表
+  leaves:
+  - id: mma_shapes_m16n8k16
+    claim: mma.sync.m16n8k16 是 Ampere+ 常用 PTX 形状，A 16×16、B 16×8 的 warp 级块，不是 CTA tile
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: mma_shapes_k_multiple
+    claim: 问题 K 必须能被 MMA K 整除或显式 pad；K=18 用 k16 atom 必须处理 2 列 residual
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    kind: formula
+  - id: mma_shapes_sm80_fp64
+    claim: sm_80 支持 m8n8k4.f64 Tensor Core；在 sm_70 上同一 PTX 不能当硬件 TC 用
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: mma_shapes_reg_map
+    claim: mma.sync 的寄存器映射按 lane 分组，错误地把 fragment[0] 当矩阵 (0,0) 元素会写错 C
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: mma_shapes_m16n8k8_tf32
+    claim: sm_80 tf32 MMA 形状是 m16n8k8，K 是 f16 m16n8k16 的一半；用 k16 发 tf32 是非法 PTX
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: mma_shapes_m16n8k32_s8
+    claim: sm_80 的 s8 MMA 为 m16n8k32，A 是 16×32 int8；按 f16 的 k16 去切 K 循环会少算一半内积
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: formula
+  - id: mma_shapes_m8n8k128_b1
+    claim: sm_80 二进制 MMA 形状含 m8n8k128.b1 / m16n8k256.b1，K 以 bit 计；把它当 s8 k32 会把 1-bit 当成 8-bit
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: mma_shapes_n_mod8
+    claim: mma.sync 的 N=8，CTA tile N 必须是 8 的倍数；N=12 的问题要 pad 到 16 再 epilogue 裁剪
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+- id: sparse_tc
+  name: 结构化稀疏 Tensor Core
+  leaves:
+  - id: sparse_tc_24_meta
+    claim: mma.sp 需要额外 metadata 寄存器描述 2:4 位置；只把零元素压掉而不提供 meta 会算错
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sparse_tc_compress
+    claim: cusparseLt / 手工 compress 必须按 2:4 模式，随机 50% 稀疏不满足硬件约束
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: sparse_tc_throughput
+    claim: 合法 2:4 时 Tensor Core 吞吐按稠密约 2× 计，不是按任意 sparsity 线性缩放
+    types:
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: sparse_tc_sm80
+    claim: Sparse TC 从 sm_80 开始；sm_75 没有 mma.sp 硬件路径
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: sparse_tc_k_dense
+    claim: mma.sp.m16n8k32 的压缩 K=32 对应稠密 K=64；循环按稠密 K 步进 32 会只覆盖一半
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: sparse_tc_meta_2bit
+    claim: 每 4 个连续元素用 4-bit 选 2 个非零位置（C(4,2)=6 种合法码）；非法码的 MMA 结果 ≠ 稠密再掩零
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+  - id: sparse_tc_along_k
+    claim: 2:4 约束沿 K 的 4 元素窗口，不是沿 M 或 N；对 A 的行做 2:4 而 MMA 沿 K 稀疏会全部错位
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: sparse_tc_wgmma_sp
+    claim: sm_90 的 wgmma.mma_async.sp 同样要 metadata 与 2:4；不能把 sm_80 mma.sp 寄存器布局原样套到 warp-group
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 4
+    kind: feature
+- id: scale_fp8
+  name: FP8/FP4 缩放
+  leaves:
+  - id: scale_fp8_block
+    claim: FP8 块缩放张量的 scale 轴必须与 MMA K 块对齐，否则 dequant 乘在错误元素上
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: scale_fp8_ue8m0_exp
+    claim: UE8M0 只存指数，value = 2^(E-bias)；把它当 E4M3 解会整体偏移
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 4
+    kind: feature
+  - id: scale_fp8_acc
+    claim: FP8 MMA 累加器通常是 FP16/FP32；选 FP16 累加在大 K 上溢出现于“FP8 精度不够”之前
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: scale_fp8_sm90
+    claim: Hopper FP8 Tensor Core 与 Blackwell 的块缩放格式不互换，同一内存 layout 不能跨代直接 MMA
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+  - id: scale_fp8_mxfp8_32
+    claim: MXFP8 的 scale 块大小是 32 个元素；K 不能被 32 整除时必须 pad scale 向量，否则尾块 dequant 越界
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 4
+    kind: numeric
+  - id: scale_fp8_nvfp4_16
+    claim: NVFP4 常用每 16 个 E2M1 共用一个 UE8M0；scale stride 必须等于 16 个 4-bit packed 元素，不是 16B
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 4
+    kind: formula
+  - id: scale_fp8_vec_vs_block
+    claim: 逐通道向量 scale 与块 scale 不能混用同一套 UMMA 操作数描述；通道 scale 沿 N/M 广播，块 scale 沿 K 窗口
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: scale_fp8_sm100_tcgen
+    claim: sm_100 块缩放是 tcgen05.mma 操作数的一部分，不是 epilogue 里再乘；漏传 scale 描述符等于 scale=1
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 4
+    kind: feature
+- id: ldmatrix
+  name: ldmatrix / LDSM
+  leaves:
+  - id: ldmatrix_x4_m8n8
+    claim: ldmatrix.sync.aligned.x4.m8n8.shared.b16 每线程读 4×8B，warp 拼出 16×16 的 b16 矩阵到 4 个寄存器
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    kind: api
+  - id: ldmatrix_trans
+    claim: sm_75+ 的 ldmatrix.trans 在 8×8 b16 子块上做转置；B 矩阵 col-major 常用 .trans，对 32-bit 元素发 .trans 是非法的
+    types:
+    - layout
+    - syntax
+    difficulty:
+    - 3
+    kind: feature
+  - id: ldmatrix_align16
+    claim: ldmatrix 的 smem 地址必须 16B 对齐；8B 对齐的 half 指针会读错 bank 或非法指令
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    kind: failure
+  - id: ldmatrix_x1_x2
+    claim: .x1/.x2/.x4 决定每线程寄存器数=1/2/4；用 x4 atom 去填只声明了 2 个寄存器的 fragment 会破坏邻接寄存器
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+  - id: ldmatrix_sm75
+    claim: ldmatrix 从 sm_75 起可用；sm_70 必须用手工 LDS + 重排，不能把 LDSM 当 Volta 路径
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: ldmatrix_num_matrix
+    claim: .x4 一次搬 4 个 8×8.b16，总 16×16；按 8×8 循环发 4 次 x1 与一次 x4 的寄存器映射不同
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: ldmatrix_not_gmem
+    claim: ldmatrix 源只能是 shared；对 global 指针发 ldmatrix 非法，应先 cp.async/TMA 进 smem
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: ldmatrix_stmatrix
+    claim: stmatrix 是 ldmatrix 的反向，把 fragment 按 MMA 布局写回 smem；用普通 st.shared 写 fragment 不会得到 ldmatrix 可读的 8×8 排列
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+- id: fragment_map
+  name: Fragment 寄存器映射
+  leaves:
+  - id: fragment_map_lane_group
+    claim: m16n8k16 的 C 中 lane p 持有行 (p%4)+4*i、列 8*(p/4)+j 一类分组；把 C[0] 当 (lane,0) 元素会写错
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: fragment_map_a_8reg
+    claim: f16 m16n8k16 的 A 每线程 8 个 half = 4 个 32-bit 寄存器；少声明 1 个寄存器会让 mma.sync 读到 ABI 垃圾
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: numeric
+  - id: fragment_map_b_4reg
+    claim: f16 m16n8k16 的 B 每线程 4 个 half = 2 个 32-bit 寄存器；与 A 的 4 个 32-bit 不对等，不能共用同一 fragment 类型
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: fragment_map_print
+    claim: 用 lane0 打印 fragment[0] 不能代表矩阵 (0,0)；必须按官方 lane 映射还原再比较
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+    hints:
+    - 只打印 thread0.fragment[0]
+    - 与 cuBLAS 的 C[0,0] 对拍
+  - id: fragment_map_rowcol
+    claim: A 的 row.layout 与 col.layout 改变的是 k 与 m 哪一维连续，不是简单转置 fragment 数组
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: fragment_map_wgmma_d
+    claim: wgmma 的 D 寄存器按 128 线程分配，每线程持有的 N 列数 = N/4；把 sm_80 的 32-lane 映射套过来列号错 4×
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+  - id: fragment_map_pack_s8
+    claim: s8 fragment 把 4 个 int8 打包进一个 32-bit 寄存器；按 half 的 2-pack 去拆会读错 K 维
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: formula
+  - id: fragment_map_acc_f64
+    claim: m8n8k4.f64 每线程 2 个 f64 累加器寄存器；用 f32 fragment 类型去接会只写一半位宽
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+- id: imma_int
+  name: 整数 MMA / IMMA
+  leaves:
+  - id: imma_int_s8_acc32
+    claim: s8×s8 MMA 累加器是 s32；把 acc 当 f32 解释再 epilogue 量化，数值不是整数点积
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: imma_int_u8_s8
+    claim: mma.sync 允许 u8/s8 组合，但 A/B 符号位扩展不同；u8×s8 与 s8×s8 在 >127 的输入上结果不同
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: imma_int_s4_k64
+    claim: sm_80 的 s4 MMA 形状 m16n8k64，K 以 4-bit 元素计；pack 时每 32-bit 含 8 个 s4，stride 不能按 s8 算
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: imma_int_dp4a
+    claim: dp4a 是 CUDA 核心的 4×u8 点积，不是 Tensor Core；吞吐远低于 m16n8k32.s8，不能当 IMMA 的别名
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: imma_int_satfinite
+    claim: .satfinite 把 s32 累加钳到目标整数范围；漏掉时 epilogue 再 clamp 与 MMA 内 saturate 的溢出点不同
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 3
+    kind: api
+  - id: imma_int_sm72
+    claim: 整数 Tensor Core 从 sm_72/sm_75 起步，sm_70 只有 f16 WMMA；在 Volta 上编译 s8 mma.sync 不能当硬件 IMMA
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: imma_int_idc
+    claim: 量化 GEMM 的 scale 通常在 epilogue 做 dequant（acc_i32 * scale_a * scale_b）；把 scale 乘进 MMA 输入会二次量化
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: imma_int_relu_bias
+    claim: sm_80 部分整数 MMA 支持 .relu 修饰；那是对累加器的逐元素 ReLU，不能替代带 bias 的 epilogue fused ReLU
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+- id: tc_flops
+  name: Tensor Core 吞吐
+  leaves:
+  - id: tc_flops_dense_2x_sparse
+    claim: 合法 2:4 sparse 峰值 ≈ 2× dense；非 2:4 稀疏走稠密路径，FLOP/s 不会按零元素比例上升
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: tc_flops_fp16_vs_tf32
+    claim: 同代芯片上 f16 TC 峰值通常是 tf32 的 2×（K 更宽）；用 tf32 去追 f16 的 TFLOP/s 会永远差一档
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: tc_flops_fp8_2x
+    claim: Hopper FP8 TC 峰值约为 FP16 TC 的 2×；这来自 K=32 vs K=16 的吞吐，不是编译器自动翻倍
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: tc_flops_util
+    claim: 实测 TC 利用率 = 有效 MMA 指令数 / 峰值发射；epilogue 占比高时利用率低不等于 MMA 形状选错
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: tc_flops_not_cuda_core
+    claim: NCU 的 sm__ops_path_tensor 与 sm__sass_thread_inst_executed_op_fadd 不是同一通路；FFMA 高而 HMMA 低说明没打到 TC
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: tc_flops_shape_issue
+    claim: 小 N（如 N=8）时 wgmma 仍占一条 warp-group 发射，有效 FLOP = 2*M*N*K 变小，占用峰值比例下降
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: tc_flops_a100_312
+    claim: A100 sm_80 的 dense FP16 TC 峰值是 312 TFLOP/s（SXM）；用 19.5 TFLOP/s 的 FP32 CUDA Core 峰值去估 GEMM 会差一个数量级
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 2
+    kind: numeric
+  - id: tc_flops_clock
+    claim: TC 吞吐随 SM 时钟线性变化；boost 降频时 TFLOP/s 掉，不是“形状突然非法”
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+- id: mma_mods
+  name: MMA 修饰符
+  leaves:
+  - id: mma_mods_aligned
+    claim: mma.sync.aligned 要求整 warp 统一发射；缺 .aligned 的变体在现代 ptxas 上要么拒绝要么布局更松导致更慢
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: mma_mods_satfinite
+    claim: .satfinite 对浮点 MMA 把 NaN/Inf 钳到有限值；它不改变尾数宽度，不能当 TF32 的替代
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: mma_mods_sp
+    claim: .sp 把指令切到稀疏通路并多一个 metadata 操作数；在稠密数据上加 .sp 不会自动压缩
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: mma_mods_sync_vs_async
+    claim: mma.sync 在 warp 内同步完成并写寄存器；wgmma.mma_async 完成后才对 wait_group 可见，中间读 D 是旧值
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: mma_mods_row_col
+    claim: PTX 的 .row/.col 描述 A/B 在寄存器中的逻辑布局，必须与 ldmatrix 是否 .trans 一致
+    types:
+    - layout
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: mma_mods_wide
+    claim: 没有“把两个 m16n8 自动融合成 m16n16 的修饰符”；更大 N 要发多次 mma.sync 或改用 wgmma 的大 N
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: mma_mods_sm90a
+    claim: 部分 wgmma dtype（如 fp8）要求 sm_90a 而非 portable sm_90；-arch=sm_90 可能编不过或降级
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: mma_mods_pred
+    claim: 对 mma.sync 加 @p 只屏蔽该线程的寄存器写，其他 lane 仍计算；不能用谓词实现 tile 边界的 K 残差清零
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+- id: wgmma_group
+  name: WGMMA 完成组
+  leaves:
+  - id: wgmma_group_wait_n
+    claim: wait_group N 的语义是 outstanding_groups ≤ N；N=1 允许一组在飞以重叠，N=0 才可读全部 D
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: wgmma_group_max
+    claim: 硬件未完成 wgmma 组数有上限（通常小整数）；只 commit 不 wait 会耗尽组槽，随后 MMA 未定义
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: failure
+  - id: wgmma_group_no_interleave_mma_sync
+    claim: 同一 warp-group 不能把 mma.sync 与 wgmma 交错当同一累加器路径；寄存器映射与完成模型都不同
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 4
+    kind: failure
+  - id: wgmma_group_smem_reuse
+    claim: 复用某 stage 的 smem 必须 wait 消费该 stage 的 wgmma 组；只 __syncthreads 不够，异步 MMA 仍可能在读
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: wgmma_group_commit_empty
+    claim: 没有 mma_async 就 commit_group 会封一个空组，打乱 wait_group 计数，表现为偶发错数
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 4
+    kind: failure
+  - id: wgmma_group_producer_forbidden
+    claim: producer warp 若误发 wgmma.mma_async，128 线程组不完整，属于非法发射
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: wgmma_group_kpipe
+    claim: K-pipeline 深度 = 可重叠的 wgmma 组数与 smem stage 的最小值；只加 smem stage 不加 wait_group 重叠度不变
+    types:
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+  - id: wgmma_group_fence_once
+    claim: wgmma.fence 保护此前的 smem 写对后续 MMA 可见；每个 stage 写入后都要 fence，不是 kernel 开头一次即可
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: api
+- id: acc_dtype
+  name: 累加器精度路径
+  leaves:
+  - id: acc_dtype_f16_f32
+    claim: f16 输入可选 f16 或 f32 累加；大 K（如 K≥4k）时 f16 acc 溢出概率远高于舍入误差本身
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: acc_dtype_bf16_f32
+    claim: bf16 MMA 的标准累加是 f32；bf16 acc 路径即使存在也更窄，不能默认与 f32 acc 误差相当
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: acc_dtype_fp8_f16_overflow
+    claim: FP8 MMA 若选 f16 累加，K 方向块数 × max|a*b| 超过 65504 即溢出；换 f32 acc 后再量化
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: acc_dtype_tf32_acc_f32
+    claim: TF32 MMA 累加器仍是 f32（23-bit 尾数），截断只发生在 A/B 输入；输出精度 ≠ TF32
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: acc_dtype_s32_to_f16
+    claim: s8 GEMM 的 s32 acc 转 f16 要先乘 dequant scale；直接 cvt.rn.f16.s32 会把整数 10^6 打成 Inf
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+  - id: acc_dtype_tmem_f32
+    claim: sm_100 TMEM 累加 dtype 由 UMMA 指令决定；用 tcgen05.ld 以 f16 读 f32 列是截断不是舍入提升
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+  - id: acc_dtype_mixed_ab
+    claim: 多数 MMA 要求 A 与 B 同 dtype；A=f16、B=bf16 不是合法 atom，要先 cvt 到同一输入格式
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: api
+  - id: acc_dtype_kahan_not_tc
+    claim: Tensor Core 不提供 Kahan 补偿累加；补偿要在 CUDA Core 上做，吞吐掉出 TC 峰值
+    types:
+    - conceptual
+    - counterfactual
+    difficulty:
+    - 3
+    kind: mechanism

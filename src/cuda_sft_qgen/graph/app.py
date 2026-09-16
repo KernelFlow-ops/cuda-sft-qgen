@@ -85,4 +85,7 @@ def run_pipeline(
     finally:
         reset_runtime(token)
         if own_runtime:
+            closer = getattr(rt, "close", None)
+            if callable(closer):
+                closer()
             logger.info("pipeline finished")

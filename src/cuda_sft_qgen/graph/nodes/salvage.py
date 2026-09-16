@@ -5,100 +5,20 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-from cuda_sft_qgen.errors import RateLimitError
 from cuda_sft_qgen.graph.nodes.generate import (
     apply_outcome,
     enqueue_retry,
-    GenerateOutcome,
-    question_from_obj,
-    _safe_generate,
+    generate_or_salvage,
+    salvage_item,
 )
+from cuda_sft_qgen.prompts.fewshot import FewshotCorpus
 from cuda_sft_qgen.graph.state import PipelineState
-from cuda_sft_qgen.jsonutil import parse_question_payload
-from cuda_sft_qgen.models import Question, QuestionBrief, SteeringBrief
-from cuda_sft_qgen.prompts import load_prompt
+from cuda_sft_qgen.models import SteeringBrief
 from cuda_sft_qgen.runtime import get_runtime
-from cuda_sft_qgen.sieve import sieve_question
 
 logger = logging.getLogger(__name__)
 
-
-def _local_or_llm_salvage(item: dict[str, Any]) -> GenerateOutcome:
-    rt = get_runtime()
-    brief = QuestionBrief.model_validate(item["brief"])
-    raw = str(item.get("raw") or "")
-    obj = parse_question_payload(
-        raw,
-        fallback_claim=brief.l3_claim,
-        min_question_chars=rt.settings.sieve_min_chars,
-        keep_truncated=rt.settings.json_keep_truncated,
-    )
-    if obj and str(obj.get("question") or "").strip():
-        q = question_from_obj(brief, obj, source=brief.role)
-        reason = sieve_question(q, rt.settings, rt.llm)
-        if reason:
-            q.reject_reason = reason
-            rt.store.append_rejected(q)
-            return GenerateOutcome(status="hard_fail", reason=reason)
-        return GenerateOutcome(status="ok", question=q)
-
-    if not rt.settings.salvage_use_llm:
-        return GenerateOutcome(
-            status="retry",
-            brief=brief.model_dump(),
-            reason="json_parse",
-            attempts=1,
-        )
-
-    prompt = (
-        load_prompt("salvage")
-        .replace("{{l3_claim}}", brief.l3_claim)
-        .replace("{{raw}}", raw[:12000])
-        .replace("{{min_chars}}", str(rt.settings.question_min_chars))
-        .replace("{{max_chars}}", str(rt.settings.question_max_chars))
-    )
-    last: Exception | None = None
-    for _ in range(max(1, rt.settings.salvage_llm_attempts)):
-        try:
-            text = rt.llm.complete(
-                [
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": "Return the repaired JSON object now."},
-                ],
-                thinking_level=rt.settings.salvage_thinking_level,
-                max_tokens=rt.settings.salvage_max_tokens,
-            )
-        except RateLimitError as exc:
-            return GenerateOutcome(
-                status="retry",
-                brief=brief.model_dump(),
-                reason="429",
-                attempts=1,
-            )
-        except Exception as exc:  # noqa: BLE001
-            last = exc
-            continue
-        obj = parse_question_payload(
-            text,
-            fallback_claim=brief.l3_claim,
-            min_question_chars=rt.settings.sieve_min_chars,
-            keep_truncated=rt.settings.json_keep_truncated,
-        )
-        if obj and str(obj.get("question") or "").strip():
-            q = question_from_obj(brief, obj, source=brief.role)
-            reason = sieve_question(q, rt.settings, rt.llm)
-            if reason:
-                q.reject_reason = reason
-                rt.store.append_rejected(q)
-                return GenerateOutcome(status="hard_fail", reason=reason)
-            return GenerateOutcome(status="ok", question=q)
-    logger.warning("salvage failed: %s", last)
-    return GenerateOutcome(
-        status="retry",
-        brief=brief.model_dump(),
-        reason="json_parse",
-        attempts=1,
-    )
+_local_or_llm_salvage = salvage_item
 
 
 def salvage_node(state: PipelineState) -> dict:
@@ -122,6 +42,10 @@ def salvage_node(state: PipelineState) -> dict:
             apply_outcome(
                 outcome, pending=pending, salvage_items=leftover, lock=lock
             )
+            if outcome.question is not None:
+                prefetch = getattr(rt, "prefetch_embed", None)
+                if callable(prefetch):
+                    prefetch(outcome.question.question)
             with lock:
                 ok += 1
             return
@@ -164,15 +88,23 @@ def retry_drain_node(state: PipelineState) -> dict:
     salvage_items: list[dict] = []
     lock = threading.Lock()
     workers = max(1, min(len(items), rt.settings.writer_concurrency))
+    anti_k = int(rt.settings.generation.get("anti_templates_max", 15))
+    corpus = FewshotCorpus.from_store(rt.store, anti_k=anti_k)
     logger.info("retry_drain n=%s workers=%s", len(items), workers)
 
     def _one(item: dict[str, Any]) -> None:
         brief = item.get("brief") or {}
         attempts = int(item.get("attempts") or 1) + 1
-        outcome = _safe_generate(brief, steering, attempts=attempts)
-        apply_outcome(
+        outcome = generate_or_salvage(
+            brief, steering, attempts=attempts, corpus=corpus
+        )
+        kind = apply_outcome(
             outcome, pending=pending, salvage_items=salvage_items, lock=lock
         )
+        if kind == "ok" and outcome.question is not None:
+            prefetch = getattr(rt, "prefetch_embed", None)
+            if callable(prefetch):
+                prefetch(outcome.question.question)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futs = [pool.submit(_one, it) for it in items]

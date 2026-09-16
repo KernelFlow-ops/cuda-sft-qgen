@@ -1,0 +1,1025 @@
+id: T02
+name: 内存层次与数据移动
+children:
+- id: global_mem
+  name: 全局内存
+  leaves:
+  - id: coalescing
+    claim: warp 内 32 线程访问是否合并到 32B/64B/128B 事务，取决于对齐与 stride
+    types:
+    - optimization
+    - conceptual
+    - profiling
+    difficulty:
+    - 1
+    - 2
+    - 3
+    kind: formula
+  - id: vectorized_ldst
+    claim: float4/int4 向量化 load/store 的对齐要求与编译器自动向量化失败原因
+    types:
+    - optimization
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: global_mem_sector_formula
+    claim: sm_70+ 上对齐 128B 的 warp 连续 32×4B 访问合并为 1 个 128B sector；stride=2 的 32×4B 变成 2 个 128B 事务
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+    hints:
+    - 32 threads × 4B aligned
+    - stride-2 float
+  - id: global_mem_l2_write_policy
+    claim: L2 默认 write-back；.wt/.cs 缓存提示改变的是该指令路径而非全局 L2 模式，不能用来关闭整个 kernel 的 L2 分配
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: global_mem_sector_32b
+    claim: 现代 GPU 以 32B sector 为 DRAM 事务粒度；即使只要 4B，未合并访问仍按 sector 计费，32 个分散 4B 可读出 32 个 sector
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: global_mem_misalign_128
+    claim: 连续 32×4B 但基址偏 16B 时跨两个 128B 行，事务数从 1 升到 2，带宽减半
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 2
+    kind: numeric
+  - id: global_mem_ldg
+    claim: ld.global.nc / __ldg 走只读缓存路径，适合不写的数据；对刚写过的同一地址用 __ldg 可能读到旧值
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: global_mem_store_rmw
+    claim: 部分写 32B sector 可能触发 RMW；warp 只写 8 个连续 float 的前 4 个时，sector 事务仍可能按整 sector 计
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: global_mem_stride_n
+    claim: 每线程读 stride=N 的 float 时，覆盖字节 ≈ 32*N*4；N=32 时约 4KB，远超 1 条 128B 事务
+    types:
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+- id: shared_mem
+  name: 共享内存
+  leaves:
+  - id: bank_conflict
+    claim: 32-bank 下 stride=2 的 32-bit 访问产生 2-way conflict；padding 与 swizzle 的解法
+    types:
+    - optimization
+    - debug
+    - layout
+    difficulty:
+    - 2
+    - 3
+    hints:
+    - float tile[32][32] 列优先
+    - padding 成 33 列
+    - Swizzle<3,4,3> 是否消 2-way
+    kind: formula
+  - id: dyn_smem
+    claim: 动态共享内存声明为 extern __shared__、多数组切分与对齐
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: shared_mem_bank_index
+    claim: 32-bit 模式 bank = (byte_addr / 4) % 32；64-bit 模式同一地址映射两个 bank，stride=2 的 64-bit 访问可变成无冲突
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: shared_mem_optin_99k
+    claim: sm_80+ 用 cudaFuncSetAttribute 把 MaxDynamicSharedMemorySize 提到 99KB 会把该 kernel 的占用上限压到每 SM 1
+      个 CTA
+    types:
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: shared_mem_broadcast
+    claim: 32 线程读同一 32-bit 字是 broadcast 而非 32-way conflict，bank 冲突度 = 1
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 1
+    - 2
+    kind: mechanism
+  - id: shared_mem_padding33
+    claim: float tile[32][32] 列访问 bank = col % 32 全撞同一 bank；改 [32][33] 后 bank=(col*33)%32 散开，2-way 消失
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 2
+    kind: formula
+  - id: shared_mem_dyn_split
+    claim: extern __shared__ char smem[] 上多数组必须按最严对齐切分；float 后接 double 若偏移不是 8B 倍数，device 读 double 未定义
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: shared_mem_static_48k
+    claim: sm_70+ 静态 __shared__ 上限仍是 48KB 以保持兼容；超过 48KB 必须走动态 smem + cudaFuncSetAttribute opt-in
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: feature
+  - id: shared_mem_vol_sm70
+    claim: sm_70 每 SM 96KB smem，每 CTA 最大 96KB opt-in；sm_75 每 SM 64KB，opt-in 到 64KB 不是 96KB
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+- id: uvm
+  name: 统一内存
+  leaves:
+  - id: advise_prefetch
+    claim: cudaMemAdvise/cudaMemPrefetchAsync 与第一次 touch 的缺页迁移
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: concurrent_access
+    claim: 同时被 CPU 与 GPU 访问的 managed 内存在不同架构上的行为差异
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: uvm_advise_preferred
+    claim: cudaMemAdviseSetPreferredLocation 只影响迁移启发式，不能阻止 peer 或 CPU 访问时的迁移；ConcurrentManagedAccess=0
+      的 GPU 上 CPU 触摸会同步整段
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: uvm_prefetch_stream
+    claim: cudaMemPrefetchAsync 相对指定 stream 有序；kernel 若在另一无依赖 stream 上立刻读，仍可能缺页，不是 prefetch 调用返回即数据到位
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: uvm_first_touch
+    claim: 未 prefetch 的 managed 页在 GPU 第一次 touch 时发生 page fault 迁移，延迟可达数十微秒到毫秒，不是 HBM 命中
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: uvm_concurrent_attr
+    claim: cudaDevAttrConcurrentManagedAccess=0（Pascal 部分 SKU/Windows）上 CPU 访问未同步的 managed 会隐式同步设备；Volta+ =1 才支持真正并发
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: uvm_advise_readmostly
+    claim: cudaMemAdviseSetReadMostly 允许在多个处理器建立只读副本；随后 GPU 写会作废副本并迁移，不是保持多份可写镜像
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: uvm_attach
+    claim: cudaStreamAttachMemAsync 把托管内存关联到 stream；默认全局可见，AttachHost 后 device 访问会触发迁移或错误
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: uvm_oversub
+    claim: managed 分配总量可超过 GPU 物理显存，靠换页；频繁 GPU/CPU 乒乓会把带宽打成 PCIe/NVLink 而不是 HBM
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: mechanism
+- id: special
+  name: 特殊存储
+  leaves:
+  - id: constant_broadcast
+    claim: constant 内存在 warp 广播 vs 分叉索引时的序列化
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: local_spill
+    claim: local memory 来自寄存器溢出或大数组，Nsight 中 local 流量的解读
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: special_const_64k
+    claim: __constant__ 每 TU 64KB 上限；warp 内同一地址广播 1 次事务，分叉索引则序列化为最多 32 次
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+  - id: special_local_abi
+    claim: local memory 寻址按线程私有；occupancy 计算器里的 local 字节来自溢出/大数组，不是 smem，NCU local 流量高不等于 bank conflict
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: special_const_memcpy
+    claim: cudaMemcpyToSymbol 在 kernel 使用该符号前必须完成；默认流与非默认流混用时可能读到旧常量
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    kind: api
+  - id: special_local_array
+    claim: __device__ 函数里 int buf[256] 很大概率进 local 而非寄存器；对 buf[tid] 的索引访问会变成线程私有 DRAM 流量
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: special_texture_ro
+    claim: 只读数据经 texture/__ldg 可走纹理/只读路径；对该地址再做普通 store 后，只读路径不保证看到新值
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: special_const_vs_param
+    claim: kernel 参数区也映射在常量存储，但生命周期是单次 launch；模块级 __constant__ 跨 launch 保持，直到下一次 MemcpyToSymbol
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: special_local_align
+    claim: local 数组按类型对齐；对 local char buf[] 做 float4 向量加载若地址不是 16B 对齐，会拆指令或产生未对齐访问
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+- id: cache_policy
+  name: L1/L2 缓存策略
+  leaves:
+  - id: cache_policy_persisting
+    claim: sm_80+ access policy window 把一段地址标为 persisting L2，窗口大小受 cudaDevAttrMaxPersistingL2CacheSize
+      限制
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: cache_policy_evict_first
+    claim: .evict_first 提示只影响该访问的替换优先级，不能保证下一条 ld 命中
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cache_policy_l1_16kb
+    claim: 部分架构 L1 与 smem 共享容量，增大 smem carveout 会减小 L1，NCU 的 l1tex hit rate 会掉
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cache_policy_hit_ratio
+    claim: L2 hit rate = lts hits / (hits+misses)；只看 hit rate 不看 sector 数会误判小工作集的核
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: cache_policy_ca_cg
+    claim: ld.global.ca 尝试 L1，.cg 绕过 L1 只走 L2；流式一次性数据用 .cg/.cs 减少 L1 污染
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: cache_policy_wt
+    claim: st.global.wt 写穿透 L1/L2 策略按 ISA 定义，不把该 store 变成对 host 可见的 system fence
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cache_policy_carveout_pct
+    claim: PreferredSharedMemoryCarveout=100 把统一缓存尽量划给 smem，L1 容量下降；carveout=0 则倾向 L1
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: cache_policy_l2_sector
+    claim: L2 以 32B sector 跟踪；部分命中仍计 miss sector，NCU lts__t_sectors 与有效载荷字节不成 1:1
+    types:
+    - profiling
+    difficulty:
+    - 3
+    kind: formula
+  - id: cache_policy_evict_last
+    claim: sm_80+ .evict_last / persisting 提高驻留优先级，但窗口外的访问仍会替换；窗口=0 时这些提示退化成普通访问
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+- id: pinned_host
+  name: 页锁定与映射内存
+  leaves:
+  - id: pinned_host_alloc
+    claim: cudaMallocHost/cudaHostAlloc 得到页锁定主机内存，cudaMemcpyAsync 才能真正异步；普通 malloc 的 async copy 会静默同步
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: pinned_host_mapped
+    claim: cudaHostAllocMapped 让 device 直接走 GPC→Host，带宽远低于 HBM；当通用 device 数组用会把核打成 PCIe bound
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: pinned_host_portable
+    claim: cudaHostAllocPortable 对所有 CUDA 上下文可见；缺这个 flag 时另一 context 的 DMA 不保证合法
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: pinned_host_writecombined
+    claim: WriteCombined 主机内存对 CPU 读很慢，只适合 CPU 写 GPU 读的 staging
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: pinned_host_register
+    claim: cudaHostRegister 把已有 malloc 页钉住，页必须对齐且整页覆盖；对栈上小数组 Register 可能失败或钉住过多
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: pinned_host_getdevice
+    claim: cudaHostGetDevicePointer 只对 Mapped 内存返回 device 可解引用地址；对普通 pinned 调用会失败，不是返回 host 指针本身
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: pinned_host_async_sync
+    claim: 源或目的是可分页 host 内存时 cudaMemcpyAsync 在该 stream 插入隐式同步；Nsight 上看到 memcpy 前出现 unexpected sync
+    types:
+    - debug
+    - profiling
+    difficulty:
+    - 2
+    kind: failure
+  - id: pinned_host_wc_cpu_read
+    claim: cudaHostAllocWriteCombined 禁用 CPU 缓存，CPU 读带宽极低；GPU 写完后 CPU 立刻扫结果会比普通 pinned 慢一个数量级
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: pinned_host_limit
+    claim: 可钉页总量受 OS 与 cudaLimit 约束；钉住接近物理内存的缓冲会让 OS 无法换页，后续 malloc/cudaMallocHost 失败
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+- id: l2_residency
+  name: L2 驻留与压缩
+  leaves:
+  - id: l2_residency_compress
+    claim: 部分架构对 smem/global 写可压缩；NCU 的 compression 计数下降不代表算法变了，可能只是数据不可压
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: l2_residency_set_limit
+    claim: cudaDeviceSetLimit persisting L2 超过硬件窗口会报错或被夹紧，不是静默忽略
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: l2_residency_carve
+    claim: L2 驻留窗口挤占普通 L2；窗口过大时流式访问 miss 上升，对大 GEMM 可能净亏损
+    types:
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+  - id: l2_residency_stream
+    claim: persisting 访问与普通访问混在同一 cache set，没有 per-stream 的 L2 分区
+    types:
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: l2_residency_window_api
+    claim: cudaStreamSetAttribute 的 accessPolicyWindow 指定 base/num_bytes/hitRatio；窗口必须落在该 stream 将访问的地址
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 3
+    kind: api
+  - id: l2_residency_hitratio
+    claim: hitRatio 是目标驻留比例不是保证命中率；hitRatio=1.0 且窗口大于 MaxPersistingL2CacheSize 时超出部分不会驻留
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: l2_residency_ampere
+    claim: persisting L2 从 sm_80 / CUDA 11.0 起可用；sm_70 上设置 access policy window 无硬件效果或 API 不支持
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: l2_residency_reset
+    claim: 窗口属性不会在 kernel 结束自动清除；后续无关 kernel 仍可能按旧窗口优先缓存，需显式 reset stream attribute
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 3
+    kind: failure
+- id: malloc_api
+  name: 设备分配 API
+  leaves:
+  - id: malloc_api_cudamalloc
+    claim: cudaMalloc 返回至少 256B 对齐的 device 指针；不能 cudaFree 两次，double-free 是未定义/报错而不是静默 no-op
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 1
+    - 2
+    kind: api
+  - id: malloc_api_async
+    claim: cudaMallocAsync 从内存池按 stream 序分配，释放也按 stream；在无依赖的另一 stream 立刻用该指针可能尚未分配完成
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: malloc_api_free_sync
+    claim: cudaFree 可能同步设备；热路径反复 cudaMalloc/cudaFree 会插入隐式 sync，应改池化或 cudaMallocAsync
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: malloc_api_oom
+    claim: 显存不足返回 cudaErrorMemoryAllocation，指针不应使用；忽略错误码继续 kernel 会非法地址
+    types:
+    - debug
+    difficulty:
+    - 1
+    - 2
+    kind: failure
+  - id: malloc_api_pitch_align
+    claim: cudaMallocPitch 的 pitch 以字节计且满足对齐，通常 ≥ width*elemSize；用 width 当 pitch 访问 2D 会错行
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: malloc_api_array
+    claim: cudaMallocArray 分配的是 CUDA array 不是线性 device ptr，不能当 kernel 的 T* 参数解引用
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: failure
+  - id: malloc_api_managed
+    claim: cudaMallocManaged 得到的指针 host/device 都可用；对它再 cudaMemcpy 默认方向仍要选对，不是自动变成 no-op
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: malloc_api_host_malloc
+    claim: 设备 kernel 里 malloc 来自 device heap，与 host cudaMalloc 不是同一分配器；host cudaFree 不能释放 device malloc 指针
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+- id: pitched_2d
+  name: Pitch 与 2D/3D 布局
+  leaves:
+  - id: pitched_2d_index
+    claim: pitched 2D 元素地址 = base + y*pitch + x*elemSize；用 y*width+x 忽略 pitch 会读到 padding 或错行
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 1
+    - 2
+    kind: formula
+  - id: pitched_2d_memcpy2d
+    claim: cudaMemcpy2D 的 dpitch/spitch 是字节跨行，width 是每行拷贝字节；width>pitch 会 InvalidPitchValue
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: pitched_2d_make_pitched
+    claim: make_cudaPitchedPtr(ptr, pitch, xsize, ysize) 的 xsize/ysize 是逻辑尺寸，kernel 不会自动用它们做边界检查
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: pitched_2d_3d_extent
+    claim: cudaMalloc3D 的 extent.width 以字节计（对线性内存），height/depth 以元素计；三度混用单位会分配错误大小
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: pitched_2d_align_row
+    claim: pitch 被提到 512B 对齐时，宽 100 个 float 的行实际占 512B 不是 400B，分配总量 = pitch*height
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 2
+    kind: numeric
+  - id: pitched_2d_coalesce
+    claim: 沿 pitch 行方向的 warp 连续 x 访问可合并；沿 y 扫同一列是 stride=pitch 的访问，事务数接近 32
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 2
+    kind: formula
+  - id: pitched_2d_memcpy3dparms
+    claim: cudaMemcpy3DParms 的 srcPtr/dstPtr 与 srcArray/dstArray 互斥；线性 pitched 与 CUDA array 之间要用正确 kind
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: pitched_2d_zero_copy_row
+    claim: 只拷 width 字节/行时 padding 不传输；kernel 若读到 x>=width 的 padding 区，内容未定义
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    kind: failure
+- id: memcpy_kind
+  name: 拷贝方向与异步
+  leaves:
+  - id: memcpy_kind_enum
+    claim: cudaMemcpyHostToDevice/DeviceToHost/DeviceToDevice/Default 选错方向会 InvalidValue 或静默拷错；Default 依赖 UVA 推断
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 1
+    - 2
+    kind: api
+  - id: memcpy_kind_peer
+    claim: 跨 GPU 的 cudaMemcpyPeer 要求 peer access 已启用；未 enable 时 DeviceToDevice 不能替代 Peer
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: memcpy_kind_async_order
+    claim: 同一 stream 上 memcpyAsync 与 kernel 有序；不同 stream 无 event/wait 则拷贝与计算可重叠也可数据竞争
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: memcpy_kind_overlap
+    claim: 只有 pinned host + 非默认流 + 计算与传输无依赖时才真正重叠；可分页 host 会把重叠打成串行
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: memcpy_kind_3d_async
+    claim: cudaMemcpy3DAsync 同样遵守 stream 序；extent 为 0 的维不会自动变成 2D API，仍按 3D 描述符解释
+    types:
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: memcpy_kind_symbol
+    claim: cudaMemcpyToSymbol/FromSymbol 针对 __constant__/__device__ 符号；不能对 cudaMalloc 指针用 ToSymbol
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: memcpy_kind_default_uva
+    claim: cudaMemcpyDefault 在 UVA 下靠指针地址空间推断方向；把 host 栈指针和 device 指针传反会推断成错误 kind
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: memcpy_kind_size_bytes
+    claim: cudaMemcpy 的 count 是字节；拷贝 n 个 float 必须 n*sizeof(float)，传 n 只会拷前 n 字节
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 1
+    kind: failure
+- id: l1_policy
+  name: L1 缓存与只读路径
+  leaves:
+  - id: l1_policy_unified
+    claim: sm_70+ L1 与 texture/smem 统一缓存；增大 smem carveout 直接减小 L1 容量，不是独立 32KB L1
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: l1_policy_disable
+    claim: 编译器/PTX 的 .cg 可绕过 L1；没有 cudaDeviceSetCacheConfig 能在 sm_70+ 上把 L1 全局关成 Kepler 那种 16/48 开关
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: l1_policy_cache_config
+    claim: cudaDeviceSetCacheConfig / cudaFuncSetCacheConfig 在 sm_70+ 上大多被忽略，因为 L1/smem 由 carveout 决定
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: l1_policy_tex_hit
+    claim: NCU l1tex 命中率混合了 global/local/texture；local spill 高时 L1 命中率看起来不差但 DRAM 仍忙
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: l1_policy_line_128
+    claim: L1 缓存行常按 128B 组织，sector 32B；对齐 128B 的 32×4B 访问填满一行，偏 64B 则跨两行
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: l1_policy_write
+    claim: 多数全局 store 不分配 L1 行（write-through/no-allocate 类行为依 arch），优化 store 应对准 L2/sector 而不是 L1 hit
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: l1_policy_readonly
+    claim: 编译器把 const __restrict__ 全局指针标为只读缓存候选；去掉 const 后同一 load 可能改走可写 L1 路径
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: l1_policy_ampere_192k
+    claim: A100 (sm_80) 统一缓存约 192KB，smem 最大 164KB；carveout 拉满 smem 后 L1 剩余很小
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+- id: prefetch_hint
+  name: 预取与缓存提示
+  leaves:
+  - id: prefetch_hint_prefetch_l2
+    claim: sm_80+ 的 prefetch.global.L2 把地址拉进 L2，不向寄存器写数据；预取距离应覆盖 DRAM 延迟而不是 1 条指令
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: prefetch_hint_ptx_ca
+    claim: ld.global.ca/.cg/.cs/.lu/.cv 只作用于该指令；循环里一次 .cs 不会把后续默认 ld 都变成 streaming
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: prefetch_hint_builtin
+    claim: __builtin_prefetch 在 nvcc device 路径不一定变成 L2 prefetch；要用 PTX prefetch 或 cuda::memcpy_async 才有硬件效果
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: api
+  - id: prefetch_hint_too_near
+    claim: 预取与使用间隔 < DRAM 延迟（常 200+ cycle）时预取无效；过远则可能在使用前被驱逐
+    types:
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: prefetch_hint_uniform
+    claim: warp 内分叉地址各 prefetch 会变成最多 32 个 L2 请求；统一基址+连续偏移才能合并预取
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: prefetch_hint_uvm
+    claim: cudaMemPrefetchAsync 是页级迁移，不是 L2 prefetch；对已在 GPU 的页再 prefetch 开销很小，对 CPU 页则是 PCIe 拷贝
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: prefetch_hint_policy_window
+    claim: access policy window 的 hitProp=persisting 与单条 prefetch 指令正交；只设窗口不发访问不会把数据拉进 L2
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: prefetch_hint_cp_async
+    claim: cp.async 把 global 预取进 smem 而不是 L1；把它当 L2 prefetch 用会占用 smem 带宽与 mbarrier/commit 协议
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+- id: mempool_async
+  name: 异步内存池
+  leaves:
+  - id: mempool_async_create
+    claim: cudaMemPoolCreate + cudaMallocFromPoolAsync 按 stream 分配；池耗尽时按属性扩张或返回 OOM，不会回退到同步 cudaMalloc
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: mempool_async_reuse
+    claim: cudaFreeAsync 把块还回池供后续同池分配复用；在 producer stream 释放前，consumer stream 无依赖地 mallocAsync 不能假定复用同一地址
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: mempool_async_trim
+    claim: cudaMemPoolTrimTo 把空闲块还给驱动；不 trim 时池会占着高峰显存，看起来像泄漏但 cudaPointerGetAttributes 仍显示已分配
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 3
+    kind: api
+  - id: mempool_async_attr
+    claim: cudaMemPoolAttrReleaseThreshold 控制空闲显存持有量；阈值=0 倾向尽快释放，过大则多进程易 OOM
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: mempool_async_default
+    claim: cudaMallocAsync(NULL pool) 使用当前设备默认池；cudaDeviceSetMemPool 改变默认池后，旧指针仍须用对应 freeAsync
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: mempool_async_export
+    claim: 池导出/导入允许跨进程共享；未导入的 IPC 指针在另一进程 cudaFreeAsync 是非法
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: api
+  - id: mempool_async_sync_free
+    claim: 对 mallocAsync 指针调用同步 cudaFree 不合法；必须 cudaFreeAsync 或先同步再按文档路径释放
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: mempool_async_cuda11
+    claim: cudaMallocAsync / 内存池从 CUDA 11.2 起可用；更老运行时没有该符号，不是静默退化成 cudaMalloc
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 2
+    kind: feature
+- id: alignment_vec
+  name: 对齐与向量加载
+  leaves:
+  - id: alignment_vec_float4
+    claim: float4 全局加载要求 16B 对齐；cudaMalloc 满足，但从 float* + 1 再 reinterpret 为 float4* 是未对齐
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    kind: failure
+  - id: alignment_vec_int2
+    claim: int2/double 需要 8B 对齐，int4/float4/double2 需要 16B；对齐不足时编译器仍可能发 128-bit ld，结果静默错
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: alignment_vec_assume
+    claim: __builtin_assume_aligned(p,16) 或 alignas 让编译器发向量 ld；运行时碰巧对齐但无 assume 时可能仍标量 ld
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: alignment_vec_struct
+    claim: struct { float x,y,z; } 每元素 12B，warp 连续取 .x 步长 12B 不能合并成 1 条 128B 事务
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 2
+    kind: formula
+  - id: alignment_vec_malloc
+    claim: cudaMalloc 对齐 ≥256B，足以 float4；子对象偏移 +4 后对齐丢失，需要显式对齐分配或 padding
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 2
+    kind: numeric
+  - id: alignment_vec_smem
+    claim: smem 向量加载同样要对齐；extern __shared__ float s[] 起始对齐足够，但 s[1] 取 float4 则 4B 对齐不够 16B
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    kind: failure
+  - id: alignment_vec_cp_async
+    claim: cp.async 16B 传输要求 global 与 smem 地址都 16B 对齐；只保证一边对齐仍会 fault 或错数据
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    kind: failure
+  - id: alignment_vec_natural
+    claim: 自然对齐访问的事务数最少；对 4B 类型保证 4B 对齐只能发 32-bit ld，要 128-bit 必须 16B 对齐的向量类型
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 2
+    kind: mechanism

@@ -1,0 +1,562 @@
+id: T25
+name: 性能模型与公式
+children:
+  - id: occupancy
+    name: Occupancy 闭式
+    leaves:
+      - id: occupancy_reg_128
+        claim: "Ampere/Hopper 每 SM 65536 个 32-bit 寄存器且最多 64 warp，128 regs/thread → 65536/(32×128)=16 warp，occupancy=16/64=0.25。"
+        types: [optimization, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: occupancy_smem_reserve
+        claim: "A100 每 SM 最多 164 KB 共享内存且每 block 另留 1 KB，96 KB/block → floor(164/97)=1 个驻留 block；256 线程则仅 8 warp、occupancy=8/64=0.125。"
+        types: [optimization, profiling]
+        difficulty: [2, 3]
+        kind: formula
+      - id: occupancy_launch_bounds
+        claim: "__launch_bounds__(256,4) 要求每 SM 至少 4 个 256 线程块，寄存器上限=65536/(4×256)=64 regs/thread，ptxas 超此值则编译失败而非降 occupancy。"
+        types: [syntax, optimization]
+        difficulty: [2, 3]
+        kind: formula
+      - id: occupancy_granule_256
+        claim: "sm_80 起按 warp 以 256 寄存器为粒度分配：40 regs/thread → 40×32=1280，恰好 5×256，故 max warps=floor(65536/1280)=51，再与 64 和 block 上限取 min。"
+        types: [optimization, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: occupancy_threads_2048
+        claim: "Ampere/Hopper 每 SM 最多 2048 线程：128 threads/block → 最多 16 block，但 16×4=64 warp 刚好顶满，occupancy=64/64=1.0。"
+        types: [optimization, conceptual]
+        difficulty: [2]
+        kind: formula
+      - id: occupancy_blocks_32
+        claim: "sm_80/sm_90 每 SM 最多 32 个 resident block：32 threads/block → 32 warp，occupancy=32/64=0.5，寄存器与 smem 再空也无法超过该 block 配额。"
+        types: [optimization, counterfactual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: occupancy_h100_smem
+        claim: "H100 每 SM 228 KB smem、每 block 预留约 1 KB：114 KB/block → floor(228/115)=1 resident block；256 线程 occupancy=8/64=0.125。"
+        types: [optimization, layout]
+        difficulty: [2, 3]
+        kind: formula
+      - id: occupancy_api_blocks
+        claim: "cudaOccupancyMaxActiveBlocksPerMultiprocessor(&nb, k, 256, 0) 给出每 SM 块数；全卡并发线程=nb×256×SM_count，不是 grid 大小本身。"
+        types: [syntax, profiling]
+        difficulty: [2, 3]
+        kind: api
+  - id: bandwidth_tx
+    name: 带宽与事务
+    leaves:
+      - id: bandwidth_tx_coalesce_128
+        claim: "32 线程对 128B 对齐的连续 float 发出 1 次 128B L1 事务=4 个 32B sector，有效载荷 128/128=1.0。"
+        types: [optimization, conceptual]
+        difficulty: [2]
+        kind: formula
+      - id: bandwidth_tx_stride2
+        claim: "warp 访问 float[tid*2] 跨 256B，需 2 次 128B 事务，效率=128B 有用/256B 事务=0.5，带宽近似腰斩。"
+        types: [optimization, profiling]
+        difficulty: [2, 3]
+        kind: formula
+      - id: bandwidth_tx_misalign_16
+        claim: "128B 向量加载若基址仅 16B 对齐，会跨两条 128B cache line，事务字节从 128 升到 256，效率=0.5。"
+        types: [debug, layout]
+        difficulty: [2, 3]
+        kind: formula
+      - id: bandwidth_tx_sector_32
+        claim: "A100/H100 HBM 以 32B sector 为最小 DRAM 突发，一次 8B 标量 miss 仍付 32B，效率=8/32=0.25。"
+        types: [profiling, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: bandwidth_tx_float4
+        claim: "对齐 float4 使 warp 载荷 32×16B=512B，对应 4 次 128B 事务，效率=512/512=1.0；基址仅 8B 对齐则会拆成更多事务。"
+        types: [optimization, layout]
+        difficulty: [2, 3]
+        kind: formula
+      - id: bandwidth_tx_stride32
+        claim: "float[tid*32] 使每线程落在不同 128B 行，32 次 128B 事务搬 128B 有用数据，效率=128/(32×128)=1/32。"
+        types: [optimization, profiling]
+        difficulty: [2, 3]
+        kind: formula
+      - id: bandwidth_tx_store_sector
+        claim: "写路径同样按 32B sector：只改 4B 且该行不在 L2 时仍写回 32B，部分写效率=4/32=0.125。"
+        types: [profiling, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: bandwidth_tx_a100_achieved
+        claim: "A100 HBM2e 峰值 1.555 TB/s，拷贝核实测约 0.8×峰值 = 1.24 TB/s；Nsight 若远低于此说明未合并或 occupancy 不足。"
+        types: [profiling, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+  - id: roofline
+    name: Roofline
+    leaves:
+      - id: roofline_a100_ridge
+        claim: "A100 非 Tensor FP32 峰值 19.5 TFLOP/s、HBM2e 带宽 1.555 TB/s，ridge AI=19.5e12/1.555e12≈12.5 FLOP/byte。"
+        types: [profiling, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: roofline_h100_ridge
+        claim: "H100 SXM 非 Tensor FP32 约 67 TFLOP/s、HBM3 约 3.35 TB/s，ridge AI=67e12/3.35e12≈20 FLOP/byte，低于此必受带宽限制。"
+        types: [profiling, compare]
+        difficulty: [2, 3]
+        kind: formula
+      - id: roofline_saxpy_ai
+        claim: "SAXPY y=a*x+y 每点 2 FLOP、读 x/y 写 y 共 12B，AI=2/12≈0.167 FLOP/byte，远低于 A100 的 12.5，故一定是 memory-bound。"
+        types: [optimization, conceptual]
+        difficulty: [2]
+        kind: formula
+      - id: roofline_gemm_tile_ai
+        claim: "从 HBM 只读 A、B 的 128×128×32 GEMM 磁贴：FLOP=2×128×128×32=1,048,576，字节=2×128×32×4=32,768，AI=32 FLOP/byte，在 H100 上已过 ridge。"
+        types: [optimization, layout]
+        difficulty: [3]
+        kind: formula
+      - id: roofline_a100_fp16_tc
+        claim: "A100 dense FP16 Tensor Core 312 TFLOP/s / 1.555 TB/s ⇒ ridge AI=312e12/1.555e12≈201 FLOP/byte，小 K GEMM 很难到此点。"
+        types: [profiling, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: roofline_h100_fp16_tc
+        claim: "H100 SXM dense FP16 Tensor 约 989 TFLOP/s / 3.35 TB/s，ridge AI = 989e12/3.35e12≈295 FLOP/byte；低于此的 AI 仍受 HBM 限制而非 Tensor 峰值。"
+        types: [profiling, compare]
+        difficulty: [3]
+        kind: formula
+      - id: roofline_dot_ai
+        claim: "N 维点积 2N-1≈2N FLOP、读 8N 字节（两路 float），AI≈2N/8N=0.25 FLOP/byte，落在 A100 ridge 12.5 之下两个数量级。"
+        types: [optimization, conceptual]
+        difficulty: [2]
+        kind: formula
+      - id: roofline_time
+        claim: "Roofline 时间下界 t=max(FLOP/peak, bytes/BW)；A100 上 1e9 FLOP 与 1e9 B 时 t=max(1e9/19.5e12, 1e9/1.555e12)≈6.4e-4 s，由带宽决定。"
+        types: [profiling, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+  - id: wave_quant
+    name: Wave 量化
+    leaves:
+      - id: wave_quant_ceil_blocks
+        claim: "满波容量=n_SM×blocks_per_SM；A100 108 SM、每 SM 8 block 时 1000 block 的波数=ceil(1000/864)=3，末波仅 1000-2×864=136 block。"
+        types: [optimization, profiling]
+        difficulty: [2, 3]
+        kind: formula
+      - id: wave_quant_tail_eff
+        claim: "末波效率=尾块数/波容量；136/864≈0.157，即第三波 SM 平均只拿到约 16% 的满驻留时间。"
+        types: [optimization, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: wave_quant_32_thread
+        claim: "Hopper 每 SM 最多 32 block、64 warp：32 线程/block → 32×1=32 warp，occupancy=32/64=0.5，即使寄存器与 smem 都有余量也无法再高。"
+        types: [optimization, counterfactual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: wave_quant_768_thread
+        claim: "768 线程/block=24 warp，受 2048 线程/SM 限制只能驻留 2 block=48 warp，occupancy=48/64=0.75，第三块会因线程配额被拒。"
+        types: [optimization, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: wave_quant_h100_grid
+        claim: "H100 SXM 132 SM、每 SM 8 block → 波容量=1056 block；2112 block 恰好 2 波，2113 block 产生第 3 波且尾波只有 1 block。"
+        types: [optimization, profiling]
+        difficulty: [2, 3]
+        kind: formula
+      - id: wave_quant_persistent
+        claim: "持久核 grid=n_SM×blocks_per_SM 使波数=1，尾波效率=1.0；grid 取 2×满波+1 则尾波效率=1/满波容量。"
+        types: [optimization, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: wave_quant_work
+        claim: "若每 block 工作量相等，总时间 T = ceil(N_blocks/wave_size)×T_full；把 1000 块改成 864 块少一波，可去掉 T_full 的整段尾波开销。"
+        types: [optimization, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: wave_quant_occupancy_wave
+        claim: "blocks_per_SM 从 8 降到 4 时 A100 波容量 108×4=432，1000 block 波数=ceil(1000/432)=3，尾块=1000-2×432=136，与 8-block  occupancy 的尾数巧合相同但每波更长。"
+        types: [optimization, compare]
+        difficulty: [3]
+        kind: formula
+  - id: tile_sizing
+    name: Tile 尺寸
+    leaves:
+      - id: tile_sizing_smem_stages
+        claim: "流水 smem=stages×(BM×BK+BN×BK)×sizeof(T)；float、stages=2、BM=BN=128、BK=32 → 2×(4096+4096)×4=65536 字节。"
+        types: [layout, optimization]
+        difficulty: [2, 3]
+        kind: formula
+      - id: tile_sizing_a100_overflow
+        claim: "A100 164 KB smem 上限下，float 3 级 128×128×64 磁贴需 3×(128×64×2)×4=196608 字节>164 KB，启动失败或必须降 BK/stages。"
+        types: [debug, layout]
+        difficulty: [3]
+        kind: formula
+      - id: tile_sizing_c_regs
+        claim: "C 磁贴驻寄存器时每线程寄存器数=(BM×BN)/block_threads；128×128 输出、256 线程 → 64 个 float=64 个寄存器，尚未计入地址与流水。"
+        types: [optimization, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: tile_sizing_mma_k_multiple
+        claim: "sm_80 f16 mma.sync 形状 m16n8k16 要求 BK 被 16 整除，BK=24 无法填满一次 MMA K 维，必须 pad 到 32 或改 atom。"
+        types: [layout, debug]
+        difficulty: [3]
+        kind: formula
+      - id: tile_sizing_double_buf
+        claim: "双缓冲 stages=2 使 smem 翻倍：BK=32、BM=BN=64、float → 2×(64×32+64×32)×4=32768 B，换取 cp.async 与计算重叠。"
+        types: [layout, optimization]
+        difficulty: [2, 3]
+        kind: formula
+      - id: tile_sizing_wgmma_m64
+        claim: "Hopper wgmma m64n128k16 的 CTA 输出 64×128，每线程若 128 线程块持有 (64×128)/128=64 个 acc 元素；再加 smem 描述符寄存器。"
+        types: [layout, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: tile_sizing_vec_load
+        claim: "全局加载宽度 16B 时，BK 维元素数应被 16/sizeof(T) 整除：float 要求 BK%4==0，否则尾部标量 load 破坏合并。"
+        types: [layout, optimization]
+        difficulty: [2, 3]
+        kind: formula
+      - id: tile_sizing_reg_cap
+        claim: "128×256 输出、128 线程 → 每线程 256 个 float acc，远超 255 寄存器上限，ptxas 溢出到 local，occupancy 与延迟同时恶化。"
+        types: [optimization, debug]
+        difficulty: [3]
+        kind: formula
+  - id: latency_ilp
+    name: 延迟隐藏与 ILP
+    leaves:
+      - id: latency_ilp_dram_occ
+        claim: "HBM 命中约 400 cycle 时，若每 warp 每 4 cycle 只能发 1 次无关指令，需要 400/4=100 个独立 warp 才能盖满；64 warp occupancy 不够则要 ILP。"
+        types: [optimization, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: latency_ilp_two_ld
+        claim: "每线程 2 个独立 ld.global 使 ILP=2，等效可隐藏延迟的 warp 需求减半：400/4/2=50 warp，occupancy=50/64≈0.78 即可能饱和。"
+        types: [optimization, compare]
+        difficulty: [3]
+        kind: formula
+      - id: latency_ilp_math_pipe
+        claim: "FFMA 吞吐每 SMSP 每周期 1 次时，4 SMSP 的 SM 峰值 4 FFMA/cycle；100% 占用下每线程平均 4/2048=1/512 cycle/FFMA，不能用该数当延迟。"
+        types: [conceptual, profiling]
+        difficulty: [3]
+        kind: formula
+      - id: latency_ilp_dep_chain
+        claim: "依赖链 a=a*b+c 重复 N 次延迟 ≈ N×FFMA_lat（约 4 cycle），ILP=1；拆成 4 条无关累加器则吞吐接近峰值而链长 /4。"
+        types: [optimization, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: latency_ilp_l2_hit
+        claim: "L2 命中约 200 cycle 时，64 warp×ILP1 可覆盖 64×4=256 cycle 的发射间隔，刚好盖住 L2；HBM miss 则仍露馅。"
+        types: [profiling, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: latency_ilp_occupancy_not_enough
+        claim: "把 occupancy 从 0.5 提到 1.0 只把可隐藏延迟从 32×4=128 cycle 提到 256 cycle，对 ~400 cycle HBM 仍不足，必须加独立访存。"
+        types: [optimization, counterfactual]
+        difficulty: [3]
+        kind: formula
+      - id: latency_ilp_sfu
+        claim: "特殊函数 __expf 走 SFU，吞吐远低于 FFMA；同一 SM 上 SFU 与 FP32 比率约 1:4，exp 密集核的峰值 FLOP 应按 SFU 吞吐重算。"
+        types: [profiling, conceptual]
+        difficulty: [3]
+        kind: numeric
+      - id: latency_ilp_stall_short
+        claim: "Nsight short scoreboard stall 占比 p 时，有效指令吞吐 ≈ (1-p)×issue_peak；p=0.5 则至少需要 2× 独立 warp 或 ILP 才能回到峰值。"
+        types: [profiling, optimization]
+        difficulty: [3]
+        kind: formula
+  - id: l2_cache
+    name: L2 缓存模型
+    leaves:
+      - id: l2_cache_a100_size
+        claim: "A100 40 MB L2，工作集 W 的命中近似：W≤40 MB 时可驻留，超额后命中率 hit = 40/W（全相联粗估）。"
+        types: [profiling, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: l2_cache_h100_size
+        claim: "H100 SXM 50 MB L2；同样 80 MB 工作集命中粗估 50/80=0.625，A100 上仅 40/80=0.5。"
+        types: [compare, profiling]
+        difficulty: [2, 3]
+        kind: formula
+      - id: l2_cache_sector
+        claim: "L2 以 32B sector 分配：读 128B 对齐行填 sector 数 = 128/32 = 4；只碰 8B 仍分配 1 个 32B sector。"
+        types: [layout, conceptual]
+        difficulty: [2]
+        kind: formula
+      - id: l2_cache_persist_window
+        claim: "Ampere cudaAccessPolicyWindow 的 hitRatio=1.0 且 bytes=N 时，窗口内访问优先保留在 L2，N 不能超过 l2CacheSize。"
+        types: [optimization, syntax]
+        difficulty: [3]
+        kind: feature
+      - id: l2_cache_bytes_from_hit
+        claim: "有效 HBM 字节 ≈ L2_miss_sectors×32；Nsight l2_sector_miss 为 M 时 DRAM 流量=32M 字节，不是 ld 指令数。"
+        types: [profiling, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: l2_cache_reuse_tile
+        claim: "K 维分块使 A 面板在 L2 复用次数 = ceil(N/BN)：从 HBM 读 A 的次数等于该面板加载次数，AI 随 BN 增大而升。"
+        types: [optimization, layout]
+        difficulty: [3]
+        kind: formula
+      - id: l2_cache_writeback
+        claim: "写分配下 store miss 先填 32B sector 再写回：只写 4B 导致读-改-写，DRAM 字节=32 读+32 写=64 B/4B 有效。"
+        types: [profiling, debug]
+        difficulty: [3]
+        kind: formula
+      - id: l2_cache_partition
+        claim: "A100 L2 跨 2 个内存分区交叉，跨度 256B 的连续访问才能两侧都忙；仅 128B 行可能只打中一个分区，峰值腰斩。"
+        types: [optimization, conceptual]
+        difficulty: [3]
+        kind: mechanism
+  - id: smem_bank
+    name: 共享内存 bank 模型
+    leaves:
+      - id: smem_bank_32way
+        claim: "32-bit bank 共 32 个：地址 addr 的 bank= (addr/4) % 32；同 cycle 两线程同一 bank 不同 32-bit 字 → 2-way conflict，吞吐 /2。"
+        types: [optimization, layout]
+        difficulty: [2]
+        kind: formula
+      - id: smem_bank_stride2
+        claim: "smem[tid*2] 使 32 线程落入 16 个 bank、每个 2 线程，conflict=2，有效带宽=峰值/2。"
+        types: [optimization, debug]
+        difficulty: [2]
+        kind: formula
+      - id: smem_bank_pad33
+        claim: "tile[32][33] 使列跨距 33 个 float，bank=(col*33)%32 与 tid 解耦，32 线程同行无 conflict，多付 33/32-1≈3.1% 容量。"
+        types: [layout, optimization]
+        difficulty: [2, 3]
+        kind: formula
+      - id: smem_bank_64bit
+        claim: "64-bit 访问占相邻两 bank：broadcast 同一 64-bit 字无 conflict，但 stride-1 的 double 仍按 32-bit bank 对检查。"
+        types: [conceptual, layout]
+        difficulty: [3]
+        kind: mechanism
+      - id: smem_bank_broadcast
+        claim: "32 线程读同一 32-bit 字是 broadcast，conflict=1、效率=1.0；读同一 bank 的不同字才串行化。"
+        types: [compare, conceptual]
+        difficulty: [2]
+        kind: formula
+      - id: smem_bank_peak_a100
+        claim: "A100/H100 每 SM 共享内存 32 bank×4B×每周期，4 个 SMSP 合计峰值 = 32×4×1 = 128 B/cycle/SM；2-way conflict 把该峰值减半。"
+        types: [profiling, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: smem_bank_swizzle
+        claim: "XOR swizzle col' = col ^ (row bits) 把 2-way 变成 1-way 当且仅当冲突对的行号低位不同；row 全相同则 swizzle 无效。"
+        types: [layout, optimization]
+        difficulty: [3]
+        kind: mechanism
+      - id: smem_bank_vec128
+        claim: "128-bit smem load 每线程 16B=4 个 32-bit bank；32 线程若基址对齐且连续，覆盖全部 32 bank 恰好 1 次，效率=1.0。"
+        types: [layout, optimization]
+        difficulty: [3]
+        kind: formula
+  - id: tensor_tflops
+    name: Tensor 吞吐闭式
+    leaves:
+      - id: tensor_tflops_a100_dense
+        claim: "A100 SXM dense FP16 Tensor 峰值 312 TFLOP/s；利用率 u=实测FLOP/312e12，u=0.5 表示只吃到一半 MMA issue。"
+        types: [profiling, conceptual]
+        difficulty: [2]
+        kind: formula
+      - id: tensor_tflops_a100_sparse
+        claim: "A100 2:4 稀疏 FP16 峰值 624 TFLOP/s=2×312；非 2:4 模式不能用该峰值，应回退 dense 312。"
+        types: [compare, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: tensor_tflops_h100_fp8
+        claim: "H100 SXM FP8 Tensor 峰值约 1979 TFLOP/s = 2×989 TFLOP/s（FP16 Tensor）；同一核若混 FP16 MMA，峰值应按 989 而不是 1979。"
+        types: [profiling, compare]
+        difficulty: [3]
+        kind: formula
+      - id: tensor_tflops_mma_flops
+        claim: "一次 m16n8k16.f16 MMA 的 FLOP=2×16×8×16=4096；warp 要达到峰值必须按硬件 issue 间隔连续发出该指令。"
+        types: [conceptual, layout]
+        difficulty: [2, 3]
+        kind: formula
+      - id: tensor_tflops_wgmma_flops
+        claim: "Hopper wgmma m64n128k16 一次 FLOP=2×64×128×16=262144；K 循环次数=K/16，总 FLOP=262144×(K/16)。"
+        types: [layout, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: tensor_tflops_tf32
+        claim: "A100 TF32 Tensor 峰值 156 TFLOP/s=312/2，因 TF32 MMA K 维等效减半精度吞吐；用 TF32 却按 FP16 312 算利用率会差 2×。"
+        types: [profiling, compare]
+        difficulty: [3]
+        kind: formula
+      - id: tensor_tflops_blackwell_fp4
+        claim: "Blackwell B200 dense FP4 Tensor 量级约 20 PFLOP/s 级；用 H100 FP8 的 2 PFLOP 当 ridge 会把 AI 阈值算低一个数量级。"
+        types: [compare, conceptual]
+        difficulty: [3]
+        kind: feature
+      - id: tensor_tflops_util
+        claim: "实测 80 μs 完成 128×128×128 FP16 GEMM：FLOP=2×128^3=4,194,304，吞吐=4.19e6/80e-6≈52.4 GFLOP/s，相对 A100 312 TFLOP 利用率≈0.00017。"
+        types: [profiling, debug]
+        difficulty: [3]
+        kind: formula
+  - id: issue_rate
+    name: 发射率与双发射
+    leaves:
+      - id: issue_rate_smsp
+        claim: "Ampere 每 SM 4 个 SMSP，每 SMSP 每周期最多发射 1 条指令到指定管道，SM 峰值 issue=4 inst/cycle。"
+        types: [conceptual, profiling]
+        difficulty: [2, 3]
+        kind: formula
+      - id: issue_rate_warp_slot
+        claim: "64 个 warp 分给 4 个 SMSP，每 SMSP warp 数 = 64/4 = 16；若每 4 cycle 才有 1 条无关指令，有效 issue = 峰值/4。"
+        types: [optimization, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: issue_rate_dual
+        claim: "部分架构允许同一 SMSP 双发射到不同管道（如 INT+FP），理论 2 inst/SMSP/cycle；两条都走 FP32 管道则仍是 1。"
+        types: [compare, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: issue_rate_ipc
+        claim: "Nsight sm__ipc 目标接近 4（Ampere SM）；测得 ipc=1.0 意味着只用了 1/4 发射槽，优先查依赖链而非 HBM。"
+        types: [profiling, optimization]
+        difficulty: [2, 3]
+        kind: formula
+      - id: issue_rate_clock
+        claim: "H100 SM 约 1.8 GHz 时峰值 FP32=67 TFLOP/s 与 132 SM×每周期 FMA 数一致；降频到 1.2 GHz 则峰值按 1.2/1.8=2/3 缩放。"
+        types: [profiling, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: issue_rate_barrier
+        claim: "__syncthreads 使 CTA 内所有 warp 在同一 pc 会合，issue 在等待期降为 0；每 8 次 FFMA 就 barrier 一次，有效吞吐比例 = 8/(8+T_bar)。"
+        types: [optimization, debug]
+        difficulty: [3]
+        kind: formula
+      - id: issue_rate_pred
+        claim: "warp 内 16/32 线程走 then 时，该分支 issue 仍占满 warp 槽，有效数学吞吐 = 0.5×峰值；两路都执行则时间相加不是平均。"
+        types: [optimization, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: issue_rate_hopper_tpc
+        claim: "Hopper 每 GPC 含多个 TPC，每 TPC 1 个 SM；占用模型按 SM 计数 132，而不是按 TPC 或 GPC 数当 SM 数用。"
+        types: [conceptual, debug]
+        difficulty: [2]
+        kind: feature
+  - id: launch_cost
+    name: Launch 与网格开销
+    leaves:
+      - id: launch_cost_host_us
+        claim: "空 kernel 的 host launch 开销约 3–10 μs；工作量 <10 μs 的核会被 launch 主导，应合并网格或用 CUDA Graph。"
+        types: [profiling, optimization]
+        difficulty: [2]
+        kind: numeric
+      - id: launch_cost_graph
+        claim: "实例化后 cudaGraphLaunch 把多次 kernel 的 host 提交合成一次，N 个 5 μs 核的 host 开销从 T = N×5 μs 降到约 1 次 launch。"
+        types: [optimization, compare]
+        difficulty: [2, 3]
+        kind: formula
+      - id: launch_cost_dyn_smem
+        claim: "动态 smem 使 occupancy 随第三次 chevron 参数变：同一核 48 KB vs 96 KB 可能导致 blocks_per_SM 从 3 降到 1，波容量 = n_SM×1 而非 n_SM×3。"
+        types: [optimization, syntax]
+        difficulty: [2, 3]
+        kind: formula
+      - id: launch_cost_grid_stride
+        claim: "grid-stride 循环用 n_SM×blocks_per_SM 个 block 覆盖 N 元素，波数=1；元素循环次数=ceil(N/(grid×block))。"
+        types: [optimization, conceptual]
+        difficulty: [2]
+        kind: formula
+      - id: launch_cost_cooperative
+        claim: "cudaLaunchCooperativeKernel 要求 occupancy 能同时驻留整个 grid；grid=n_SM×maxBlocks 时刚好 1 波，再多一个 block 启动失败。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: launch_cost_cluster
+        claim: "Hopper clusterDim=8 时每 cluster 8 个 CTA 必须同 GPC 共驻，有效每 SM 可用 block 配额按 cluster 对齐，grid 必须是 cluster 大小的倍数。"
+        types: [layout, conceptual]
+        difficulty: [3]
+        kind: feature
+      - id: launch_cost_cdp
+        claim: "设备侧子 launch 另付 pending-launch 槽与深度计数；父核 10 μs 内发 1000 次 CDP launch 会被 pending 上限与发射队列卡住。"
+        types: [debug, profiling]
+        difficulty: [3]
+        kind: numeric
+      - id: launch_cost_occupancy_api
+        claim: "cudaOccupancyMaxPotentialBlockSize 给出的 blockSize 使 resident blocks×blockSize 最大，不保证该配置的 roofline 时间最短。"
+        types: [compare, optimization]
+        difficulty: [2, 3]
+        kind: api
+  - id: pipe_overlap
+    name: 计算通信重叠
+    leaves:
+      - id: pipe_overlap_two_stage
+        claim: "双缓冲中计算时间 Tc 与拷贝时间 Tm 重叠后总时间≈max(Tc,Tm)+T_prologue；Tc=Tm 时加速比相对串行 (Tc+Tm)/Tc=2。"
+        types: [optimization, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: pipe_overlap_stages
+        claim: "stages=S 的软件流水稳态时间=max(Tc, Tm/(S-1))（若 S-1 个拷贝槽并行隐藏）；S=1 无重叠，总时间=Tc+Tm。"
+        types: [optimization, layout]
+        difficulty: [3]
+        kind: formula
+      - id: pipe_overlap_cp_async
+        claim: "Ampere cp.async 把 global→smem 从计算流水剥离；wait_group 0 前读该 smem 的时间不能计入重叠，必须算进 Tc 的依赖。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: feature
+      - id: pipe_overlap_tma
+        claim: "Hopper TMA 拷贝与 wgmma 重叠时，mbarrier 到达前的 wgmma 不能用该 stage；有效重叠深度=已 commit 且已 arrive 的 stage 数。"
+        types: [conceptual, optimization]
+        difficulty: [3]
+        kind: feature
+      - id: pipe_overlap_comm
+        claim: "NVSHMEM nbi put 与本地 MMA 重叠：T=max(T_mma, T_put)+T_quiet；quiet 本身不可与依赖该数据的下一次 MMA 重叠。"
+        types: [optimization, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: pipe_overlap_memcpy_async
+        claim: "cudaMemcpyAsync 与 kernel 同 stream 则串行；分两个 stream 且无 event 依赖才能重叠，总时间→max(T_copy,T_kern)。"
+        types: [optimization, compare]
+        difficulty: [2]
+        kind: formula
+      - id: pipe_overlap_alpha
+        claim: "重叠效率 η=1-(T_overlap / T_serial)；T_serial=10 ms、重叠后 6 ms ⇒ η=0.4，不是 1-6/10 的互补命名错误：加速比=10/6≈1.67。"
+        types: [profiling, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: pipe_overlap_tail
+        claim: "K 个 stage 的流水尾波仍有 S-1 个未填满的prologue/epilogue；K=S 时流水几乎全是填充/排空，加速比接近 1。"
+        types: [optimization, conceptual]
+        difficulty: [3]
+        kind: formula
+  - id: dram_eff
+    name: DRAM 效率与功耗代理
+    leaves:
+      - id: dram_eff_roofline_bw
+        claim: "有效带宽 Beff=bytes_useful/time；A100 上 Beff/1.555e12=0.3 表示只吃到 30% HBM，优先查合并与 sector 浪费。"
+        types: [profiling, optimization]
+        difficulty: [2]
+        kind: formula
+      - id: dram_eff_sector_waste
+        claim: "有用字节 U、事务字节 T 时 DRAM 效率=U/T；U=8、T=32 ⇒ 0.25，与 32B sector 标量 miss 公式一致。"
+        types: [profiling, conceptual]
+        difficulty: [2]
+        kind: formula
+      - id: dram_eff_read_write
+        claim: "拷贝核读+写字节 = 2N，峰值按双向 HBM 仍受同一套针脚限制，Beff 上限 = 1.555 TB/s 而不是 2×1.555。"
+        types: [conceptual, compare]
+        difficulty: [2, 3]
+        kind: formula
+      - id: dram_eff_ecc
+        claim: "开启 ECC 的 A100 有效用户带宽低于关闭 ECC 的规格峰值，Nsight dram__bytes 已含 ECC 开销，不能再把峰值当 1.555 不打折。"
+        types: [profiling, conceptual]
+        difficulty: [3]
+        kind: numeric
+      - id: dram_eff_l2hit_reduce
+        claim: "命中率 h 时 HBM 字节 ≈ (1-h)×demand_bytes；h=0.8、demand=100 GB ⇒ DRAM=20 GB，roofline 应代入 20e9 而非 100e9。"
+        types: [profiling, optimization]
+        difficulty: [2, 3]
+        kind: formula
+      - id: dram_eff_wave_tail
+        claim: "末波 occupancy = 0.157 时该波的 HBM 饱和度也 ≈0.157，三波平均带宽比例 = (2×1.0+0.157)/3≈0.72。"
+        types: [optimization, profiling]
+        difficulty: [3]
+        kind: formula
+      - id: dram_eff_store_only
+        claim: "只写不读的初始化核仍付写分配读：未用 st.global.wt/.cg 时可能多读 32B sector，效率 = 32/(32+32) = 0.5。"
+        types: [debug, profiling]
+        difficulty: [3]
+        kind: formula
+      - id: dram_eff_h100_peak
+        claim: "H100 SXM HBM3 峰值 3.35 TB/s，80% 经验可达 Beff = 0.8×3.35 = 2.68 TB/s；Nsight 若 <1 TB/s 对合并良好的拷贝核应查 launch/occupancy 而非峰值表。"
+        types: [profiling, conceptual]
+        difficulty: [2, 3]
+        kind: formula

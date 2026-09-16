@@ -9,7 +9,7 @@ from typing import Any, Iterable
 from cuda_sft_qgen.config import Settings
 from cuda_sft_qgen.errors import RateLimitError
 from cuda_sft_qgen.jsonutil import parse_json_object, strip_think
-from cuda_sft_qgen.keys import ApiKeyPool
+from cuda_sft_qgen.keys import PRI_WRITER, ApiKeyPool
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,8 @@ class LLMClient:
         thinking_level: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        priority: int = PRI_WRITER,
+        prompt_cache_key: str | None = None,
     ) -> str:
         raise NotImplementedError
 
@@ -47,6 +49,8 @@ class LLMClient:
         thinking_level: str | None = None,
         temperature: float | None = None,
         retries: int = 1,
+        priority: int = PRI_WRITER,
+        prompt_cache_key: str | None = None,
     ) -> dict[str, Any]:
         last_err: Exception | None = None
         for attempt in range(retries + 1):
@@ -54,6 +58,8 @@ class LLMClient:
                 messages,
                 thinking_level=thinking_level,
                 temperature=temperature,
+                priority=priority,
+                prompt_cache_key=prompt_cache_key,
             )
             try:
                 return parse_json_object(text)
@@ -84,9 +90,11 @@ class NvidiaLLM(LLMClient):
         thinking_level: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        priority: int = PRI_WRITER,
+        prompt_cache_key: str | None = None,
     ) -> str:
         level = thinking_level or self.settings.thinking_level
-        extra = {"chat_template_kwargs": thinking_kwargs(level)}
+        extra: dict[str, Any] = {"chat_template_kwargs": thinking_kwargs(level)}
         payload = {
             "model": self.settings.nvidia_model,
             "messages": messages,
@@ -98,7 +106,7 @@ class NvidiaLLM(LLMClient):
             "stream": True,
             "extra_body": extra,
         }
-        return self._stream_with_retry(payload)
+        return self._stream_with_retry(payload, priority=priority)
 
     @staticmethod
     def _is_rate_limit(exc: Exception) -> bool:
@@ -112,7 +120,12 @@ class NvidiaLLM(LLMClient):
             or "temporarily unavailable" in lowered
         )
 
-    def _stream_with_retry(self, payload: dict[str, Any], retries: int | None = None) -> str:
+    def _stream_with_retry(
+        self,
+        payload: dict[str, Any],
+        retries: int | None = None,
+        priority: int = PRI_WRITER,
+    ) -> str:
         per_key = max(1, int(self.settings.llm_rate_limit_retries_per_call))
         max_rate = per_key * max(1, self.pool.n_keys)
         hard_retries = retries if retries is not None else max(max_rate, 6)
@@ -121,9 +134,11 @@ class NvidiaLLM(LLMClient):
         for attempt in range(hard_retries):
             if all(h >= per_key for h in rate_hits) and sum(rate_hits) > 0:
                 raise RateLimitError(str(last) if last else "rate limited")
-            slot = self.pool.acquire("llm")
+            slot = self.pool.acquire("llm", priority=priority)
             try:
-                return self._stream_once(slot.client, payload)
+                text = self._stream_once(slot.client, payload)
+                self.pool.note_success("llm")
+                return text
             except Exception as exc:  # noqa: BLE001
                 last = exc
                 if self._is_rate_limit(exc):
@@ -133,7 +148,7 @@ class NvidiaLLM(LLMClient):
                         self.settings.retry_base_cooldown_sec
                         * (2 ** min(rate_hits[slot.index] - 1, 3)),
                     )
-                    self.pool.mark_cooldown(slot, wait)
+                    self.pool.mark_cooldown(slot, wait, kind="llm")
                     logger.warning(
                         "LLM %s rate-limited (attempt %s, key_hits=%s/%s): %s",
                         slot.label,
@@ -190,6 +205,8 @@ class FakeLLM(LLMClient):
         thinking_level: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        priority: int = PRI_WRITER,
+        prompt_cache_key: str | None = None,
     ) -> str:
         user = ""
         for m in reversed(messages):

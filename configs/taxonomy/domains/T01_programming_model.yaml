@@ -1,0 +1,1035 @@
+id: T01
+name: CUDA 编程模型与语法
+children:
+- id: qualifiers
+  name: 执行空间限定符
+  leaves:
+  - id: glob_dev_host
+    claim: __global__/__device__/__host__ 的调用方向、编译单元与不可在 host 直接取 device 函数地址
+    types:
+    - syntax
+    - conceptual
+    - debug
+    difficulty:
+    - 1
+    - 2
+    kind: api
+  - id: device_lambda
+    claim: device lambda / nvstd::function 在 kernel 中的捕获限制与扩展 lambda 编译开关
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: qualifiers_grid_constant
+    claim: __grid_constant__ 参数按 launch 复制一份且须 trivially copyable；不能当成 __constant__ 取 device 指针长期驻留
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: qualifiers_host_device_odr
+    claim: 同一函数同时标 __host__ __device__ 时，host/device 各一份实体；在 device 上取该函数地址得到的是 device 入口而非 host
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: qualifiers_global_void
+    claim: __global__ kernel 返回类型必须是 void；写成 int 或非 void 结构体会编译失败，不是运行时丢掉返回值
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 1
+    kind: api
+  - id: qualifiers_default_host
+    claim: 未标注执行空间的函数默认是 __host__；在 __global__ 里直接调用它会报 host function 不可从 device 调用
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 1
+    - 2
+    kind: failure
+  - id: qualifiers_managed_var
+    claim: __managed__ 变量在 host/device 都可见且走 UVM；取其 host 地址再 cudaMemcpy 当普通 device ptr 用会与迁移语义冲突
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: qualifiers_forceinline
+    claim: __forceinline__ __device__ 强制内联，__noinline__ 禁止内联；二者只影响 device 编译，不改变 host 链接符号
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 2
+    kind: api
+  - id: qualifiers_global_member
+    claim: 非静态成员函数不能标 __global__；静态成员 __global__ 合法，但 launch 时没有隐式 this，必须把对象指针当参数传入
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+- id: launch
+  name: 执行配置与启动
+  leaves:
+  - id: triple_chevron
+    claim: <<<grid, block, dyn_smem, stream>>> 各参数语义及 dyn_smem 与静态 __shared__ 的叠加
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 1
+    - 2
+    kind: api
+  - id: cooperative_launch
+    claim: cudaLaunchCooperativeKernel 要求的占用、网格同步前提与普通 launch 的差别
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: launch_cluster_dim
+    claim: cluster 维必须整除对应 grid 维，且仅在 sm_90+ 的 cluster launch API 下合法，写入普通 <<<>>> 会被忽略或编译失败
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: launch_dyn_smem_cap
+    claim: 动态 smem 字节数加上静态 __shared__ 不得超过架构每 CTA 上限（如 sm_80 99KB opt-in），超限 launch 返回 cudaErrorInvalidValue
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: launch_default_stream
+    claim: 省略 stream 或传 0 走默认流；--default-stream per-thread 时每个 host 线程有独立默认流，不再与 legacy 流 0 隐式同步
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: launch_invalid_config
+    claim: block 线程数超过 cudaDevAttrMaxThreadsPerBlock（通常 1024）时 launch 失败，错误是 cudaErrorInvalidConfiguration 而非静默截断
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 1
+    - 2
+    kind: failure
+  - id: launch_grid_yz_limit
+    claim: gridDim.y 与 gridDim.z 上限 = 65535；写成 65536 会 InvalidConfiguration，而 gridDim.x 在 sm_30+ 可达 2^31-1
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: numeric
+  - id: launch_dyn_smem_bytes
+    claim: 三尖括号第三参数单位是字节不是元素数；float tile[256] 动态 smem 应传 256*sizeof(float)=1024，传 256 会越界
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 1
+    - 2
+    kind: failure
+  - id: launch_coop_fit_all_sm
+    claim: cooperative grid 必须在每个 SM 上同时驻留下全部 CTA；occupancy 只能 1 CTA/SM 时 grid 不得超过 SM 数，否则 launch 失败
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+- id: language
+  name: CUDA C++ 方言
+  leaves:
+  - id: template_kernel
+    claim: 模板 kernel 的 __global__ 实例化、不同对齐/类型特化对 occupancy 的影响
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: restrict_restrict
+    claim: __restrict__ 对别名分析、向量化与错误使用导致的静默错误
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: language_extended_lambda
+    claim: extended device lambda 需 --extended-lambda；按值捕获 host 指针在 device 解引用是 UB，不是自动 UVM 映射
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: language_alignas_kernel
+    claim: kernel 参数 alignas(16) 结构体若整体超过 4KB 参数上限会被编译器改走常量内存，occupancy 与参数读写路径同时变化
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: language_cuda_arch
+    claim: __CUDA_ARCH__ 只在 device 编译路径定义，值为 sm 乘 10（sm_80 ⇒ 800）；host 路径用它分支会走到 #else
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+  - id: language_device_new
+    claim: device 侧 new/malloc 使用 device heap，默认很小；未 cudaDeviceSetLimit(cudaLimitMallocHeapSize, n) 时大分配返回空指针
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: language_virtual
+    claim: device 虚函数需要 relocatable device code 且对象在 device 上构造；host 构造的带 vptr 对象拷到 device 后虚调用是 UB
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: language_host_stl
+    claim: '标准 host STL 容器不可在 __device__/__global__ 里用；device 侧应改 cuda::std 或手工数组，否则编译失败'
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    kind: api
+  - id: language_packed_struct
+    claim: packed 的 kernel 参数按紧凑布局拷进参数区，device 按自然对齐读字段会读到错偏移
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+- id: cg_syntax
+  name: Cooperative Groups 语法
+  leaves:
+  - id: tiled_partition
+    claim: tiled_partition 与 coalesced_group 的活动线程集合差异及 sync 范围
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: grid_group
+    claim: grid_group.sync 只在 cooperative launch 下合法，否则未定义
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cg_syntax_this_thread_block
+    claim: this_thread_block().sync() 等价块内 barrier，活动线程集合是整个 CTA，不能用来替代 warp 内 __syncwarp(mask)
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    kind: api
+  - id: cg_syntax_coalesced_divergent
+    claim: coalesced_threads() 的成员只含当前汇合的活动 lane；在发散分支里对其 sync 不会把已走另一路径的 lane 拉回来
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: cg_syntax_this_grid
+    claim: this_grid() 只在 cudaLaunchCooperativeKernel 启动的 kernel 里合法；普通 <<<>>> 里构造 grid_group 再 sync 是 UB
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cg_syntax_tile_pow2
+    claim: thread_block_tile<N> 的 N 必须是 2 的幂且 <=32（或架构允许的 tile 上限）；tiled_partition<3> 无法实例化
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: cg_syntax_cluster_group
+    claim: this_cluster() 仅 sm_90+ cluster launch 可用；在非 cluster kernel 里调用 cluster.sync() 没有对应硬件栅栏
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: cg_syntax_invoke_one
+    claim: cooperative_groups::invoke_one(group, fn) 只让 group 内一条线程执行 fn，其余线程不进入；不能拿它当互斥锁保护共享写
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: cg_syntax_memcpy_async
+    claim: cg::memcpy_async 的完成要以 wait(group) 为同步点；只调 memcpy_async 不 wait 就读 dst 是数据竞争
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 3
+    kind: failure
+- id: hierarchy
+  name: 网格层次与索引公式
+  leaves:
+  - id: hierarchy_global_tid
+    claim: globalTid = blockIdx.x * blockDim.x + threadIdx.x（1D）；2D 还需 blockIdx.y * blockDim.y 项，漏维会静默叠写
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 1
+    - 2
+    kind: formula
+  - id: hierarchy_linear_block
+    claim: blockId = blockIdx.z * gridDim.y * gridDim.x + blockIdx.y * gridDim.x + blockIdx.x，与 row-major 线性化一致
+    types:
+    - conceptual
+    difficulty:
+    - 1
+    - 2
+    kind: formula
+  - id: hierarchy_warp_lane
+    claim: lane = threadIdx.x % 32，warpId_in_block = threadIdx.x / 32；2D block 必须先线性化 threadIdx 再除
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: formula
+  - id: hierarchy_grid_stride
+    claim: grid-stride loop 步长是 blockDim.x * gridDim.x；写成 blockDim.x 会让不同 CTA 重复写同一元素
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 2
+    kind: failure
+  - id: hierarchy_tid_2d
+    claim: 2D 线性 tid = (blockIdx.y*gridDim.x+blockIdx.x)*(blockDim.x*blockDim.y) + threadIdx.y*blockDim.x + threadIdx.x
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    kind: formula
+  - id: hierarchy_nthreads_cta
+    claim: CTA 线程数 = blockDim.x * blockDim.y * blockDim.z，必须 <= MaxThreadsPerBlock；只检查 blockDim.x<=1024 会漏掉 32x32x2=2048
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 1
+    - 2
+    kind: formula
+  - id: hierarchy_warp_count
+    claim: warpsPerCTA = ceil((blockDim.x*blockDim.y*blockDim.z)/32)；256x2x1 是 16 warp，不是 8
+    types:
+    - conceptual
+    difficulty:
+    - 1
+    - 2
+    kind: formula
+  - id: hierarchy_3d_thread
+    claim: 3D threadIdx 线性化 = tz*blockDim.y*blockDim.x + ty*blockDim.x + tx；shuffle 源 lane 必须用这个线性 id 取模 32
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: hierarchy_grid_stride_2d
+    claim: 2D grid-stride 的 x 步长是 blockDim.x*gridDim.x，y 步长是 blockDim.y*gridDim.y；混用 1D 步长会漏扫或越界
+    types:
+    - code_complete
+    - debug
+    difficulty:
+    - 2
+    kind: failure
+- id: device_attr
+  name: 设备属性与启动约束
+  leaves:
+  - id: device_attr_max_threads
+    claim: cudaDevAttrMaxThreadsPerBlock 是每 CTA 硬件上限，超过则 launch 失败；与 occupancy 最优 block 不是同一数字
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 1
+    - 2
+    kind: api
+  - id: device_attr_smem_optin
+    claim: cudaDevAttrMaxSharedMemoryPerBlockOptin 在 sm_80+ 才 >48KB；sm_70 上设 64KB 动态 smem 会 InvalidValue
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: device_attr_warp_size
+    claim: 当前 NVIDIA CUDA GPU warpSize 恒为 32；代码写死 64 当 CUDA warp 会把 shuffle mask 用错
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 1
+    kind: mechanism
+  - id: device_attr_cluster
+    claim: cudaDevAttrClusterLaunch 仅 sm_90+ 为 1；在 sm_80 上传 cluster 维会被忽略或 API 报不支持
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: device_attr_sm_count
+    claim: 设备 SM 数 = cudaDevAttrMultiProcessorCount；cooperative grid 上限与 SM 数x每 SM 最大驻留 CTA 有关
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 2
+    kind: api
+  - id: device_attr_max_grid
+    claim: cudaDevAttrMaxGridDimX/Y/Z 给出网格上限；MaxGridDimX 在现代 GPU 是 2147483647，Y/Z 是 65535
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: numeric
+  - id: device_attr_regs
+    claim: cudaDevAttrMaxRegistersPerMultiprocessor 在 Volta+ 为 65536 个 32-bit 寄存器；每线程上限 MaxRegistersPerThread=255
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 2
+    kind: numeric
+  - id: device_attr_coop_launch
+    claim: cudaDevAttrCooperativeLaunch=0 的设备上 cudaLaunchCooperativeKernel 失败；不能用普通 launch 再调 this_grid().sync()
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: device_attr_max_block_dimz
+    claim: MaxBlockDimZ=64，MaxBlockDimX=MaxBlockDimY=1024；dim3(1,1,128) 的 CTA 非法，即使总线程只有 128
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: numeric
+- id: grid_constant
+  name: kernel 参数与常量路径
+  leaves:
+  - id: grid_constant_size_cap
+    claim: kernel 参数总大小上限 4KB（含 padding）；超过后多余字段不会静默截断，而是编译/加载失败
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: numeric
+  - id: grid_constant_byval
+    claim: 按值传递的结构体会被拷进参数区；内部若含 host 指针，device 解引用是非法地址
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: grid_constant_vs_constmem
+    claim: __grid_constant__ 生命周期是单次 launch，__constant__ 是模块级；把前者当地址取到全局队列跨 launch 使用非法
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: grid_constant_align
+    claim: 参数区按 ABI 对齐，手动把 packed 结构塞进 kernel 参数可能导致 device 读到错字段
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: grid_constant_cuda121
+    claim: CUDA 12.1+ 在 sm_70+ 把 kernel 参数上限从 4096B 提到 32764B；更老 toolkit 仍按 4KB 报 Formal parameter space overflowed
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: grid_constant_readonly
+    claim: __grid_constant__ 参数必须 const 且只读；对它或 mutable 成员赋值是 UB，编译器不会为此再做 per-thread 副本
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+  - id: grid_constant_local_copy
+    claim: 未标 __grid_constant__ 时对 kernel 参数取地址会在 local memory 做 per-thread 副本；1024 线程 CTA 就会有 1024 份拷贝
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: grid_constant_arch70
+    claim: __grid_constant__ 在 sm_70+ 且 CUDA 11.7+/PTX 7.7 才生效；更低 arch 上该属性被忽略，仍可能走 local 副本
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: grid_constant_padding
+    claim: 参数区按最大成员对齐插入 padding；两个 float 夹一个 double 的结构体 sizeof 可能是 24 而不是 16，计入 4KB/32KB 上限
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+- id: launch_api
+  name: 启动 API 与属性
+  leaves:
+  - id: launch_api_cuda_launch_kernel
+    claim: cudaLaunchKernel 的 args 是指向各参数的指针数组，不是把结构体一次性 memcpy；指针层级写错会传垃圾参数
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: launch_api_ex_cluster
+    claim: cudaLaunchKernelEx 通过 cudaLaunchAttributeClusterDimension 设置 cluster 维，仅 sm_90+；用它在 sm_80 上 launch 失败
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: launch_api_func_attr
+    claim: cudaFuncSetAttribute 必须在 launch 前调用；先 launch 再改 MaxDynamicSharedMemorySize 不影响已发射的那次配置
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: launch_api_preferred_carveout
+    claim: cudaFuncAttributePreferredSharedMemoryCarveout 以百分比选择 smem/L1 划分，-1 表示默认；不改变静态 __shared__ 声明大小
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: launch_api_packed_args
+    claim: cudaLaunchKernel 不会按 C++ 引用折叠参数；host 上 int 引用必须先落到可取地址的对象再把该地址放入 args[]
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: launch_api_coop_ex
+    claim: cudaLaunchCooperativeKernelEx 可同时带 cluster 与 cooperative 属性；缺 cooperative 属性时 this_grid().sync() 仍非法
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: launch_api_dynamic_smem_attr
+    claim: cudaFuncAttributeMaxDynamicSharedMemorySize 只抬动态 smem 上限；静态 __shared__ 仍计入总量，二者之和超 arch 上限则 launch 失败
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: launch_api_kernel_node
+    claim: cudaGraph 的 kernel node 参数在图实例化时固化；之后改 host 栈上的原结构体不会改已实例化节点，除非用 setParams
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+- id: builtin_vars
+  name: 内建变量与只读寄存器
+  leaves:
+  - id: builtin_vars_threadidx
+    claim: threadIdx/blockIdx/blockDim/gridDim 是 dim3 只读内建变量；对其赋值既不能改变硬件索引也会被编译器拒绝或忽略
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 1
+    kind: api
+  - id: builtin_vars_warpsize_const
+    claim: warpSize 在 NVIDIA CUDA 设备上编译期为 32；用运行时可变整数去除法不会让硬件 warp 变宽
+    types:
+    - conceptual
+    difficulty:
+    - 1
+    kind: numeric
+  - id: builtin_vars_clock64
+    claim: clock64() 返回 SM 时钟周期计数，不是 walltime；不同 SM 的 clock64 不可比，差值/频率才近似时间
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: builtin_vars_laneid
+    claim: PTX %laneid = 线程在 warp 内的 0..31；它不等于 threadIdx.x，2D CTA 里 laneid = 线性 tid % 32
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    kind: formula
+  - id: builtin_vars_smid
+    claim: '%smid 标识当前 SM，不要用 smid 做跨 CTA 互斥编号的唯一键'
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: builtin_vars_nctaid
+    claim: '%nctaid 对应 gridDim，%ntid 对应 blockDim；在 kernel 内它们是启动时冻结的值，不会因别的 launch 改变'
+    types:
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: builtin_vars_gridid
+    claim: '%gridid 区分不同 launch；persistent kernel 里用它当随机种子可以，但不能假设连续 launch 的 gridid 连续 +1'
+    types:
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: builtin_vars_syncthreads_count
+    claim: __syncthreads_count 等投票内建仍要求全 CTA 到达；把它们当只同步部分线程用与 __syncthreads 一样会死锁
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 2
+    kind: failure
+- id: kernel_symbol
+  name: kernel 符号与函数指针
+  leaves:
+  - id: kernel_symbol_get_func
+    claim: cudaGetFuncBySymbol 把 __global__ 符号转成 cudaFunction_t，供 cudaLaunchKernel 使用；对 __device__ 函数调用会失败
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: kernel_symbol_host_addr
+    claim: host 上取 __global__ 函数地址得到的是 host stub，不是 device PC；把它当 device 函数指针传进 kernel 再间接调用会非法
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: kernel_symbol_template_inst
+    claim: 模板 kernel 必须在 host 侧显式实例化或经 launch 实例化后才能 cudaFuncGetAttributes；未实例化符号链接失败
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: kernel_symbol_mangling
+    claim: nvcc C++ 对 __global__ 做名字改编；用字符串按未改编名查找会找不到，除非 extern "C"
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: kernel_symbol_launch_by_ptr
+    claim: 函数指针 launch 仍走同一参数 ABI；指针类型与实际 __global__ 签名不一致时参数错位，表现为静默错误而非类型检查
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+  - id: kernel_symbol_occupancy_func
+    claim: cudaOccupancyMaxActiveBlocksPerMultiprocessor 必须与即将 launch 的那个实例一致，不能拿同类模板的另一个特化顶替
+    types:
+    - profiling
+    - syntax
+    difficulty:
+    - 2
+    kind: api
+  - id: kernel_symbol_attributes
+    claim: cudaFuncGetAttributes 的 numRegs/sharedSizeBytes 来自编译结果；动态 smem 不在 sharedSizeBytes 里，要另加 launch 第三参数
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: kernel_symbol_device_fptr
+    claim: __device__ 函数指针只能在 device 代码里赋值与间接调用；host 把 host 函数指针拷进 device 内存再调用是非法指令
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+- id: rdc_link
+  name: 可重定位设备代码与链接
+  leaves:
+  - id: rdc_link_relocatable
+    claim: 跨翻译单元调用 __device__ 必须 -rdc=true；缺 rdc 时调用外部 __device__ 会编译期报可见性错误
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: rdc_link_device_link
+    claim: rdc 对象要经 nvlink 设备链接生成 cubin；只做 host 链接会留下未解析的 __device__ 符号
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: rdc_link_extern_device
+    claim: extern __device__ 变量跨文件共享一份设备存储；一边漏定义会在设备链接时报 undefined reference
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: rdc_link_lto
+    claim: CUDA 11+ 的 -dlto / --dlink-time-opt 在设备链接期做跨 TU 优化；打开 rdc 但不开 dlto 时跨文件 __device__ 默认不内联
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 3
+    kind: feature
+  - id: rdc_link_static_lib
+    claim: 含 rdc 的静态库必须用 nvcc/nvlink 可识别的设备目标打包；纯 ar 打的 host .a 不会带上 cubin，运行时缺 kernel
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+  - id: rdc_link_weak
+    claim: __device__ 弱符号允许重复定义由链接器选一份；两个强符号同名仍冲突，不是运行时覆盖
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: rdc_link_separate_compile
+    claim: 分开编译时各 TU 的 -arch 必须兼容；一个 sm_80 一个 sm_90 的 rdc 对象链接会失败或丢掉架构
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: rdc_link_undef_symbol
+    claim: 设备链接 undefined __device__ 不会拖到 cudaLaunch 才爆；nvlink 阶段就失败，错误看起来像 host 链接 undefined
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    kind: failure
+- id: dim_limits
+  name: 网格与块维上限公式
+  leaves:
+  - id: dim_limits_block_product
+    claim: blockDim.x*blockDim.y*blockDim.z <= MaxThreadsPerBlock（通常 1024）；32x32x2=2048 非法，32x32x1=1024 合法
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 1
+    - 2
+    kind: formula
+  - id: dim_limits_grid_x
+    claim: sm_30+ 上 gridDim.x 最大 2147483647，gridDim.y/z 最大 65535；用 1D 网格表达更大元素必须 grid-stride
+    types:
+    - conceptual
+    difficulty:
+    - 2
+    kind: numeric
+  - id: dim_limits_block_xyz
+    claim: MaxBlockDimX=1024、MaxBlockDimY=1024、MaxBlockDimZ=64；dim3(64,1,64) 合法，dim3(1,1,65) 非法
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: numeric
+  - id: dim_limits_warps_per_cta
+    claim: warpsPerCTA = ceil(threadsPerCTA/32) <= 32（1024/32）；超过 32 warp 的 CTA 在当前 CUDA GPU 上不存在
+    types:
+    - conceptual
+    difficulty:
+    - 1
+    - 2
+    kind: formula
+  - id: dim_limits_cluster_max
+    claim: sm_90 cluster 内 CTA 数上限通常为 8，且每维必须整除 grid 维；cluster=(3,1,1) 且 grid.x=8 因 3 不整除 8 非法
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: dim_limits_max_cta_sm
+    claim: sm_80 每 SM 最多 32 个 CTA、64 个 warp；block=32 线程时先碰到 32 CTA 上限，不是 64 warp 上限
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: dim_limits_dim3_zero
+    claim: grid 或 block 任一维为 0 的 launch 非法；dim3(0,1,1) 不会变成 no-op kernel，而是 InvalidConfiguration
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 1
+    - 2
+    kind: failure
+  - id: dim_limits_total_threads
+    claim: 启动线程总数 = grid.x*grid.y*grid.z * block.x*block.y*block.z；用 32 位 int 乘 2^31 网格会溢出，索引必须用 64-bit
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+- id: cxx_dialect
+  name: 设备 C++ 方言与扩展 lambda
+  leaves:
+  - id: cxx_dialect_std17
+    claim: nvcc --std=c++17 同时作用于 host 与 device；device 不支持完整 host 标准库，if constexpr 可用但 filesystem 不可
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: feature
+  - id: cxx_dialect_cuda_std
+    claim: 'cuda::std 是 libcu++ 设备可用子集；用 std::atomic 代替 cuda::std::atomic 在 device 上要么编不过要么没有 GPU 内存序'
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cxx_dialect_extended_lambda_flag
+    claim: 在 host 上定义并标 __device__ 的扩展 lambda 必须加 --extended-lambda；缺开关时报 experimental lambda 错误
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: cxx_dialect_capture_this
+    claim: 扩展 lambda 捕获 host 对象 this 再在 device 解引用成员，等价于解引用 host 指针，不是把对象拷到 device
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cxx_dialect_constexpr
+    claim: __device__ constexpr 函数可在 host 常量求值也生成 device 代码；仅 host constexpr 在 __CUDA_ARCH__ 路径不可调用
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cxx_dialect_if_constexpr
+    claim: if constexpr (__CUDA_ARCH__ >= 800) 在 host 编译路径因宏未定义走 false 分支，可用来剥离 device 专用 intrinsic
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: cxx_dialect_structured_binding
+    claim: 设备代码可用 C++17 结构化绑定；绑定到 kernel 参数引用时仍受参数只读/副本规则约束
+    types:
+    - syntax
+    difficulty:
+    - 2
+    kind: api
+  - id: cxx_dialect_nvstd_function
+    claim: nvstd::function 可保存 device lambda 但不能跨 host/device 传递可调用对象；host 构造的 std::function 拷到 device 后调用非法
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+- id: occupancy_cfg
+  name: 占用 API 与启动配置
+  leaves:
+  - id: occupancy_cfg_max_blocks
+    claim: cudaOccupancyMaxActiveBlocksPerMultiprocessor(f, blockSize, dynSmem) 返回每 SM 驻留 CTA 上限，忽略运行时发散
+    types:
+    - profiling
+    - syntax
+    difficulty:
+    - 2
+    kind: api
+  - id: occupancy_cfg_potential_block
+    claim: cudaOccupancyMaxPotentialBlockSize 搜索使占用最大的 blockSize，不是使延迟最低的 blockSize
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: occupancy_cfg_variable_smem
+    claim: 动态 smem 随 blockSize 变化时要用 OccupancyMaxPotentialBlockSizeVariableSMem，否则按固定 dynSmem=0 高估占用
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: occupancy_cfg_launch_bounds
+    claim: __launch_bounds__(maxThreads, minBlocks) 限制寄存器分配；minBlocks=4 且 block=256 时每线程寄存器 <= floor(65536/(256*4))
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 3
+    kind: formula
+  - id: occupancy_cfg_cluster
+    claim: sm_90+ cudaOccupancyMaxActiveClusters 计算 cluster 驻留；普通 MaxActiveBlocks 不考虑 cluster 必须同 SM 组的约束
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: occupancy_cfg_available
+    claim: cudaOccupancyAvailableDynamicSMemPerBlock 给出在目标占用下剩余动态 smem；超过该值会把占用掉一档
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: occupancy_cfg_limit_regs
+    claim: cudaFuncSetAttribute 改动态 smem 上限不改寄存器；寄存器要用 __launch_bounds__ 或 -maxrregcount
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: occupancy_cfg_min_grid
+    claim: 想藏满延迟至少需要 activeWarps 约等于 DRAM延迟/流水线深度；占用 API 返回的 max CTA 只是硬件上限，不是该下限
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism

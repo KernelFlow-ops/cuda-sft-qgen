@@ -5,6 +5,7 @@ import re
 from cuda_sft_qgen.config import Settings
 from cuda_sft_qgen.llm import LLMClient
 from cuda_sft_qgen.models import Question
+from cuda_sft_qgen.review.consistency import consistency_reason
 
 _CUDA_HINTS = re.compile(
     r"cuda|kernel|warp|thread|block|grid|shared|global memory|occupancy|"
@@ -16,7 +17,11 @@ _CUDA_HINTS = re.compile(
 )
 
 _QUESTIONISH = re.compile(
-    r"[?？]|为什么|为何|如何|怎样|哪|什么|是否|给出|求|指出|解释|compare|why|how|what"
+    r"[?？]|为什么|为何|如何|怎样|哪|什么|是否|给出|求|指出|解释|"
+    r"请|补全|下列|选择|选出|填空|计算|判断|"
+    r"compare|why|how|what|which|identify|select|choose|examine|"
+    r"complete|fill|compute|calculate|determine|provide|indicate",
+    re.IGNORECASE,
 )
 
 _BAD_OPEN = re.compile(
@@ -42,7 +47,7 @@ def rule_sieve(question: Question, settings: Settings) -> str | None:
         return "sieve_too_vague"
     if text.endswith("。") and "？" not in text and "?" not in text and len(text) < 40:
         return "sieve_not_a_question"
-    return None
+    return consistency_reason(question)
 
 
 def llm_sieve(question: Question, llm: LLMClient) -> str | None:
@@ -62,7 +67,15 @@ def llm_sieve(question: Question, llm: LLMClient) -> str | None:
         },
     ]
     try:
-        obj = llm.complete_json(messages, thinking_level="none", temperature=0.0, retries=0)
+        from cuda_sft_qgen.keys import PRI_SIEVE
+
+        obj = llm.complete_json(
+            messages,
+            thinking_level="none",
+            temperature=0.0,
+            retries=0,
+            priority=PRI_SIEVE,
+        )
     except Exception:
         return None
     label = str(obj.get("label", "meaningful")).lower()

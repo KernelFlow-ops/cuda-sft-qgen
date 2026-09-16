@@ -1,0 +1,618 @@
+id: T18
+name: PTX ISA 深水
+children:
+  - id: ldst_cache_hints
+    name: ld/st cache 提示
+    leaves:
+      - id: ldst_cache_hints_operators
+        claim: "ld.global 的 .ca/.cg/.cs/.lu/.cv 分别表示 L1+L2 缓存、只走 L2、streaming、last-use、视为 volatile；选错会改变命中层次而非仅仅“更快”。"
+        types: [conceptual, optimization]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: ldst_cache_hints_ldg_nc
+        claim: "__ldg(ptr) 编译为 ld.global.nc，走只读数据缓存路径，要求该地址在 kernel 生命期内不被任何线程写入，否则读值未定义。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: api
+      - id: ldst_cache_hints_sector
+        claim: "global 事务以 32B 扇区为粒度，对齐 128B 的 warp 连续 32×4B 访问合并为 4 个扇区 = 1 次 128B 事务；stride=2 的 float 访问使事务数翻倍。"
+        types: [optimization, profiling]
+        difficulty: [2, 3]
+        kind: formula
+      - id: ldst_cache_hints_l2_evict
+        claim: "sm_80+ 支持 ld.global.L1::evict_first 与 L2::cache_hint 创建策略；这些修饰符在 sm_70 上不可用，ptxas 会拒绝或降级。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: feature
+      - id: ldst_cache_hints_ca_vs_cg
+        claim: "ld.global.ca 允许填 L1，跨 SM 的普通 store 后本 SM 的 .ca load 可命中脏/旧 L1；ld.global.cg 绕过 L1 从 L2 取，观察点更接近设备一致性点。"
+        types: [compare, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: ldst_cache_hints_cs_stream
+        claim: "ld.global.cs / st.global.cs 标记 streaming、低复用，优先从 L1/L2 驱逐；热 tile 误用 .cs 会把将复用行提前踢出。"
+        types: [optimization, debug]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: ldst_cache_hints_lu
+        claim: "ld.global.lu 表示该缓行是 last-use，硬件可在填充后立即标为驱逐候选；循环里每次迭代都 .lu 等于放弃时间局部性。"
+        types: [optimization, conceptual]
+        difficulty: [3]
+        kind: api
+      - id: ldst_cache_hints_cv_wt
+        claim: "ld.global.cv 视为 volatile、不在 L1 保留；st.global.wt 写穿。二者都不是 acquire/release，不能替代 ld.acquire/st.release。"
+        types: [syntax, compare]
+        difficulty: [3]
+        kind: mechanism
+      - id: ldst_cache_hints_st_wb_cg
+        claim: "st.global.wb 写回缓存，st.global.cg 按 cache-global 写 L2 不留 L1；错误用 .wb 再让他 SM 做 .ca load 更容易读到本 SM L1 私有行。"
+        types: [optimization, debug]
+        difficulty: [3]
+        kind: api
+      - id: ldst_cache_hints_vector
+        claim: "对齐的 ld.global.v4.f32 一次 16B，事务数 = 1；未对齐时指令非法或拆成多次，事务数 ≠ 1。"
+        types: [debug, layout]
+        difficulty: [2, 3]
+        kind: formula
+  - id: cp_async_isa
+    name: cp.async 编码
+    leaves:
+      - id: cp_async_isa_commit_wait
+        claim: "cp.async 把 global→shared 拷贝入当前组，cp.async.commit_group 封组，cp.async.wait_group N 等到未完成组数 ≤ N 后才能安全 ld.shared。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: cp_async_isa_wait_group_n
+        claim: "wait_group N 的输入→输出为 outstanding_groups ≤ N；wait_group 0 等全部完成，wait_group 1 允许 1 组仍在飞以重叠计算。"
+        types: [optimization, debug]
+        difficulty: [3]
+        kind: formula
+      - id: cp_async_isa_bulk_tensor
+        claim: "sm_90 的 cp.async.bulk.tensor.2d 使用 TMA descriptor 与 mbarrier.expect_tx，不能在 sm_80 上把该指令当 cp.async.ca 的别名。"
+        types: [syntax, conceptual]
+        difficulty: [3, 4]
+        kind: feature
+      - id: cp_async_isa_align16
+        claim: "16-byte cp.async.cg.shared.global 要求源与目的 16B 对齐；未对齐时指令非法，表现为静默错数或 illegal instruction。"
+        types: [debug, syntax]
+        difficulty: [3]
+        kind: failure
+        hints: ["gmem 指针 +1 byte", "smem 只 8B align"]
+      - id: cp_async_isa_ca_cg
+        claim: "cp.async.ca.shared.global 允许源数据进入 L1，cp.async.cg 只经过 L2；大块流式预取应用 .cg 以免污染 L1。"
+        types: [optimization, syntax]
+        difficulty: [3]
+        kind: api
+      - id: cp_async_isa_size
+        claim: "cp.async 单次合法尺寸 ∈ {4,8,16} 字节；32 字节必须拆成两次 16B 或改用 bulk，写 cp.async 32 是非法编码。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: numeric
+      - id: cp_async_isa_pred
+        claim: "@p cp.async 只让谓词为真的线程提交拷贝；谓词为假的线程不写对应 smem 字节，wait_group 后那些字节仍是旧值。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: cp_async_isa_wait_all
+        claim: "cp.async.wait_all = wait_group 0；等所有未提交组也完成前须先 commit_group，否则当前组尚未封口。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: formula
+      - id: cp_async_isa_mbarrier_arrive
+        claim: "sm_80 可选 cp.async.mbarrier.arrive 在拷贝完成时 arrive 共享 mbarrier；与 Hopper TMA expect_tx 不是同一条完成协议。"
+        types: [syntax, compare]
+        difficulty: [3, 4]
+        kind: feature
+      - id: cp_async_isa_shared_dst
+        claim: "cp.async 目的必须是 shared；目的写成 global 或 local 非法。src 必须是 global。"
+        types: [syntax, debug]
+        difficulty: [2]
+        kind: failure
+  - id: mma_encodings
+    name: mma/wgmma/umma
+    leaves:
+      - id: mma_encodings_sync_aligned
+        claim: "mma.sync.aligned 要求整 warp 统一的 shape/dtype 与寄存器映射；缺 .aligned 或混用 fragment 布局会得到错误累加而非编译期类型错。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: mechanism
+      - id: mma_encodings_wgmma_desc
+        claim: "wgmma.mma_async 的 A/B 来自 shared-memory descriptor（不是通用寄存器指针），D 写回寄存器；对 gmem 指针直接 wgmma 非法。"
+        types: [syntax, debug]
+        difficulty: [3, 4]
+        kind: api
+      - id: mma_encodings_umma_tmem
+        claim: "sm_100a tcgen05.mma 最大单 CTA 形状可达约 m128n256（面积是 Hopper wgmma 最大 m64n256 的 2×），累加器在 TMEM 地址 [tmem_c] 而非寄存器 D 列表。"
+        types: [conceptual, compare]
+        difficulty: [4]
+        kind: numeric
+      - id: mma_encodings_sp_2_4
+        claim: "mma.sp 的 2:4 元数据约束为每 4 个元素恰好 2 个非零；稀疏度 = 50%，违反元数据时 Tensor Core 结果 ≠ 稠密 MMA 再掩零。"
+        types: [debug, conceptual]
+        difficulty: [3, 4]
+        kind: numeric
+      - id: mma_encodings_m16n8k16
+        claim: "mma.sync.aligned.m16n8k16.f32.f16.f16 的 warp 级形状 m=16,n=8,k=16；要拼 m16n16k16 需要两次 n8 或改用 WMMA API。"
+        types: [syntax, layout]
+        difficulty: [3]
+        kind: formula
+      - id: mma_encodings_wgmma_m64n256
+        claim: "Hopper wgmma.mma_async.sync.aligned.m64n256k16 要求 warp-group 128 线程与 smem swizzle 描述符，单 warp 8 线程发该指令非法。"
+        types: [syntax, debug]
+        difficulty: [3, 4]
+        kind: feature
+      - id: mma_encodings_dtype_tf32
+        claim: "mma.sync ... .f32.tf32.tf32 把 A/B 当 TF32 吃入 Tensor Core；输入寄存器仍是 f32 位型，精度按 TF32 截断而不是 IEEE f32。"
+        types: [conceptual, syntax]
+        difficulty: [3]
+        kind: mechanism
+      - id: mma_encodings_wgmma_commit
+        claim: "wgmma.commit_group 后必须 wgmma.wait_group N 才能重用 D 寄存器；只 commit 不等待，D 仍可能被管道写。"
+        types: [debug, syntax]
+        difficulty: [3]
+        kind: api
+      - id: mma_encodings_umma_iscale
+        claim: "tcgen05.mma 的 scale/sparsity 修饰符与 Hopper wgmma 不兼容；把 wgmma 的 .sp 后缀抄到 tcgen05 是非法编码。"
+        types: [syntax, compare]
+        difficulty: [4]
+        kind: failure
+      - id: mma_encodings_satfinite
+        claim: "mma.sync 的 .satfinite 把累加钳到目标类型有限范围；缺省环绕/Inf 行为与 sat 结果数值不相等。"
+        types: [conceptual, compare]
+        difficulty: [3]
+        kind: mechanism
+  - id: predicates
+    name: 谓词与选择
+    leaves:
+      - id: predicates_atp_issue
+        claim: "PTX @p 关闭的线程仍占用 warp 发射槽，但被屏蔽的 ld/st/cp.async 不产生该线程的内存事务。"
+        types: [conceptual, optimization]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: predicates_setp_selp
+        claim: "setp.lt.s32 p, a, b 写入 1-bit 谓词；selp.f32 d, u, v, p 在 p 真时 d=u 否则 d=v，不改变控制流 reconvergence。"
+        types: [syntax, code_complete]
+        difficulty: [2]
+        kind: api
+      - id: predicates_uniform_wgmma
+        claim: "wgmma.mma_async 与 tcgen05.mma 要求 warp-group 谓词一致；组内部分线程 @p 关闭再发 MMA，行为未定义。"
+        types: [debug, conceptual]
+        difficulty: [4]
+        kind: mechanism
+      - id: predicates_divergent_bar
+        claim: "在 divergent 分支里只让部分线程执行 bar.sync 0，PTX 级也会死锁，与 CUDA __syncthreads 条件调用同一类错误。"
+        types: [debug, counterfactual]
+        difficulty: [2, 3]
+        kind: failure
+      - id: predicates_notp
+        claim: "@!p 取反谓词发射；p 未初始化时 @p/@!p 行为未定义，必须先 setp 或 mov 谓词。"
+        types: [debug, syntax]
+        difficulty: [2]
+        kind: failure
+        hints: ["predreg 未 setp 就 @p st", "跨分支复用旧 p"]
+      - id: predicates_vote
+        claim: "vote.sync.ballot.b32 dest, pred, mask 把 mask 内 pred 真的 lane 集成 dest 位图，要求 mask 在参与线程间一致。"
+        types: [syntax, conceptual]
+        difficulty: [2, 3]
+        kind: api
+      - id: predicates_selp_vs_bra
+        claim: "用 selp 替代短 diverging bra 可保持 warp 汇合；长两边都有 ld/st 时 selp 仍执行两边计算，指令数 = 两边之和。"
+        types: [optimization, compare]
+        difficulty: [2, 3]
+        kind: formula
+      - id: predicates_setp_bool
+        claim: "setp.and.or 把多个比较链进同一谓词；.xor 可用于奇偶校验，结果仍是 1-bit，不能当 32-bit 掩码用。"
+        types: [syntax, conceptual]
+        difficulty: [2]
+        kind: api
+      - id: predicates_uniform_bit
+        claim: "sm_70+ 可用 .uni 修饰的 setp 当 warp 一致条件；条件实际发散时 .uni 结果不可靠，应改用普通 setp+bra。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: feature
+      - id: predicates_guard_red
+        claim: "@p red.gpu.add 只让真线程参与归约；假线程不贡献，等价于加 0，不是跳过整条 warp 指令。"
+        types: [conceptual, debug]
+        difficulty: [2, 3]
+        kind: mechanism
+  - id: mbarrier_ptx
+    name: mbarrier 与 bar
+    leaves:
+      - id: mbarrier_ptx_expect_tx
+        claim: "mbarrier.arrive.expect_tx 把 TMA 字节计数记入 64-bit shared mbarrier；try_wait 在事务计数归零且 arrive 数够时才通过。"
+        types: [conceptual, debug]
+        difficulty: [3, 4]
+        kind: mechanism
+      - id: mbarrier_ptx_init
+        claim: "mbarrier.init.shared.b64 [mbar], count 必须在 shared 且 8B 对齐的 64-bit 对象上调用；对 generic 栈地址 init 非法。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: mbarrier_ptx_parity
+        claim: "mbarrier.try_wait.parity 的 phase 输入为 0/1，每次完整 arrive 轮次翻转；用错 parity 会等到下一期或立即误通过。"
+        types: [debug, conceptual]
+        difficulty: [4]
+        kind: formula
+      - id: mbarrier_ptx_cluster
+        claim: "sm_90 mbarrier.arrive.cta / .cluster 决定完成可见范围；cluster 级 TMA multicast 必须用 cluster 作用域 wait，cta 作用域 wait 看不到他 CTA 的 arrive。"
+        types: [debug, conceptual]
+        difficulty: [4]
+        kind: feature
+      - id: mbarrier_ptx_inval
+        claim: "mbarrier.inval 后对象不能再 arrive/wait，须重新 init；对仍有线程 wait 的 mbarrier inval 是非法。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: failure
+        hints: ["producer inval 时 consumer 仍 try_wait", "init 两次不 inval"]
+      - id: mbarrier_ptx_arrive_drop
+        claim: "mbarrier.arrive_drop 把期望计数减 1 且本线程不再参与后续 phase，用于 warp 提前退出；误对全部线程 drop 会使 expected → 0 而提前完成。"
+        types: [debug, conceptual]
+        difficulty: [4]
+        kind: api
+      - id: mbarrier_ptx_try_wait_ns
+        claim: "mbarrier.try_wait.parity.relaxed.b64 p, [mbar], phase, ns 在超时 ns 后 p=0 返回，不保证完成；p=1 ⇒ tx_count=0 且 phase 匹配。"
+        types: [syntax, conceptual]
+        difficulty: [4]
+        kind: formula
+      - id: mbarrier_ptx_expect_tx_add
+        claim: "expect_tx 累加的是即将到来的拷贝字节数；少计会使 try_wait 在 TMA 未完成时通过，多计则永远等不到 0。"
+        types: [debug, conceptual]
+        difficulty: [3, 4]
+        kind: failure
+      - id: mbarrier_ptx_shared_only
+        claim: "mbarrier 对象必须驻 shared（cluster 时为 dsmem 可见的 shared），不能把 global 上的 8 字节当 mbarrier 用。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: failure
+      - id: mbarrier_ptx_sm80
+        claim: "sm_80 引入 shared mbarrier 供 cp.async 完成；Hopper 扩展 .cluster 与 expect_tx，不能在 sm_70 上发 mbarrier.init。"
+        types: [conceptual, compare]
+        difficulty: [3]
+        kind: feature
+  - id: bar_sync_ptx
+    name: bar.sync
+    leaves:
+      - id: bar_sync_ptx_bar0
+        claim: "bar.sync 0 等待 CTA 内所有线程到达 barrier 0，并隐含 CTA 级内存 fence；等价于 __syncthreads 的 PTX。"
+        types: [syntax, conceptual]
+        difficulty: [2]
+        kind: api
+      - id: bar_sync_ptx_named_count
+        claim: "bar.sync a, b 使用 named barrier a，参与线程数 = b；b 小于实际到达数会死等，b 大于到达数也会死等。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: bar_sync_ptx_aligned
+        claim: "bar.sync.aligned 要求所有线程最终执行同一静态 barrier 点；ITS 下 divergent 到达不同 bar 号会死锁。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: failure
+      - id: bar_sync_ptx_warp_sync
+        claim: "bar.warp.sync mask 对应 __syncwarp(mask)，只汇合 mask 内 lane，不替代 CTA bar.sync。"
+        types: [syntax, compare]
+        difficulty: [2]
+        kind: api
+      - id: bar_sync_ptx_red
+        claim: "bar.red.popc/and/or 在 barrier 上做归约并可选写结果寄存器，同时完成汇合；参与计数规则与 bar.sync 相同。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: api
+      - id: bar_sync_ptx_cluster
+        claim: "sm_90 barrier.cluster.arrive / barrier.cluster.wait 是 cluster 级控制流屏障，不能用 bar.sync 0 代替 cluster.sync。"
+        types: [syntax, compare]
+        difficulty: [3, 4]
+        kind: feature
+      - id: bar_sync_ptx_resource
+        claim: "CTA 内 named barrier 硬件资源有限（典型 16 个 id）；重用同一 id 必须保证上一轮所有参与者已离开。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: numeric
+      - id: bar_sync_ptx_no_memory_only
+        claim: "bar.sync 既是控制流汇合又是 fence；只想 fence 应用 membar/fence，否则未到达线程被不必要阻塞。"
+        types: [optimization, conceptual]
+        difficulty: [2, 3]
+        kind: mechanism
+  - id: elect_sync
+    name: elect.sync
+    leaves:
+      - id: elect_sync_leader
+        claim: "elect.sync _|p, membermask 从 membermask 为 1 的 lane 中选出恰好 1 个 leader，leader 的 p=1，其余 p=0。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: elect_sync_uniform_mask
+        claim: "membermask 必须在参与线程间一致；发散 mask 上 elect.sync 行为未定义。"
+        types: [debug, conceptual]
+        difficulty: [3, 4]
+        kind: failure
+        hints: ["if(lane<16) elect.sync 用 0xffffffff", "各 warp 不同 mask 却当 CTA 选举"]
+      - id: elect_sync_sm90
+        claim: "elect.sync 自 PTX ISA 8 / sm_90 Hopper 起可用；在 sm_80 上汇编该指令非法。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: feature
+      - id: elect_sync_umma
+        claim: "sm_100 tcgen05.mma 由 elect 出的单线程发射，其他线程必须在同一序列上汇合，不能各自 elect 再各发一条 MMA。"
+        types: [debug, conceptual]
+        difficulty: [4]
+        kind: mechanism
+      - id: elect_sync_not_ballot
+        claim: "elect.sync 只选 leader，不返回成员位图；需要位图应 vote.sync.ballot，二者不可互换。"
+        types: [compare, syntax]
+        difficulty: [2, 3]
+        kind: api
+      - id: elect_sync_empty_mask
+        claim: "membermask=0 时没有合法 leader，p 全 0；随后 @p 发射的 CTA 级副作用次数 = 0。"
+        types: [counterfactual, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: elect_sync_tma
+        claim: "常用模式：elect 出的线程发起 TMA/UMMA，其余线程只 wait mbarrier；让全部 128 线程重复发同一 TMA desc 会重复 expect_tx。"
+        types: [optimization, debug]
+        difficulty: [3, 4]
+        kind: mechanism
+      - id: elect_sync_reconverge
+        claim: "elect.sync 本身不创建新的汇合点；leader 与非 leader 之后的 @p 路径仍属同一 warp，需避免再 divergent bar.sync。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: mechanism
+  - id: atom_red_ptx
+    name: atom 与 red
+    leaves:
+      - id: atom_red_ptx_atom_vs_red
+        claim: "atom.add 返回旧值到寄存器，red.add 只写存储器不返回；需要旧值必须用 atom。"
+        types: [syntax, compare]
+        difficulty: [2]
+        kind: api
+      - id: atom_red_ptx_scope
+        claim: "atom.relaxed.gpu.add 作用域 .gpu；atom.relaxed.sys.add 才能与 host/peer 配对；缺省 scope 在新 PTX 中不合法。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: api
+      - id: atom_red_ptx_order
+        claim: "atom.acquire / atom.release / atom.acq_rel / atom.relaxed 对应 C++ 序；atom.relaxed 后读普通 payload 不构成 acquire。"
+        types: [conceptual, debug]
+        difficulty: [3]
+        kind: mechanism
+      - id: atom_red_ptx_cas
+        claim: "atom.cas.b32 d, [p], a, b 当 [p]==a 时写入 b 并 d=旧值；比较失败仍返回旧值，d==a 才表示成功。"
+        types: [syntax, code_complete]
+        difficulty: [2, 3]
+        kind: formula
+      - id: atom_red_ptx_shared
+        claim: "atom.shared.add 只在 CTA 内原子；跨 CTA 对同一 smem 地址做 atom.shared 没有设备级含义（地址根本不共享）。"
+        types: [conceptual, debug]
+        difficulty: [2]
+        kind: mechanism
+      - id: atom_red_ptx_b128
+        claim: "sm_90+ 提供 atom.cas.b128 等 16-byte 原子，地址须 16B 对齐；未对齐 b128 非法。"
+        types: [syntax, conceptual]
+        difficulty: [3, 4]
+        kind: feature
+      - id: atom_red_ptx_exch
+        claim: "atom.exch 是原子交换，返回旧值；用它做锁时须配 acquire/release，单条 relaxed exch 不发布 payload。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: atom_red_ptx_global_l1
+        claim: "atom.global 绕过 L1 在 L2 完成 RMW，因此他 SM 的后续 atom 能看到；普通 ld.ca 仍可能命中自己的 L1 旧行。"
+        types: [conceptual, profiling]
+        difficulty: [3]
+        kind: mechanism
+  - id: shfl_vote_ptx
+    name: shfl 与 vote
+    leaves:
+      - id: shfl_vote_ptx_shfl_sync
+        claim: "shfl.sync.idx.b32 d, a, b, c, mask 从 mask 内 lane b 取 a；mask 必须一致，缺 .sync 的旧 shfl 在 sm_70+ 不保证 ITS 安全。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: feature
+      - id: shfl_vote_ptx_xor
+        claim: "shfl.sync.bfly 的 lane xor 模式用于 butterfly 归约；宽度 c 的 clamp 位决定逻辑 warp 宽度，不是字节数。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: api
+      - id: shfl_vote_ptx_down_up
+        claim: "shfl.sync.down 的源 lane = min(lane+delta, width-1) 类 clamp：超出宽度时返回本 lane 值；归约树最后一层 delta 必须 < 活跃宽度。"
+        types: [code_complete, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: shfl_vote_ptx_activemask
+        claim: "vote.sync.ballot 的 mask 若写成 ~0 而实际 divergent，未执行线程不参与，结果位图 ≠ 硬件满 32 bit。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: failure
+      - id: shfl_vote_ptx_all_any
+        claim: "vote.sync.all p, q, mask 当 mask 内全部 q 真时 p=1；空 mask 的 all/any 结果按 ISA 定义为真/假，不能当 CTA 投票。"
+        types: [syntax, conceptual]
+        difficulty: [2, 3]
+        kind: api
+      - id: shfl_vote_ptx_match
+        claim: "match.any.sync.b32 dest, val, mask 把 val 相等的 lane 集成 dest；sm_70+ 才有，sm_60 无此指令。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: feature
+      - id: shfl_vote_ptx_reg_width
+        claim: "shfl 搬运的是 32-bit 寄存器；64-bit 值必须拆成两次 shfl 或用 .b32 对，否则高 32 位丢失。"
+        types: [debug, layout]
+        difficulty: [2]
+        kind: numeric
+      - id: shfl_vote_ptx_not_smem
+        claim: "shfl 只在寄存器间通信，不经过 shared，也不建立对其它 CTA 的可见性；不能用 shfl 代替 bar.sync 发布 smem。"
+        types: [conceptual, compare]
+        difficulty: [2]
+        kind: mechanism
+  - id: ptx_addr_spaces
+    name: PTX 地址空间
+    leaves:
+      - id: ptx_addr_spaces_cvta
+        claim: "cvta.to.global / .shared / .local 把 generic 指针转成具体空间；转错空间后的 ld 走错误硬件路径。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: api
+      - id: ptx_addr_spaces_isspacep
+        claim: "isspacep.shared p, q 测试 generic 指针是否落在 shared；对真正 global 指针 p=0，不能当空指针检查。"
+        types: [syntax, conceptual]
+        difficulty: [2]
+        kind: api
+      - id: ptx_addr_spaces_generic
+        claim: "ld.generic 按指针高位选空间，开销高于 ld.shared；已知 smem 应用 ld.shared 而不是 generic。"
+        types: [optimization, conceptual]
+        difficulty: [2]
+        kind: mechanism
+      - id: ptx_addr_spaces_param
+        claim: "ld.param 读 kernel 参数，只读；st.param 在 kernel 体内非法。"
+        types: [syntax, debug]
+        difficulty: [2]
+        kind: failure
+      - id: ptx_addr_spaces_const
+        claim: "ld.const 走 constant 缓存，64 KiB 窗口；对 constant 做 st 非法。"
+        types: [syntax, conceptual]
+        difficulty: [2]
+        kind: numeric
+      - id: ptx_addr_spaces_shared_cta
+        claim: "sm_90 的 ld.shared::cta 与 ld.shared::cluster 区分本地 smem 与 dsmem；用错 .cluster 会打到远端 CTA。"
+        types: [syntax, debug]
+        difficulty: [3, 4]
+        kind: feature
+      - id: ptx_addr_spaces_local_tid
+        claim: "ld.local 的地址是每线程私有窗口，lane 间数值相同的 local 地址并不指向同一物理字。"
+        types: [conceptual, debug]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: ptx_addr_spaces_suld
+        claim: "suld/sust 走 surface 路径，与 ld.global 缓存层次不同；对同一 cudaArray 混用二者需 API 级同步。"
+        types: [conceptual, compare]
+        difficulty: [3]
+        kind: mechanism
+  - id: reconverge_ssy
+    name: 分支与汇合
+    leaves:
+      - id: reconverge_ssy_bra
+        claim: "bra.uni 要求目标对整 warp 一致；普通 bra 允许发散，硬件在汇合点 reconverge，发散期间串行执行各路径。"
+        types: [conceptual, optimization]
+        difficulty: [2]
+        kind: mechanism
+      - id: reconverge_ssy_sync
+        claim: "sm_70+ SASS 用 BSSY/BSYNC 或 PC 重建汇合；手工 PTX 插入 bar.sync 当 reconverge 会额外做 CTA 级同步，过重且易死锁。"
+        types: [debug, compare]
+        difficulty: [3]
+        kind: failure
+      - id: reconverge_ssy_call
+        claim: "call 保存返回地址到栈/local，ret 返回；device 函数调用不隐含 membar。"
+        types: [syntax, conceptual]
+        difficulty: [2]
+        kind: api
+      - id: reconverge_ssy_exit
+        claim: "exit 终止本线程，不等他线程；部分线程 exit 后其余线程的 bar.sync 0 会因参与者减少而死锁。"
+        types: [debug, counterfactual]
+        difficulty: [2, 3]
+        kind: failure
+        hints: ["if(tid==0) exit; __syncthreads();", "warp0 return 后 bar.sync"]
+      - id: reconverge_ssy_brkpt
+        claim: "brkpt 在调试时陷入，发布构建中通常为 nop；不能当计时栅栏。"
+        types: [conceptual, profiling]
+        difficulty: [1, 2]
+        kind: api
+      - id: reconverge_ssy_nanosleep
+        claim: "nanosleep.u32 暂停本线程约给定拍数，不汇合 warp、不 fence。"
+        types: [syntax, conceptual]
+        difficulty: [2]
+        kind: api
+      - id: reconverge_ssy_warpgroup
+        claim: "Hopper warp-group 指令要求 4 个连续 warp 同 PC 路径；组内一条 divergent bra 可破坏 wgmma 的统一发射。"
+        types: [debug, conceptual]
+        difficulty: [3, 4]
+        kind: feature
+      - id: reconverge_ssy_pred_bra
+        claim: "@p bra target 只让 p 真的线程跳转；假线程继续 PC+1，形成 divergence，issue 次数 = 两条路径之和而非 max。"
+        types: [optimization, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+  - id: cvt_prmt
+    name: cvt 与打包
+    leaves:
+      - id: cvt_prmt_sat
+        claim: "cvt.sat.s32.f32 把 NaN 映射到 0 并把值钳到 int32 范围；缺 .sat 的 cvt.rzi 对溢出是实现定义截断。"
+        types: [syntax, conceptual]
+        difficulty: [2, 3]
+        kind: api
+      - id: cvt_prmt_rn
+        claim: "cvt.rn.f16.f32 用 round-to-nearest-even，cvt.rz 截断；同一 f32 输入下可以 rn(x) ≠ rz(x)，例如向零时 1.9 的 rz 结果 = 1。"
+        types: [compare, conceptual]
+        difficulty: [2]
+        kind: formula
+      - id: cvt_prmt_prmt
+        claim: "prmt.b32 d, a, b, c 按 c 的 4 个 nibble 从 a||b 选字节，用于 8-bit MMA 打包；c 编码错误会换错通道而不是报类型错。"
+        types: [syntax, layout]
+        difficulty: [3]
+        kind: api
+      - id: cvt_prmt_pack
+        claim: "cvt.pack.sat.s8.s32 把两个 s32 饱和打进 16-bit 半寄存器，供 dp4a/mma.s8 使用。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: cvt_prmt_f8
+        claim: "sm_90 cvt.rn.satfinite.e4m3x2.f32 生成 Hopper FP8 对；在 sm_80 上该 cvt 非法。"
+        types: [syntax, conceptual]
+        difficulty: [3, 4]
+        kind: feature
+      - id: cvt_prmt_bf16
+        claim: "cvt.rn.bf16.f32 截取 f32 高 16 位类格式；与 cvt.rn.f16.f32 的指数范围不同，不能当同一类型喂 HMMA。"
+        types: [compare, debug]
+        difficulty: [3]
+        kind: failure
+      - id: cvt_prmt_mov_b32
+        claim: "mov.b32 是位拷贝不改解释；把 f32 位型 mov 到 s32 再算术会把 IEEE 位当整数加，结果 ≠ cvt。"
+        types: [debug, conceptual]
+        difficulty: [2]
+        kind: mechanism
+      - id: cvt_prmt_dp4a
+        claim: "dp4a.s32.s32 对 4×s8 点积加到 s32 累加器，是 INT8 管道而非 Tensor Core；与 mma.sync.s8 的累加布局不同。"
+        types: [compare, conceptual]
+        difficulty: [3]
+        kind: mechanism
+  - id: wgmma_async_enc
+    name: wgmma 异步编码细节
+    leaves:
+      - id: wgmma_async_enc_fence
+        claim: "wgmma.fence 使此前对 smem 描述符目标的写对随后 wgmma.mma_async 可见；缺省 ld.shared 完成不等于 wgmma.fence。"
+        types: [debug, conceptual]
+        difficulty: [3, 4]
+        kind: mechanism
+      - id: wgmma_async_enc_commit
+        claim: "wgmma.commit_group 把已发射未提交的 MMA 封成一组；不 commit 则 wait_group 看不到这些 MMA。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: wgmma_async_enc_wait_n
+        claim: "wgmma.wait_group N 等到 outstanding_wgmma_groups <= N；该计数器与 cp.async.wait_group 独立，wait 次数不能合并为 1。"
+        types: [compare, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: wgmma_async_enc_desc_swizzle
+        claim: "smem descriptor 的 swizzle 模式必须匹配实际 smem 布局；128B swizzle 描述符配线性 smem 会使 A 面板读错。"
+        types: [layout, debug]
+        difficulty: [4]
+        kind: failure
+        hints: ["CuTe swizzle<3,4,3> 对线性 desc", "K-major 当 MN-major"]
+      - id: wgmma_async_enc_scale_d
+        claim: "wgmma 的 scale-D 修饰决定是否清零累加器；scaleD=0 时 D:=A*B，=1 时 D:=D+A*B。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: wgmma_async_enc_sm90a
+        claim: "完整 wgmma 形状集属于 sm_90a；sm_90 基线可能缺部分 dtype/shape，ptxas 对 sm_90（非 a）会拒收某些编码。"
+        types: [syntax, conceptual]
+        difficulty: [4]
+        kind: feature
+      - id: wgmma_async_enc_reg_d
+        claim: "D 寄存器映射按 n 形状固定，m64n256 每线程占用大量 RF；与 wgmma 重叠的地址计算必须避开这些寄存器。"
+        types: [layout, optimization]
+        difficulty: [3, 4]
+        kind: numeric
+      - id: wgmma_async_enc_umma_not_alias
+        claim: "tcgen05.mma 不是 wgmma 的别名：不能把 wgmma.wait_group 当成 TMEM 累加完成；UMMA 完成用 tcgen05.wait 或 TMEM 依赖。"
+        types: [compare, debug]
+        difficulty: [4]
+        kind: failure

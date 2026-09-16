@@ -44,6 +44,7 @@ def test_pool_capacity_three_keys():
         base_url="https://example.invalid/v1",
         llm_per_key=2,
         embed_per_key=2,
+        embed_oversub=1,
     )
     assert pool.n_keys == 3
     assert pool.llm_capacity == 6
@@ -55,3 +56,38 @@ def test_pool_capacity_three_keys():
     assert counts == {0: 2, 1: 2, 2: 2}
     for slot in held:
         pool.release("llm", slot)
+
+
+def test_embed_oversub_doubles_capacity():
+    from cuda_sft_qgen.keys import build_key_pool
+
+    pool = build_key_pool(
+        ["k1", "k2", "k3"],
+        base_url="https://example.invalid/v1",
+        llm_per_key=2,
+        embed_per_key=2,
+        embed_oversub=2,
+    )
+    assert pool.embed_capacity == 12
+    held = [pool.acquire("embed") for _ in range(12)]
+    assert pool.inflight["embed"] == 12
+    for slot in held:
+        pool.release("embed", slot)
+
+
+def test_llm_cooldown_does_not_block_embed():
+    from cuda_sft_qgen.keys import build_key_pool
+
+    pool = build_key_pool(
+        ["k1"],
+        base_url="https://example.invalid/v1",
+        llm_per_key=1,
+        embed_per_key=1,
+        embed_oversub=1,
+    )
+    slot = pool.acquire("llm")
+    pool.mark_cooldown(slot, 30, kind="llm")
+    pool.release("llm", slot)
+    emb = pool.acquire("embed")
+    assert emb.index == 0
+    pool.release("embed", emb)

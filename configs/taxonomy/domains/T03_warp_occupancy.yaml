@@ -1,0 +1,923 @@
+id: T03
+name: Warp、Occupancy 与发射模型
+children:
+- id: warp
+  name: Warp 执行
+  leaves:
+  - id: divergence
+    claim: warp 内 divergence 的 reconvergence 与独立线程调度（ITS）下的差异
+    types:
+    - conceptual
+    - optimization
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: shuffle_reduce
+    claim: __shfl_down_sync 的 mask、width 与未参与线程的正确用法
+    types:
+    - syntax
+    - debug
+    - code_complete
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: warp_its_reconverge
+    claim: Volta+ 独立线程调度下，汇合点由编译器插入的汇合栈管理，__syncwarp(fullmask) 不能假设已经隐式 reconverge 所有发散路径
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: warp_activemask_ballot
+    claim: __activemask() 只报告当前执行该指令的 lane，不能当 barrier；与 __ballot_sync(fullmask) 混用会在发散时丢掉未参与 lane
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: warp_lockstep_prevolta
+    claim: sm_60 及更早 SIMT 锁步下同一 warp 的 lane 共享 PC；把该假设带到 sm_70+ 而不 __syncwarp，shared 写后读是数据竞争
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: warp_div_cost
+    claim: 发散路径串行执行，两条等长分支的 warp 指令数约 2× 无发散； reconverge 前两条路径的 IPCs 不能叠加
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+  - id: warp_predication
+    claim: 短 if 常被编译成谓词而非真正分支；NCU 的 diverged 计数低不代表没有禁用 lane，只是没走分支栈
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: warp_mask_full
+    claim: 需要全 warp 参与的 shuffle/ballot 必须 mask=0xffffffff 且 32 lane 都执行该指令；mask 全 1 但有 lane 未到达仍 UB
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: warp_its_pc
+    claim: ITS 允许同 warp 不同 lane 停在不同 PC，但发射仍是一条 warp 指令加执行 mask，不是 32 个独立标量核
+    types:
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+- id: occupancy
+  name: Occupancy
+  leaves:
+  - id: reg_smem_limit
+    claim: occupancy = min(regLimit, smemLimit, warpLimit, maxCTA)；提高 occupancy 到 100% 不一定更快
+    types:
+    - optimization
+    - profiling
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: launch_bounds
+    claim: __launch_bounds__ 对寄存器分配与编译失败/occupancy 下限的影响
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: occupancy_closed_form
+    claim: 每 SM 驻留 CTA = min(floor(maxWarps/warpsPerCTA), floor(regFile/(regsPerThread*threadsPerCTA)),
+      floor(smemCap/smemPerCTA), maxCTA)
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: occupancy_not_speed
+    claim: 占用从 50% 提到 100% 若已 latency-hidden 且变成 cache-thrash，Nsight 的 elapsed cycle 可以上升而不是下降
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: occupancy_ada_48warp
+    claim: Ada sm_89 每 SM 最多 48 warp、24 CTA，不是 Ampere 的 64 warp/32 CTA；同一 block=256 的占用公式要换上限
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: occupancy_percent
+    claim: achieved occupancy = active_warps / maxWarps；NCU 的 50% 表示平均 32/64 warp，不是 50% SM 空闲时间
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+  - id: occupancy_smem_optin
+    claim: 动态 smem 提到接近每 SM 容量时 floor(smemCap/smemPerCTA)=1，占用被 smem 卡住，加寄存器优化无济于事
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: formula
+  - id: occupancy_theoretical
+    claim: 理论占用只看资源上限，忽略 barrier stall 与内存延迟；理论 100% 仍可能 issue slot 空
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: occupancy_min_blocks
+    claim: __launch_bounds__(256, 8) 要求每 SM 至少 8 个 256 线程 CTA，寄存器必须 ≤ floor(65536/(256*8))=32
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+- id: ilp_tlp
+  name: ILP 与 TLP
+  leaves:
+  - id: latency_hiding
+    claim: 用更多独立访存（ILP）还是更多 warp（TLP）隐藏 DRAM 延迟的选择条件
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: ilp_tlp_lat_ratio
+    claim: 当 DRAM 延迟/算术延迟 ≈ 20 且每线程独立访存 <4 时，加 ILP（多 outstanding ld）通常比盲目加 block 数更能藏延迟
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: numeric
+  - id: ilp_tlp_reg_pressure
+    claim: 把独立 ld 从 2 条加到 8 条会线性抬高活跃寄存器，可能把 occupancy 从 4 warp/SM 压到 2，抵消 ILP 收益
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 3
+    kind: formula
+  - id: ilp_tlp_outstanding
+    claim: 每 SM 可同时 outstanding 的 miss 有限；只加 TLP 不增加每 warp 独立 ld 时，scoreboard 仍可能全红
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: ilp_tlp_unroll
+    claim: '#pragma unroll 把循环迭代变成独立 ld 链以提高 ILP；展开 8 次约 8 个 in-flight 地址，寄存器也约 8 倍活跃'
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 3
+    kind: numeric
+  - id: ilp_tlp_math_pipe
+    claim: 纯 FMA 链若依赖深度 = N，ILP=1 时吞吐 ≤ 1/N；拆成 2 条独立累加器可使有效吞吐接近 2/N，直到管道饱和
+    types:
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+  - id: ilp_tlp_when_tlp
+    claim: 每线程已有足够 outstanding 且寄存器还有余量时，加 TLP（更大 grid/更高占用）才能继续藏延迟；ILP 已饱和
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: ilp_tlp_barrier
+    claim: CTA 内密集 __syncthreads 把 TLP 窗口切短，warp 一起卡住；此时加占用不如减少 barrier 或拆阶段
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: mechanism
+- id: occupancy_math
+  name: 占用闭式计算
+  leaves:
+  - id: occupancy_math_reg_limit
+    claim: regsPerCTA = regsPerThread * threadsPerCTA（向上对齐到架构分配粒度）；regFile=65536、每线程 64、block=256 ⇒ 每
+      CTA 16384，最多 4 CTA/SM
+    types:
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: occupancy_math_smem_limit
+    claim: smemPerCTA 含静态+动态+系统预留；164KB 容量、每 CTA 48KB ⇒ floor(164/48)=3 不是 4
+    types:
+    - optimization
+    difficulty:
+    - 2
+    kind: formula
+  - id: occupancy_math_warp_limit
+    claim: warpsPerCTA = ceil(threadsPerCTA/32)；maxWarps=64 时 1024 线程 CTA 只能 2 个/SM
+    types:
+    - optimization
+    difficulty:
+    - 1
+    - 2
+    kind: formula
+  - id: occupancy_math_api
+    claim: cudaOccupancyMaxActiveBlocksPerMultiprocessor 用编译后寄存器与给定 smem 计算，忽略运行时真实发散与 ILP
+    types:
+    - syntax
+    - profiling
+    difficulty:
+    - 2
+    kind: api
+  - id: occupancy_math_granularity
+    claim: 寄存器按 warp 分配且有粒度（常见 8 的倍数/线程）；63 寄存器常被分配成 64，不能按 63*256 精算
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: occupancy_math_max_cta
+    claim: sm_80 maxCTA/SM=32；block=32 线程、regs 很少、smem=0 时占用卡在 32 CTA = 32 warp，不是 64 warp
+    types:
+    - optimization
+    difficulty:
+    - 2
+    kind: formula
+  - id: occupancy_math_min_of
+    claim: 最终驻留 = min(regLimit, smemLimit, warpLimit, ctaLimit)；四者必须都算，只看寄存器会高估
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+  - id: occupancy_math_system_smem
+    claim: CUDA 每 CTA 预留约 1KB smem 给 runtime/barrier；99KB 用户 smem 在 100KB 容量上才能放下，不是 100
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: occupancy_math_hopper_smem
+    claim: sm_90 每 SM smem 容量 228KB，每 CTA 最大约 227KB；floor(228/48)=4，比 sm_80 的 floor(164/48)=3 多 1 个 CTA
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+- id: scheduler
+  name: Warp 调度器
+  leaves:
+  - id: scheduler_eligible
+    claim: 调度器每周期从 eligible warp 里选；long scoreboard 的 warp 不是 eligible，加占用只在有额外 eligible warp 时藏延迟
+    types:
+    - conceptual
+    - profiling
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: scheduler_dual_issue
+    claim: 部分 SM 有多个调度器分区，warp 按 warpId 映射到分区；所有活跃 warp 落在同一分区会浪费另一调度器
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: scheduler_stall_barrier
+    claim: barrier stall 表示 warp 卡在 CTA/warp barrier；提高占用通常无助于这个 stall，应减少同步或拆 CTA
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: scheduler_its_issue
+    claim: ITS 下同一 warp 的不同 lane 可以停在不同 PC，但发出的仍是 warp 宽指令，mask 关 lane 并不变成 SIMT 自由线程
+    types:
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: scheduler_scoreboard
+    claim: 长记分牌 stall 来自未完成 ld/tex；NCU stall reason 以 long scoreboard 为主时应加独立访存或占用，而不是加 FMA
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: scheduler_short_scoreboard
+    claim: short scoreboard 常与管道固定延迟/RF 有关，不是 DRAM；对此加 TLP 收益小于解开依赖链
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: scheduler_issue_slot
+    claim: 每调度器每周期可发的指令槽有限；eligible warp=0 时 slot 空闲，IPC 掉而不是 SM 频率掉
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: scheduler_warp_id_map
+    claim: warp 常按 warpId 轮转映射到调度器；CTA 内 warp 数 = 1 时只用到一个调度器分区，即使占用看起来不低
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+- id: register_file
+  name: 寄存器文件与溢出
+  leaves:
+  - id: register_file_bank
+    claim: 寄存器文件按 bank 组织，极端寄存器索引模式可能造成 RF bank 冲突，表现为内部 stall 而非 local 流量
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: register_file_reuse
+    claim: Volta+ SASS reuse 标志让操作数缓存命中，减少 RF 读；手工内联 PTX 不设 reuse 可能比编译器版本更慢
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 4
+    kind: feature
+  - id: register_file_spill_cost
+    claim: 每次 spill store/load 走 local（即 DRAM/L2 上的线程私有槽），NCU local 吞吐上升应先降寄存器再谈 ILP
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: register_file_launch_bounds
+    claim: __launch_bounds__(256,4) 强迫每线程寄存器 ≤ floor(regFile/(256*4)) 对齐后的值，超了会编译失败或溢出
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: register_file_255
+    claim: 每线程架构上限 255 个 32-bit 寄存器；超过会 spill，不可能用 256 个寄存器换更高 ILP
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 2
+    kind: numeric
+  - id: register_file_64k
+    claim: Volta 至 Hopper 每 SM 寄存器文件 = 65536×32-bit；每线程 128、block=256 ⇒ 每 CTA 32768，最多 2 CTA/SM
+    types:
+    - optimization
+    difficulty:
+    - 2
+    kind: formula
+  - id: register_file_ptxas
+    claim: ptxas -v 的 Used N registers 是编译分配，不是运行峰值；加 --maxrregcount=32 会强制 ≤32 并可能 spill
+    types:
+    - syntax
+    - profiling
+    difficulty:
+    - 2
+    kind: api
+  - id: register_file_cbank
+    claim: 常量/谓词/特殊寄存器不计入 255 的通用 RF 预算同一栏；ptxas 的 cmem[] 字节是常量库，不是 RF
+    types:
+    - conceptual
+    - profiling
+    difficulty:
+    - 3
+    kind: mechanism
+- id: shuffle_ops
+  name: Shuffle 与 warp 交换
+  leaves:
+  - id: shuffle_ops_sync_mask
+    claim: __shfl_sync(mask, var, srcLane) 要求 mask 中的 lane 都执行该指令；缺 lane 是 UB，不是自动跳过
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: shuffle_ops_width
+    claim: width 必须是 2 的幂且 ≤32；__shfl_down_sync(m,v,delta,16) 只在 16-lane 子 warp 内循环，跨半 warp 不传值
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: shuffle_ops_xor
+    claim: __shfl_xor_sync 做 butterfly；width=32 的 xor 1,2,4,...,16 归约需要 5 步，不是 32 步
+    types:
+    - code_complete
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+  - id: shuffle_ops_down_reduce
+    claim: warp reduce 用 __shfl_down_sync(full, v, 16) 再 8,4,2,1，结果只在 lane0 完整；lane31 不会拿到全归约
+    types:
+    - code_complete
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: shuffle_ops_src_lane
+    claim: __shfl_sync 的 srcLane 对所有调用者通常应一致；各 lane 读不同 src 合法但要保证那些 src lane 也执行 shuffle
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: shuffle_ops_pre_sync
+    claim: sm_30 的 __shfl 无 mask，Volta 后废弃；新代码必须 *_sync 变体，否则 ITS 下结果不确定
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: feature
+  - id: shuffle_ops_index_mod
+    claim: srcLane 按 width 取模；width=32 时 srcLane=33 等价 1，不会越界 trap
+    types:
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+  - id: shuffle_ops_type
+    claim: shuffle 原生 32-bit，64-bit 类型拆成两次；自定义结构体不能直接 __shfl_sync，需拆字段
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+- id: ballot_vote
+  name: Ballot、Vote 与 Match
+  leaves:
+  - id: ballot_vote_ballot_sync
+    claim: __ballot_sync(mask, pred) 返回 mask 内 pred 为真的 lane 位图；未参与 lane 对应位为 0，不是保留旧值
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: ballot_vote_all_any
+    claim: __all_sync/__any_sync 只在 mask 指定的 lane 上归约 pred；mask 外 lane 必须仍执行该指令如果它们的 bit 在 mask 里
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: ballot_vote_activemask
+    claim: __activemask() 无同步语义，发散时只含当前路径；用它当 __ballot_sync 的 mask 会丢另一分支的 lane
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: ballot_vote_match
+    claim: __match_any_sync 把值相同的 lane 打进同一 mask；用于 warp 聚合原子前分组，返回值是位图不是代表 lane id
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 3
+    kind: api
+  - id: ballot_vote_popc
+    claim: __popc(__ballot_sync(full, pred)) 等于 warp 内 pred 为真的线程数，范围 0..32
+    types:
+    - conceptual
+    difficulty:
+    - 1
+    - 2
+    kind: formula
+  - id: ballot_vote_ffs
+    claim: __ffs(ballot) 返回最低置位的 1-based 索引；ballot=0 时 __ffs 返回 0，当作 lane id 会越界
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    kind: api
+  - id: ballot_vote_uni
+    claim: __uni_sync(mask, pred) 在 mask 内 pred 全相同为 1；有的文档当“无发散”用，但它不检查 mask 外 lane
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: api
+  - id: ballot_vote_redux
+    claim: sm_80+ __reduce_add_sync 等 warp 归约 intrinsic 要求参与 lane 执行同一条；比手工 shuffle 更短但仍要 fullmask 纪律
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 3
+    kind: feature
+- id: predication
+  name: 谓词与分支
+  leaves:
+  - id: predication_short_if
+    claim: 编译器把短 if 编成 @p 谓词指令，两条路径的指令都发射但禁用 lane；指令数仍 ≈ 两条路径之和
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: predication_branch
+    claim: 长分支走 BRA + 汇合栈，NCU branch efficiency <100%；谓词化路径效率可仍是 100% 但浪费 disabled lane 的发射
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: predication_selp
+    claim: selp 按谓词在两寄存器间选择，不发散；用它替代 if/else 写标量可避免 reconverge
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 2
+    kind: api
+  - id: predication_mask_store
+    claim: 谓词关闭的 lane 不写目的；手工把 if(tid<n) 改成无谓词 store 会让 tid>=n 越界写
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 2
+    kind: failure
+  - id: predication_warp_div
+    claim: 32 lane 中 1 个走慢路径仍让整个 warp 等该路径；谓词化不能把那 1 lane 变成独立线程
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: predication_compiler
+    claim: '#pragma unroll 与 if 的组合可能让编译器放弃谓词改用循环分支；看 SASS 有无 @P 比看源码 if 更准'
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: predication_exit
+    claim: 部分线程 return/exit 不会结束整个 warp；其余 lane 继续，提前 return 的 lane 之后不能再参与 __syncwarp(fullmask)
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: predication_uniform
+    claim: __builtin_assume 或 uniform 分支（全 warp 同方向）让编译器去掉谓词；数据相关的 tid==0 仍是发散
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+- id: maxregcount
+  name: 寄存器上限与编译开关
+  leaves:
+  - id: maxregcount_flag
+    claim: -maxrregcount=N 限制整个 TU 的每线程寄存器；N=32 时超预算的 kernel 会 spill 到 local，不是链接失败
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 2
+    kind: api
+  - id: maxregcount_vs_bounds
+    claim: __launch_bounds__ 作用于单个 __global__，-maxrregcount 作用于编译单元；两者同时存在时取更严的寄存器上限
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: maxregcount_ptxas_v
+    claim: ptxas info Used 40 registers 是上限约束后的结果；再加 -maxrregcount=32 会看到 spill stores/loads 计数非 0
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    kind: numeric
+  - id: maxregcount_occupancy
+    claim: 把寄存器从 64 压到 32、block=256 时每 CTA 从 16384 降到 8192，regFile=65536 下 CTA 上限从 4 升到 8
+    types:
+    - optimization
+    difficulty:
+    - 2
+    kind: formula
+  - id: maxregcount_inline
+    claim: 强制 maxrregcount 过小会阻止内联或导致大量 spill，Nsight local 流量升高；占用上去但 walltime 变差
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: maxregcount_device_fn
+    claim: __device__ 函数的寄存器计入调用它的 __global__ 预算；单独给 device 函数 launch_bounds 无效
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: maxregcount_template
+    claim: 模板 kernel 每个实例独立分配寄存器；float 特化 40 regs、double 特化 64 regs 可以共存于同一 TU
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: maxregcount_abi
+    claim: 调用约定会预留若干寄存器给参数/返回；手工 PTX 与编译器混用时 ABI 冲突表现为破坏 callee-saved
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 4
+    kind: failure
+- id: warp_state
+  name: Warp 状态与 reconverge
+  leaves:
+  - id: warp_state_css
+    claim: Volta+ 汇合栈记录发散分支的 PC 与 mask；栈溢出（过深嵌套发散）是编译/运行错误，不是静默丢路径
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: warp_state_syncwarp_partial
+    claim: __syncwarp(0x0000ffff) 只汇合低 16 lane；高 16 lane 不参与，不能用它当全 warp barrier
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: warp_state_implicit
+    claim: 编译器在汇合点插入隐式 reconverge；用户看不到，但不等于在汇合点前 shared 写已经对另一路径可见
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: warp_state_nanosleep
+    claim: __nanosleep(t) 让 warp 休眠约 t ns 量级，不释放占用槽；用它做跨 CTA 锁等待会占着 SM
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: warp_state_yield
+    claim: 没有用户级“yield 本 warp 给同 SM 其他 CTA”的 CUDA API；调度完全由硬件，busy-wait 会继续占 eligible 集
+    types:
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: warp_state_exit
+    claim: 所有 lane 都 exit 后 warp 才结束；部分 lane 提前 return，warp 仍占用调度槽直到其余 lane 结束
+    types:
+    - conceptual
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: warp_state_barrier_mask
+    claim: 与 CTA barrier 不同，warp 同步的参与集由 mask 决定；mask 动态变化且不一致会永久等待或 UB
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: warp_state_volta_pctrl
+    claim: sm_70 每个线程有独立程序计数器与调用栈，warp 内递归深度可以不同；这不表示可以在 divergent 路径上 __syncthreads
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+- id: issue_width
+  name: 发射宽度与管道
+  leaves:
+  - id: issue_width_dual
+    claim: 部分 SM 每周期可双发（如数学+访存），但依赖于调度器分区与指令配对；两套纯依赖 FMA 链不一定双发
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: issue_width_sfu
+    claim: SFU（sin/exp/rcp）吞吐低于 FMA；warp 密集 __sinf 会变成 SFU 瓶颈，IPC 掉但 DRAM 空闲
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: issue_width_fp64
+    claim: 消费级 GPU 的 FP64 吞吐常是 FP32 的 1/64；同样 ILP 的 double 核会先打满 FP64 管道而不是访存
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 2
+    kind: numeric
+  - id: issue_width_tensor
+    claim: Tensor Core 管道与 CUDA Core 分立；只加占用不发 MMA 指令不会提高 tensor 吞吐
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: issue_width_ipc
+    claim: IPC = 退休指令 / 周期；理论峰值取决于每周期发射槽×调度器数，NCU ipc 远低于峰值说明 stall 而不是时钟
+    types:
+    - profiling
+    difficulty:
+    - 2
+    kind: formula
+  - id: issue_width_ldst_pipe
+    claim: LD/ST 管道与 ALU 分开；访存核 IPC 低是正常的，应用 sector 吞吐而不是 IPC 当目标
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: issue_width_wait
+    claim: SASS 的 WAIT / scoreboard 立即数编码固定延迟；手工排程比编译器差时会出现更多 wait
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: issue_width_ampere_4sub
+    claim: Ampere SM 分 4 个 processing block，每个有自己的调度；warp 数不是 4 的倍数时分区利用不均
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+- id: occupancy_api
+  name: Occupancy 工具 API
+  leaves:
+  - id: occupancy_api_max_active
+    claim: cudaOccupancyMaxActiveBlocksPerMultiprocessor 的 blockSize 必须等于将要 launch 的值，用 128 估 256 的占用是错的
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: occupancy_api_potential
+    claim: MaxPotentialBlockSize 返回的 blockSize 常是 128/256/1024 离散点，需要再与算法 tile 对齐手工挑选
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: occupancy_api_variable_smem
+    claim: 回调版 VariableSMem 按 blockSize 计算 dynSmem；回调返回值单位是字节，返回元素个数会高估占用
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+  - id: occupancy_api_cluster
+    claim: sm_90+ cudaOccupancyMaxActiveClusters 仅 cluster launch 有意义；普通 kernel 用它不能替代 MaxActiveBlocks
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: occupancy_api_available_smem
+    claim: OccupancyAvailableDynamicSMemPerBlock(f, numBlocks, blockSize) 给出在目标 numBlocks 下还能加多少动态 smem
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: occupancy_api_ignore_ilp
+    claim: Occupancy API 不建模 ILP、cache 与 barrier，返回 100% 占用仍可能更慢；只能当资源可行性检查
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: occupancy_api_func_attr
+    claim: 先 cudaFuncSetAttribute 改动态 smem 上限再问 occupancy，否则 API 仍按旧上限算
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: occupancy_api_launch_helper
+    claim: cudaLaunchKernelEx 不会自动调用 occupancy API；执行配置仍要宿主计算，occupancy 助手与 launch 是分开的
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 2
+    kind: api

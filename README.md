@@ -13,7 +13,7 @@ pip install -e ".[dev]"
 cp .env.example .env   # 填入最多 3 个 NVIDIA_API_KEY
 ```
 
-`.env` 支持 `NVIDIA_API_KEY` / `NVIDIA_API_KEY_2` / `NVIDIA_API_KEY_3`。每个 key 的 LLM 并发默认 2、embedding 并发默认 2（3 个 key 合计 LLM 6 / embed 6）；某个 key 被 429 时冷却并换其他 key。`NVIDIA_BASE_URL`、`NVIDIA_MODEL`、`THINKING_LEVEL`（`none|medium|high`）、`REVIEW_BATCH_SIZE` 同样可配。
+`.env` 支持 `NVIDIA_API_KEY` / `NVIDIA_API_KEY_2` / `NVIDIA_API_KEY_3`。每个 key 的 LLM 并发默认 2、embedding 并发默认 2×oversub（默认 oversub=2，3 个 key 合计 LLM 6 / embed 12）。LLM 与 embedding 分槽、分冷却，writer 优先于 salvage / chair / sieve。出题过程中会预取 embedding，review 只补 cache miss。`NVIDIA_BASE_URL`、`NVIDIA_MODEL`、`THINKING_LEVEL`（`none|medium|high`）、`REVIEW_BATCH_SIZE` 同样可配。
 
 ```bash
 # 真实 API

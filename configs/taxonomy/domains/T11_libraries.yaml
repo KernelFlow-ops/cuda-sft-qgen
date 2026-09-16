@@ -1,0 +1,971 @@
+id: T11
+name: CUDA 库生态
+children:
+- id: cublas
+  name: cuBLAS / cuBLASLt
+  leaves:
+  - id: cublaslt_epilogue
+    claim: cuBLASLt epilogue fusion（bias/gelu）与 layout、pointer mode 的匹配
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 2
+    - 3
+  - id: cublas_lt_epilogue_layout
+    claim: cuBLASLt epilogue gelu 要求 C/D 的 leading dimension 与 order 匹配；row-major C 配 col-major epilogue 会拒绝或算错
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cublas_lt_tf32
+    claim: CUBLAS_COMPUTE_32F_FAST_TF32 把 FP32 GEMM 打到 TF32 Tensor Core，相对 CUBLAS_COMPUTE_32F 丢失尾数，不是同一数值
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: cublas_pointer_mode
+    claim: CUBLAS_POINTER_MODE_HOST 要求 alpha/beta 指向 host；传入 device 指针会被当 host 地址解引用，得到错误标量或 CPU 段错误
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cublas_math_mode
+    claim: CUBLAS_TF32_TENSOR_OP_MATH 只把 FP32 计算打到 TF32 Tensor Core，不改变 A/B 的 CUDA_R_32F 存储格式
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: cublas_strided_batch
+    claim: cublasGemmStridedBatchedEx 的 strideA 以元素计；按字节填 lda*m*4 会把批次起点跳过 4 倍
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: cublas_ld_colmajor
+    claim: 列主 GEMM 要求 lda ≥ m（行数）；m=1024 n=256 时 lda=n=256 会按 256 行读 A，结果错且可能越界
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: cublas_handle_stream
+    claim: cublasSetStream 后 GEMM 相对该 stream 异步；未同步就从默认流读 C 会看到部分更新
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    kind: failure
+  - id: cublas_atomics_mode
+    claim: CUBLAS_ATOMICS_ALLOWED 允许非确定原子归约换吞吐；逐 bit 复现必须 CUBLAS_ATOMICS_NOT_ALLOWED
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+- id: cub_cccl
+  name: CUB / CCCL / Thrust
+  leaves:
+  - id: cub_device_reduce
+    claim: CUB DeviceReduce 临时存储两阶段调用与别名规则
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+  - id: thrust_policy
+    claim: Thrust execution policy 与自定义分配器在 device 上的生命周期
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+  - id: cub_cccl_temp_alias
+    claim: CUB DeviceReduce 第二阶段 d_temp 不得与 d_in/d_out 别名；查询阶段传入 nullptr 只写 temp_bytes，不会检查别名
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: failure
+  - id: cub_cccl_tune_smem
+    claim: CUB 块级 radix 的 smem 占用随 ITEMS_PER_THREAD 上升；超 SM smem 上限时该 kernel 无法 launch 而不是自动换算法
+    types:
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cub_cccl_two_phase
+    claim: CUB Device 算法第一阶段 temp_storage=nullptr 只写 bytes；第二阶段缓冲小于该 bytes 是 UB 而不是自动报错
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: cub_cccl_exclusive_scan
+    claim: DeviceScan::ExclusiveSum 的 out[0] 写 identity（0），in[i] 出现在 out[i+1]；当 inclusive 用会整体右移一格
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: cub_cccl_radix_bits
+    claim: DeviceRadixSort 的 begin_bit/end_bit 只排该比特区间；end_bit=8 时高 24 bit 保持原相对顺序但不按值排
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: cub_cccl_device_ptr
+    claim: thrust::device_pointer_cast 不改变所有权；对 host malloc 指针做 cuda::par 算法是非法 device 地址
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cub_cccl_counting_iter
+    claim: counting_iterator<int> 在 n>2^31-1 时加法绕回；长度 3e9 的序列必须用 64-bit 差类型
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+- id: others
+  name: 其他库
+  leaves:
+  - id: cudnn_attn
+    claim: cuDNN fused attention / conv 选择算法与 workspace、确定性
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 3
+  - id: cufft_plan
+    claim: cuFFT plan 的 batch、stride 与 real-to-complex 布局
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+  - id: others_cudnn_workspace
+    claim: cudnnFindConvolutionForwardAlgorithm 返回的 workspace 是该算法下界；融合后再加寄存器可能导致所选算法 launch 失败
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: others_cufft_r2c
+    claim: cuFFT R2C 输出长度为 floor(N/2)+1 个 complex，不是 N；用 N 当 complex 长度读会越界
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+  - id: others_cudnn_find_get
+    claim: cudnnFindConvolutionForwardAlgorithm 实测选最快，Get 用启发式；workspace 变了不能复用旧 algo 编号
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: others_cudnn_nhwc
+    claim: CUDNN_TENSOR_NHWC 要求 channel 维 stride=1；把 NCHW 缓冲配 NHWC 描述符会按错跨度读权重
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: others_cudnn_det
+    claim: CUDNN_DETERMINISTIC 排除非确定算法，可能返回 NOT_SUPPORTED，不会自动降到非确定实现
+    types:
+    - compare
+    - counterfactual
+    difficulty:
+    - 3
+    kind: feature
+  - id: others_cufft_inplace
+    claim: 原地 R2C 最内维须能容纳 2*(floor(N/2)+1) 个 real；N=256 时每行至少 258 个 float，按 N 分配会写越界
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: others_cufft_setstream
+    claim: cufftSetStream 只改执行流，不改 plan 尺寸；改 N 必须销毁重建 plan，SetStream 后 Exec 仍用旧长度
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+- id: cublaslt_cask
+  name: cuBLASLt kernel 选择
+  leaves:
+  - id: cublaslt_cask_align
+    claim: cuBLASLt 要求 A/B/C 指针满足所选 kernel 的对齐（常 16B+）；不对齐会 heuristic 失败或走慢路径
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cublaslt_cask_workspace
+    claim: preference 里 workspaceLimit 过小会排除最快 kernel，看起来像“库变慢”其实是预算问题
+    types:
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: cublaslt_cask_epilogue_bias
+    claim: bias 向量长度须等于 N（或相应 epilogue 维），长度等于 M 会静默错或拒绝
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    kind: failure
+  - id: cublaslt_cask_tf32
+    claim: compute type 选 FAST_TF32 后 heuristic 只搜 TF32 kernel，不能与 32F 精确路径混在一次 matmul 里
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: cublaslt_cask_heuristic
+    claim: cublasLtMatmulAlgoGetHeuristic 返回的 algo 绑定当前 desc/epilogue；改 GELU 为 RELU 后必须重搜，旧 algo 会失败或错融合
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cublaslt_cask_scale
+    claim: FP8 GEMM 的 A/B/D scale 描述符缺失时 heuristic 结果数为 0，不会静默按 1.0 缩放
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: cublaslt_cask_trans
+    claim: CUBLAS_OP_T 与 CUBLASLT_ORDER_ROW 是两套旋钮；row-major 再标 OP_T 等于又转一次，不是“行主的不转置”
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cublaslt_cask_stride0
+    claim: strided batch 里 strideA=0 才广播同一 A；strideA=lda 会把相邻批次当成下一张矩阵
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: cublaslt_cask_fp8
+    claim: FP8 计算类型要求 scale 与 epilogue amax 指针按 desc 对齐；scale 用 FP32 host 标量但 pointer mode 为 DEVICE 会读错
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+- id: cub_tuning
+  name: CUB 调参
+  leaves:
+  - id: cub_tuning_items
+    claim: ITEMS_PER_THREAD 增大提高 ILP 也提高寄存器/smem；超限时该 Device 算法 specialization 无法实例化
+    types:
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cub_tuning_temp
+    claim: temp storage 大小与问题 n、tile 有关，不能把 n=1e6 的 temp 复用到 n=1e8 而不重新查询
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: cub_tuning_stream
+    claim: CUB device 调用相对传入 stream 异步；默认流上立刻读 host 输出会读到未完成结果
+    types:
+    - debug
+    difficulty:
+    - 2
+    kind: failure
+  - id: cub_tuning_determinism
+    claim: CUB 归约一般不保证逐 bit 确定，尤其浮点；需要确定应自己做确定性树或用整数
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cub_tuning_block_threads
+    claim: BLOCK_THREADS 必须是 32 的倍数；非倍数 specialization 的 shfl mask 不能覆盖整 warp，归约少 lane
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cub_tuning_reg_ipt
+    claim: ITEMS_PER_THREAD 每加 1 大约多一份寄存器数组；占用从 4 warp/SM 掉到 2 时吞吐不一定升
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cub_tuning_inplace
+    claim: DeviceReduce 不允许 d_in 与 d_out 别名；DeviceScan 部分重载允许 in-place，混用规则会静默写坏输入
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cub_tuning_align16
+    claim: 输入 16B 对齐时 CUB 走向量 load；只保证 4B 对齐会走标量路径，temp_bytes 也可能变化
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cub_tuning_arch_spec
+    claim: CUB 按 __CUDA_ARCH__ 特化；sm_80 胖二进制在 sm_90 上跑兼容 JIT，不是 Hopper 专用 kernel
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: feature
+- id: cufft_layout
+  name: cuFFT 布局
+  leaves:
+  - id: cufft_layout_embed
+    claim: cufftPlanMany 的 istride/idist 描述嵌入布局；忽略 embed 把连续数组当 strided 会算错频谱
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cufft_layout_batch
+    claim: batch 个变换的 idist 是相邻 batch 起点差，不是 n 本身；idist=n 仅当紧密排列
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+  - id: cufft_layout_workarea
+    claim: auto-alloc 关闭时必须提供 workArea，大小来自 Estimate；过小是 launch 失败
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    kind: api
+  - id: cufft_layout_compat
+    claim: 兼容性布局（make-plan 的兼容 FFTW 风格）与 native 半复输出长度规则不同，混用会越界
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: cufft_layout_nembed
+    claim: inembed[d] 是第 d 维嵌入长度且须 ≥ n[d]；inembed=NULL 表示紧密，此时非零 istride 被忽略
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cufft_layout_c2r
+    claim: C2R 输入是 floor(N/2)+1 个 complex、输出 N 个 real；对调成 N 个 complex 输入会越界读
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+  - id: cufft_layout_align16
+    claim: cuFFT 缓冲须 16 字节对齐；cudaMalloc 满足，对偏移 +8 的子指针 Exec 会失败或错谱
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cufft_layout_3d_n0
+    claim: cufftPlan3d 的 n[0] 是最慢变维（最外）；把 C 行主的 n[2] 填进 n[0] 得到转置频谱
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cufft_layout_xt64
+    claim: 点数 >2^31-1 必须 cufftXtMakePlanMany 的 64-bit n；旧 cufftPlan1d 的 int n 会截断尺寸
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: api
+- id: cudnn_conv
+  name: cuDNN 卷积算法
+  leaves:
+  - id: cudnn_conv_find_ws
+    claim: Find 返回的 workspace 是该 algo 下界；真实 launch 再叠加融合核寄存器后可能 cudaErrorInvalidValue
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cudnn_conv_group
+    claim: groupCount 必须整除 C 与 K；C=64 group=3 创建描述符失败，不是按 21 通道截断
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: formula
+  - id: cudnn_conv_dilation
+    claim: dilation=2 使有效感受野 = k+(k-1)*(dilation-1)；3x3 dilation 2 等价感受野 5，im2col 列数按此算
+    types:
+    - conceptual
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: cudnn_conv_tc_math
+    claim: CUDNN_TENSOR_OP_MATH 允许 FP32 进 TC（TF32/FP16 路径）；CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION 才会插入换型
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 3
+    kind: feature
+  - id: cudnn_conv_nhwc_vec
+    claim: NHWC 且 C%32==0 时 cuDNN 可走 32C 向量加载；C=3 的 NHWC 仍难向量化，常不如 pad 到 4 或 32
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cudnn_conv_fwd_bwd
+    claim: bwdFilter 与 fwd 的 algo 枚举独立；复用 fwd 的 ALGO_IMPLICIT_GEMM 编号给 bwd 是非法枚举
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cudnn_conv_pad_shape
+    claim: 输出高 Wout = (Win+2*pad-dilation*(k-1)-1)/stride+1；pad 与 dilation 算错会让 desc 尺寸与缓冲不一致
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: cudnn_conv_workspace_null
+    claim: algo 需要 workspace>0 时传入 nullptr 失败；workspace=0 只对无需额外缓冲的 IMPLICIT_GEMM 合法
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    kind: failure
+  - id: cudnn_conv_strided_n
+    claim: NCHW 的 n 维 stride 须 ≥ C*H*W 元素；小于该值时批次重叠，Find 仍可能“成功”但数值错
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+- id: cudnn_sdpa
+  name: cuDNN 融合注意力
+  leaves:
+  - id: cudnn_sdpa_seqlen
+    claim: 融合 SDPA 的 seqlen 必须写进描述符；用 max_seqlen 分配但实际 seqlen 更短时仍按 max 读 QK，需 padding mask
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: cudnn_sdpa_dropout
+    claim: dropout 状态字节来自 cudnnDropoutGetStatesSize(handle)，与 batch/seqlen 无关；缓冲比返回值少 1 字节是非法而不是少丢弃
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: cudnn_sdpa_causal
+    claim: causal mask 在 tile 内于 softmax 之前生效；库外再乘三角 mask 等于掩两次，会把已置零 logit 再指数化
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cudnn_sdpa_ws
+    claim: fused attention workspace 随 seqlen^2 的分块变化；按短序列估的 ws 跑长序列会 launch 失败
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cudnn_sdpa_bwd_store
+    claim: 反向需要保存 softmax 统计或重算；训练图少存 running m/l 会迫使全量物化 S，SRAM 配方失效
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: cudnn_sdpa_headdim
+    claim: head_dim 须匹配内核特化（常见 64/128）；head_dim=80 可能走非 TC 或直接 NOT_SUPPORTED
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 3
+    kind: feature
+  - id: cudnn_sdpa_layout
+    claim: BSHD 与 BHSD 的 stride 不同；BHSD 当 BSHD 传会把 head 与 seq 维对调，注意力打到错误轴
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: cudnn_sdpa_det
+    claim: 非确定 SDPA 实现跨 run 可差末位；CUDNN_DETERMINISTIC 可能禁用最快 flash 路径
+    types:
+    - compare
+    - profiling
+    difficulty:
+    - 3
+    kind: numeric
+- id: cublas_lt_pref
+  name: cuBLASLt preference
+  leaves:
+  - id: cublas_lt_pref_search
+    claim: CUBLASLT_SEARCH_BEST_K 限制 heuristic 只看前 K 个候选；K=1 常选次优，看起来像库回退
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cublas_lt_pref_waves
+    claim: MAX_WAVES_COUNT 过小会排除高占用 kernel；waves=1 时大 GEMM 只剩低占用实现
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cublas_lt_pref_impl_mask
+    claim: IMPL_MASK 过滤 TC/SIMT 实现；关掉 TENSOR_OP 后 FP16 GEMM 走 SIMT，AI 再高也不上 TC
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 3
+    kind: feature
+  - id: cublas_lt_pref_reduction
+    claim: REDUCTION_SCHEME 选 ATOMICS 可非确定；需要 bitwise 稳定应选无原子方案并接受可能更慢
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cublas_lt_pref_min_align
+    claim: MIN_ALIGNMENT_* 声明指针对齐；声明 256B 但实际 16B 对齐会 heuristic 失败或错向量加载
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cublas_lt_pref_ws_bytes
+    claim: MAX_WORKSPACE_BYTES=0 排除一切需 ws 的最快 kernel；不是“不分配也能跑最快路径”
+    types:
+    - optimization
+    - counterfactual
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: cublas_lt_pref_numeric
+    claim: NUMERICS_MODE 与 compute type 冲突时 heuristic 空集，返回成功但 resultCount=0
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: cublas_lt_pref_cap
+    claim: capability 位掩码按运行 GPU；在 sm_80 上保留 sm_90 专用 cap 会得到空候选
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+- id: thrust_exec
+  name: Thrust 执行策略
+  leaves:
+  - id: thrust_exec_par_on
+    claim: thrust::cuda::par.on(stream) 把算法提交到该 stream；默认 par 可能走默认流并隐式同步
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: thrust_exec_par_nosync
+    claim: cuda::par_nosync 不在算法结束插入同步；随后 host 读 device_vector 仍可能看到未完成写
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: thrust_exec_alloc
+    claim: 自定义 MR 分配器的指针必须 device 可解引用；返回 host pinned 指针会在 kernel 里非法访问
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: thrust_exec_sync_copy
+    claim: thrust::copy 到 host 向量隐含同步；与用户 stream 上的 kernel 并发时会把该流之外的默认流也拖住
+    types:
+    - debug
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: thrust_exec_zip
+    claim: zip_iterator 的各分量指针长度须一致；最短耗尽后继续解引用是 OOB
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: failure
+  - id: thrust_exec_perm
+    claim: permutation_iterator 的 map 值必须 < 基数组长度；map 含 -1 或 n 会越界而非写 0
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: thrust_exec_universal
+    claim: universal_vector 在未启用 HMM/UVM 的系统上 kernel 解引用 host 页会 fault，不是自动迁移
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: thrust_exec_copy_if
+    claim: copy_if 的输出缓冲须能容纳全部 true 元素；按输入 n 的一半分配在全 true 时写越界
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: numeric
+- id: cub_block
+  name: CUB 块级原语
+  leaves:
+  - id: cub_block_temp
+    claim: BlockReduce 的 TempStorage 必须 __shared__ 且每 CTA 一份；每线程一份会 bank 冲突并破坏归约树
+    types:
+    - syntax
+    - code_complete
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cub_block_radix_rank
+    claim: BlockRadixRank 的 smem 随 RADIX_BITS 指数涨；BITS=8 相对 4 大约 16 倍 digit bin，易超 smem
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cub_block_shuffle
+    claim: WarpReduce 用 shfl，不占 smem；CTA>32 时必须再接 BlockReduce，只调 WarpReduce 只得到每 warp 局部和
+    types:
+    - code_complete
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: cub_block_load_vec
+    claim: BlockLoad VECTOR_2/4 要求指针自然对齐；对 int 数组 +1 偏移走 VECTOR_4 是未对齐向量，结果未定义
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cub_block_store_warp
+    claim: WARP_TRANSPOSE 存回全局时按 warp 条带改布局；与直写 BLOCK_LOAD_DIRECT 混用会打乱元素顺序
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cub_block_reduce_op
+    claim: 自定义 ReduceOp 必须交换且对 identity 正确；浮点 max 的 identity 是 -inf 不是 0，否则全负数归约成 0
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cub_block_scan_ex
+    claim: BlockScan Exclusive 在 tid=0 写 identity；用 inclusive 的寄存器 当 exclusive 输出会多加自身一次
+    types:
+    - code_complete
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: cub_block_spec
+    claim: Block* 模板参数在编译期固定；运行时 n 小于 BLOCK_THREADS 仍启动整块，多余 tid 必须自己 predication
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+- id: cufft_exec
+  name: cuFFT 执行与 plan
+  leaves:
+  - id: cufft_exec_setstream
+    claim: Exec 相对 SetStream 的流异步；默认流上立刻读输出会读到未完成频谱
+    types:
+    - debug
+    - profiling
+    difficulty:
+    - 2
+    kind: failure
+  - id: cufft_exec_r2c_scale
+    claim: cuFFT 不做 1/N 归一化；往返 R2C+C2R 得到 N 倍原信号，N=1024 时幅值差 1024 倍
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 1
+    - 2
+    kind: formula
+  - id: cufft_exec_batch_overlap
+    claim: batch 的 idist 小于变换长度时输入重叠；plan 创建仍成功，频谱串批
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cufft_exec_compat
+    claim: CUFFT_COMPATIBILITY_FFTW_PADDING 改变内维填充规则；与 native 半复长度混用会偏一 bin
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: cufft_exec_64bit
+    claim: cufftXtExec 配 64-bit 描述；对 Xt plan 调 cufftExecC2C 类型不匹配，执行失败
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: cufft_exec_xt_desc
+    claim: cufftXtSetGPUs 多卡 plan 的数据须用 cufftXtMalloc 的格式；普通 cudaMalloc 单指针不能当 Xt 描述符
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: cufft_exec_workarea_est
+    claim: Estimate64 给出的 workSize 是下界；auto-alloc 关闭且缓冲差 1 字节也会 RUNTIME 失败
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 2
+    kind: numeric
+  - id: cufft_exec_rank
+    claim: PlanMany 的 rank 必须等于 n[] 长度；rank=2 但 n 只填 1 个元素是未定义，不是自动 1D
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+- id: cublas_lt_desc
+  name: cuBLASLt 描述符
+  leaves:
+  - id: cublas_lt_desc_order
+    claim: CUBLASLT_ORDER_COL32 是 Ampere+ 变换布局，不是普通列主；当 ORDER_COL 用会按 32 列面板错读
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: cublas_lt_desc_ld
+    claim: matrix layout 的 ld 以元素计且须 ≥ 对应维；row-major 且 n=1024 时 ld≥1024，填 m 会越读
+    types:
+    - layout
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: cublas_lt_desc_scale
+    claim: device 指针模式的 scale 必须 16B 对齐的 device 标量；host float 局部变量地址会被 device 解引用
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cublas_lt_desc_aux
+    claim: GELU_AUX epilogue 的 aux 矩阵 ld 必须等于 D 的 n 维；ld 用 m 会把辅助梯度写乱
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    kind: api
+  - id: cublas_lt_desc_bias_n
+    claim: bias 向量长度等于 N（epilogue 沿 n）；长度 M 在启发式可能通过但每行加错元素
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cublas_lt_desc_dtype
+    claim: A/B/C/D 的 CUDA data type 与 compute type 组合非法时创建 matmul desc 失败，不会隐式换型
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cublas_lt_desc_batch
+    claim: batchCount>1 必须设 stride；只改 count 不设 stride 时批次指针按 0 间距重叠
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: cublas_lt_desc_epilogue_relu
+    claim: RELU epilogue 在 D 上做，不改 C；C 与 D 别名且 beta≠0 时先读后写的融合语义依赖库实现，不能当安全 in-place
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    kind: mechanism

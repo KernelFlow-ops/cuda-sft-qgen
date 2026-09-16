@@ -62,7 +62,10 @@ class Settings:
     writer_concurrency: int
     llm_per_key_concurrency: int
     embed_per_key_concurrency: int
+    embed_oversub: int
     embed_chunk_size: int
+    prompt_cache_enabled: bool
+    embedding_cache_enabled: bool
     max_iterations: int
     semantic_dup_threshold: float
     semantic_gray_threshold: float
@@ -174,6 +177,10 @@ def load_settings(
         os.getenv("EMBED_PER_KEY_CONCURRENCY"),
         int(gen_cfg.get("embed_per_key_concurrency", 2)),
     )
+    embed_oversub = _as_int(
+        os.getenv("EMBED_OVERSUB"),
+        int(gen_cfg.get("embed_oversub", 2)),
+    )
     n_keys = max(1, len(api_keys))
     writer_concurrency = n_keys * max(1, llm_per_key)
 
@@ -204,9 +211,18 @@ def load_settings(
         writer_concurrency=writer_concurrency,
         llm_per_key_concurrency=max(1, llm_per_key),
         embed_per_key_concurrency=max(1, embed_per_key),
+        embed_oversub=max(1, embed_oversub),
         embed_chunk_size=_as_int(
             os.getenv("EMBED_CHUNK_SIZE"),
             int(gen_cfg.get("embed_chunk_size", 8)),
+        ),
+        prompt_cache_enabled=_as_bool(
+            os.getenv("PROMPT_CACHE"),
+            bool(gen_cfg.get("prompt_cache", True)),
+        ),
+        embedding_cache_enabled=_as_bool(
+            os.getenv("EMBEDDING_CACHE"),
+            bool(gen_cfg.get("embedding_cache", True)),
         ),
         max_iterations=_as_int(os.getenv("MAX_ITERATIONS"), 200),
         semantic_dup_threshold=_as_float(

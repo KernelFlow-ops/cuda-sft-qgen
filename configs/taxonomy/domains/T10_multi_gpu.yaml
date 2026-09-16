@@ -1,0 +1,916 @@
+id: T10
+name: 多 GPU 与通信
+children:
+- id: p2p
+  name: P2P 与 NVLink
+  leaves:
+  - id: enable_p2p
+    claim: cudaDeviceEnablePeerAccess 的条件、拓扑查询与走 PCIe 时的性能陷阱
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: nvlink_vs_pcie
+    claim: NVLink/NVSwitch 带宽与 P2P copy 引擎 vs kernel 直接访问
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: p2p_enable_canaccess
+    claim: cudaDeviceCanAccessPeer 为 0 时 EnablePeerAccess 失败；此时 cudaMemcpyPeer 走 PCIe staging，不是 NVLink
+      直达
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: p2p_kernel_direct
+    claim: kernel 直接解引用 peer 指针要求 mapping 已启用；只用 memcpyPeer 不开启 mapping 时 kernel 解引用是非法地址
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+  - id: p2p_current_device
+    claim: EnablePeerAccess 必须在当前 device 上对 peerDevice 调用；在 GPU0 上 enable(1) 不会让 GPU1 访问 GPU0
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: p2p_same_process
+    claim: 运行时 P2P mapping 默认在同一进程内；跨进程要 IPC/fabric handle，不是再调一次 EnablePeerAccess
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: p2p_disable
+    claim: cudaDeviceDisablePeerAccess 之后已有 peer 指针变非法；未同步的 kernel 仍可能在飞，产生后发 fault
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: p2p_array
+    claim: cudaDeviceGetP2PAttribute 的 CudaArrayAccessSupported 与普通线性内存 P2P 独立；array 未支持时 cudaMemcpy2D 走 staging
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: api
+- id: nccl
+  name: NCCL 与 MPI
+  leaves:
+  - id: nccl_stream
+    claim: NCCL collective 与用户 kernel 的 stream 顺序、以及 in-place allreduce 约束
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cuda_aware_mpi
+    claim: CUDA-aware MPI 直接传 device pointer 的前提与隐藏同步
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: nccl_inplace
+    claim: NCCL in-place allreduce 要求 sendbuff==recvbuff 且 count/dtype/op 匹配；重叠区域部分重叠不是合法 in-place
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: nccl_user_stream
+    claim: ncclAllReduce 相对传入 stream 有序，但不隐式 device synchronize；用户 kernel 若在默认 stream 上无 WaitEvent 会与
+      NCCL 竞态
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: nccl_comm_init
+    claim: ncclCommInitRank 需要 uniqueId 广播且每个 rank 一张 GPU；重复 init 同一 comm 而不 destroy 会泄漏通道
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: nccl_group
+    claim: ncclGroupStart/End 把多次 collective 融合成一次 launch；组内混用不同 comm 或漏 End 会卡死
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: nccl_dtype_op
+    claim: ncclSum 对 ncclFloat16 合法，对 ncclInt8 的平均类 op 不一定提供；dtype/op 不匹配返回 ncclInvalidArgument
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: nccl_mpi_mix
+    claim: CUDA-aware MPI_Isend(device_ptr) 可能隐藏 cudaDeviceSynchronize；与 NCCL 共用同一块缓冲而无间隔同步会竞态
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 3
+    kind: failure
+- id: isolation
+  name: MIG / MPS
+  leaves:
+  - id: mps_mig
+    claim: MPS 与 MIG 对上下文、内存隔离和 occupancy 的不同切分方式
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: isolation_mig_memory
+    claim: MIG 切分的是内存与 SM 实例，跨 instance 不能 P2P；MPS 则共享同一内存空间，只隔离上下文与 QoS
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: isolation_mps_occupancy
+    claim: MPS 客户端的占用受服务端剩余 SM 限制，不是每个进程各自看到整卡 maxWarps
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: isolation_mig_gi_ci
+    claim: MIG 先切 GPU Instance 再切 Compute Instance；CI 共享 GI 的内存，SM 数按 CI 配，不是再切一份 HBM
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: isolation_mps_ctx
+    claim: MPS 多客户端共享同一 VAS 与 UVM 域，A 进程写的 device 指针 B 进程理论上可误用；MIG 则地址空间隔离
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: isolation_mig_nccl
+    claim: 同一 GPU 的两个 MIG instance 之间通常不能 NCCL P2P，需要走 PCIe/网络环回，带宽远低于整卡 NVLink
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: isolation_mps_pin
+    claim: CUDA_MPS_PINNED_DEVICE_MEM 一类限制改变客户端可 pin 的上限；超限分配失败不是卡坏
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: isolation_mig_uuid
+    claim: MIG 设备 UUID 与父 GPU 不同，cudaSetDevice 编号是 MIG 枚举序；用父卡 PCI 地址会绑到错误实例
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: api
+- id: nvlink_topo
+  name: NVLink 拓扑
+  leaves:
+  - id: nvlink_topo_query
+    claim: cudaDeviceGetP2PAttribute 与 NVML 拓扑查询才能判断 NVLink 直连；仅 CanAccessPeer=1 也可能走 PCIe
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: nvlink_topo_bandwidth
+    claim: NVLink 代际单链路带宽不同，聚合带宽 ≈ 链路数×单链路；跨 NUMA 的 GPU 对可能少一跳
+    types:
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: nvlink_topo_switch
+    claim: NVSwitch 系统上任意 GPU 对 P2P 更对称；无 Switch 的 ring/mesh 会出现远邻走 PCIe
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: nvlink_topo_mig
+    claim: MIG instance 之间通常不能 NVLink P2P，即使物理 GPU 有 NVLink
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: nvlink_topo_gen
+    claim: NVLink 3（A100）单链路约 50 GB/s 双向，NVLink 4（H100）更高；用 PCIe5 的 32 GB/s 去估 NVLink 聚合会低一个数量级
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: nvlink_topo_nvml
+    claim: nvmlDeviceGetNvLinkCapability / GetNvLinkState 才能数链路；nvidia-smi topo -m 的 NV/PIX/PXB 含义不同
+    types:
+    - conceptual
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: nvlink_topo_access_latency
+    claim: cudaDevP2PAttrPerformanceRank 只给相对远近，不是 GB/s；rank 差不表示一定走 PCIe
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: nvlink_topo_cpu_path
+    claim: 两 GPU 若只经 CPU/QPI 相连，P2P 可能被禁或极慢；EnablePeerAccess 成功仍可能是 PCIe 多跳
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 3
+    kind: failure
+- id: nccl_proto
+  name: NCCL 协议选择
+  leaves:
+  - id: nccl_proto_simple_ll
+    claim: NCCL Simple/LL/LL128 协议随消息大小切换；小消息 LL 延迟低，大消息 Simple 带宽高，不是固定一种
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: nccl_proto_tree_ring
+    claim: allreduce 算法在 tree 与 ring 间选择，节点数与 NVLink 拓扑改变字节/GPU 公式
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: formula
+  - id: nccl_proto_net
+    claim: 跨节点走 IB/RoCE 时 GPU Direct RDMA 未开会多一次 host bounce，nsys 可见额外拷贝
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: nccl_proto_user_buff
+    claim: 注册用户缓冲（用户 buffer registration）失败时 NCCL 回退内部缓冲，延迟升高但功能仍正确
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: nccl_proto_env
+    claim: NCCL_PROTO=Simple/LL/LL128 与 NCCL_ALGO=Tree/Ring/CollNet 强制选择；写错名字会被忽略并回退自动
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: nccl_proto_ll128
+    claim: LL128 用 128B 行带 flag 的低延迟协议，依赖 NVLink 与对齐；在纯 PCIe 链路上常不可用而回退 LL/Simple
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: nccl_proto_bytes
+    claim: Ring allreduce 每 GPU 业务流量 ≈ 2*(n-1)/n * count*sizeof(dtype)；n=8 时约 1.75× 本地缓冲，不是 n×
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: nccl_proto_p2p_level
+    claim: NCCL_P2P_LEVEL 限制 P2P 使用的拓扑深度；设成 PIX 可能迫使本来 NVLink 可达的对走 PCIe
+    types:
+    - optimization
+    - counterfactual
+    difficulty:
+    - 3
+    kind: failure
+- id: fabric_mem
+  name: Fabric 内存
+  leaves:
+  - id: fabric_mem_handle
+    claim: cudaMalloc 的 fabric handle 可导出给其他进程/节点，普通 cudaMalloc 指针不能当 fabric 句柄用
+    types:
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: fabric_mem_imex
+    claim: IMEX/fabric 可见性有权限与集群配置前提，句柄 import 失败不是指针算术问题
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+  - id: fabric_mem_align
+    claim: fabric 分配对齐可能大于 256B，kernel 里按普通 16B 对齐假设不够
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: numeric
+  - id: fabric_mem_vs_p2p
+    claim: fabric 内存跨节点共享与 EnablePeerAccess 的单机 P2P 是不同机制，不能互相替代
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: fabric_mem_create
+    claim: cuMemCreate + CU_MEM_HANDLE_TYPE_FABRIC 才能导出 fabric handle；cuMemAlloc 的旧 API 没有该 handle 类型
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: fabric_mem_map
+    claim: import 之后还要 cuMemMap + cuMemSetAccess 才可解引用；只拿到 handle 没有 VA
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 4
+    kind: failure
+  - id: fabric_mem_mnnvl
+    claim: 多节点 NVLink（MNNVL）上 fabric 内存可跨节点直达；没有 NVLink 网络时 fabric handle 不能变出 GPU 直连
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+  - id: fabric_mem_free
+    claim: 导出方 cuMemRelease 不影响已 map 的进口端，直到进口 unmap；双方生命周期要对齐否则出现后发 fault
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: failure
+- id: p2p_atomic
+  name: 跨 GPU 原子
+  leaves:
+  - id: p2p_atomic_native
+    claim: cudaDevP2PAttrNativeAtomicSupported=1 时 peer 上的 system-scope atomic 才是硬件原子；为 0 时结果不可当互斥
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: p2p_atomic_scope
+    claim: cuda::atomic_ref 必须 thread_scope_system 才对 peer 可见；device scope 的 atomicAdd 对另一 GPU 不构成 release
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: p2p_atomic_pcie
+    claim: 经 PCIe 的 P2P 原子支持弱于 NVLink；NativeAtomicSupported=0 时不要用 peer 指针做锁
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: p2p_atomic_sys
+    claim: PTX atom.sys 才是系统范围；atom.gpu 只保证本 GPU。peer 可见性要用 .sys 或 cuda::thread_scope_system
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: p2p_atomic_fence
+    claim: 对 peer 缓冲的普通 store 后要 fence.sys 或 system atomic，另一 GPU 的 kernel 才能看到；__threadfence() 只到本设备
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: p2p_atomic_managed
+    claim: managed 内存的跨 GPU 原子还受 ConcurrentManagedAccess 约束；不是 EnablePeerAccess 的子集
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: p2p_atomic_cas
+    claim: 跨 GPU CAS 自旋锁在 NativeAtomic 不支持时会活锁或撕值；应退回 host 端同步或 NVSHMEM/NCCL
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 4
+    kind: failure
+  - id: p2p_atomic_count
+    claim: 多 GPU 同时 atomicAdd 同一 peer 地址的吞吐受链路与原子单元限制，不是 8 GPU 线性加速
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: numeric
+- id: memcpy_peer
+  name: Peer 拷贝引擎
+  leaves:
+  - id: memcpy_peer_api
+    claim: cudaMemcpyPeerAsync 走 DMA copy 引擎，不要求 EnablePeerAccess；与 kernel 直访是两条路径
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: memcpy_peer_stream
+    claim: Peer copy 相对目标设备上的 stream 有序；在源设备默认 stream 上立刻读可能尚未完成
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: memcpy_peer_3d
+    claim: cudaMemcpy3DPeer 的 pitched 布局必须两侧 pitch 都合法；用线性 memcpyPeer 拷 2D pitch 会丢掉 padding
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: memcpy_peer_sync
+    claim: 同步 cudaMemcpyPeer 隐含等待该方向 copy；它不会同步两端所有 stream
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: memcpy_peer_bw
+    claim: copy 引擎可与 SM 重叠；kernel 直访 peer 则占 SM 发出的 ld/st，带宽与 SM 占用互相挤
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: memcpy_peer_dir
+    claim: 双向同时 Peer copy 在 NVLink 上可接近聚合双向带宽；PCIe 上受共用链路限制，不是 2× 单向
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: numeric
+  - id: memcpy_peer_default
+    claim: cudaMemcpyDefault 在 P2P 可达时可能选 peer 路径；CanAccessPeer=0 时回退 staging，nsys 可见额外 HtoD
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: memcpy_peer_ipc
+    claim: 跨进程 memcpy 需要 cudaIpcGetMemHandle 打开的指针；普通 peer 指针不能交给另一进程的 memcpyPeer
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+- id: nccl_group
+  name: NCCL 启动与融合
+  leaves:
+  - id: nccl_group_fused
+    claim: GroupStart 后连续 AllReduce+AllGather 可融合成一次网络调度；组外两次调用是两次 launch
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: nccl_group_stream
+    claim: 组内 collective 必须同一 comm；stream 按每次调用传入，组结束时一起提交到各自 stream
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: nccl_group_nested
+    claim: GroupStart 不可无匹配 End 地嵌套错层；少一次 End 会让后续 NCCL 调用全部挂起
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+  - id: nccl_group_graph
+    claim: CUDA Graph 捕获 NCCL 需要支持图捕获的 NCCL 且 collective 在同一 stream；捕获期 Group 未 End 会失败，与 sm_80 TMA 无关但同样不能拆 Group
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: nccl_group_blocking
+    claim: ncclAllReduce 默认相对 stream 异步；cudaStreamSynchronize(stream) 才等完成，不是函数返回即数据可见
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: nccl_group_count0
+    claim: count=0 的 collective 仍可能做同步握手；不要靠 count=0 当 no-op 去跳过 Group 里的 rank
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: nccl_group_order
+    claim: 同一 comm 上 collective 必须所有 rank 以相同顺序发起；rank0 AllReduce 而 rank1 AllGather 会死锁
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: nccl_group_nthreads
+    claim: NCCL_NTHREADS / 通道数影响 SM 占用；通道过多会和用户 GEMM 抢 SM，不是越大越快
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: numeric
+- id: nvls
+  name: NVLS / SHARP
+  leaves:
+  - id: nvls_enable
+    claim: NCCL_NVLS_ENABLE 打开 NVLink SHARP 一类多播规约；硬件/驱动不支持时静默回退 ring/tree
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: nvls_multicast
+    claim: NVLS 利用 NVSwitch 多播做 allreduce，字节/GPU 可低于 2*(n-1)/n 的 ring 公式
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 4
+    kind: formula
+  - id: nvls_align
+    claim: NVLS 对缓冲对齐与大小有要求（常见 16B/128B 级）；不对齐时回退普通协议，nsys 看不到 NVLS 通道
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 4
+    kind: failure
+  - id: nvls_not_pcie
+    claim: 没有 NVSwitch 的 PCIe 盒子不能指望 NVLS；此时 NCCL_NVLS_ENABLE=1 不会变出多播
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: nvls_collnet
+    claim: CollNet/SHARP 是网卡侧规约，与 NVLS 是不同路径；IB SHARP 需要交换机支持，不是 NCCL 软件模拟
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: nvls_count
+    claim: 小消息上 NVLS 启动开销可能大于 ring LL；自动选择会按 size 切换，强制 NVLS 可能更慢
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+  - id: nvls_mig
+    claim: MIG 切分后通常失去 NVLS 多播资格；整卡 NVSwitch 拓扑不再对 instance 可见
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: nvls_reg
+    claim: NVLS 常要求用户缓冲已注册；注册失败回退 Simple，延迟升高但结果仍正确
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+- id: mig_gi
+  name: MIG 实例切分
+  leaves:
+  - id: mig_gi_enable
+    claim: nvidia-smi -mig 1 开启 MIG 后需重建实例，原整卡 CUDA context 失效
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: mig_gi_profile
+    claim: 实例 profile（如 1g.10gb）同时限制 SM 与 HBM；不能只要 10GB 内存却占全部 SM
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: mig_gi_enum
+    claim: CUDA 只枚举可见 MIG 实例为独立 device；cudaGetDeviceCount 在 MIG 下返回实例数不是物理 GPU 数
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: mig_gi_p2p
+    claim: 同一物理 GPU 的 MIG 实例之间 P2P 通常不可用；cudaDeviceCanAccessPeer 返回 0 是预期
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: mig_gi_nccl_id
+    claim: NCCL 在 MIG 下要把 CUDA_VISIBLE_DEVICES 设成实例 UUID；用物理 GPU 序号会绑错或看不见设备
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+  - id: mig_gi_bar1
+    claim: MIG 还切 BAR1 等映射窗口；大 UVM 工作集在小实例上 pinned 失败更早
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: mig_gi_reset
+    claim: 关 MIG 或改 profile 等于重置 GPU，未完成的 kernel/NCCL comm 全部作废
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: mig_gi_sm_count
+    claim: 占用计算必须用实例的 SM 数（cudaDevAttrMultiProcessorCount），不是整卡 132 SM 的 H100 规格
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+- id: mps_qos
+  name: MPS 调度与 QoS
+  leaves:
+  - id: mps_qos_server
+    claim: nvidia-cuda-mps-control 启动 MPS server 后，客户端共享编译缓存与部分上下文，不是各起一份完整驱动栈
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: mps_qos_active_thread
+    claim: CUDA_MPS_ACTIVE_THREAD_PERCENTAGE 限制客户端可用 SM 百分比；100 不保证独占，只是上限
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: mps_qos_mem
+    claim: 客户端看到的 cudaMemGetInfo 受 MPS 配额约束，总和不能超过整卡；OOM 可能是邻居占用
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: mps_qos_fault
+    claim: 默认 MPS 下客户端 fault 可能牵连 server；与 MIG 的故障隔离不同
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: mps_qos_pipe
+    claim: CUDA_MPS_PIPE_DIRECTORY 必须指向 server 的 pipe；指错时客户端会启动失败或连到旧 server
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: mps_qos_exclusive
+    claim: 计算模式 EXCLUSIVE_PROCESS 与 MPS 冲突；未改成 DEFAULT 时 MPS server 起不来
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: mps_qos_nccl
+    claim: 多 MPS 客户端跑 NCCL 仍共享 SM，集合通信通道会和邻居 GEMM 抢吞吐；应用层要自己分时
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: numeric
+  - id: mps_qos_mig
+    claim: MPS 可在单个 MIG 实例内再复用 SM；先 MIG 再 MPS 是两层调度，配额相乘而不是相加
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+- id: mnnvl
+  name: 多节点 NVLink
+  leaves:
+  - id: mnnvl_fabric
+    claim: 多节点 NVLink 把 GPU 织物延伸过机柜，P2P/fabric 内存可跨节点；没有该织物时 NCCL 仍走网卡
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+  - id: mnnvl_imex
+    claim: IMEX 服务负责跨节点导出 fabric handle 的权限；服务未起时 import 失败，不是 CUDA 版本写错这么简单
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: failure
+  - id: mnnvl_nccl
+    claim: NCCL 在 MNNVL 上可把跨节点通道当 NVLink 用；NCCL_NET 强制 IB 会绕开织物
+    types:
+    - optimization
+    - counterfactual
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: mnnvl_query
+    claim: 拓扑查询必须看跨节点 NVLink 状态，不能只信本机 nvidia-smi topo -m 的 PHB 项
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: api
+  - id: mnnvl_align
+    claim: 跨节点 fabric 分配的对齐与页大小可能比单机 cudaMalloc 更严（2MB 级）；16B 假设不够
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 4
+    kind: numeric
+  - id: mnnvl_atomic
+    claim: 跨节点原子依赖织物的 atomic 能力，弱于单机 NVLink 也有可能；NativeAtomic 查询要对那一对 GPU 做
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 4
+    kind: feature
+  - id: mnnvl_vs_ib
+    claim: 同消息大小下 MNNVL 带宽接近机内 NVLink，IB 是另一条屋顶；用 ib_write_bw 去估 GPU 织物会估低
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+  - id: mnnvl_security
+    claim: fabric handle 的可见性受 IMEX 与用户命名空间限制；拿到 64-bit 整数不等于任意节点可 map
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 4
+    kind: mechanism

@@ -1,0 +1,549 @@
+id: T28
+name: 错误模型与确定性
+children:
+  - id: sticky_error
+    name: Sticky 错误
+    leaves:
+      - id: sticky_error_illegal_address
+        claim: "非法地址、misaligned 向量访问或 device trap 会把 CUDA context 置为 sticky fault，之后除查询外几乎所有 runtime 调用持续失败直到销毁 context。"
+        types: [debug, conceptual]
+        difficulty: [2, 3]
+        kind: failure
+      - id: sticky_error_get_last
+        claim: "cudaGetLastError 会清除上一次非 sticky 的 launch 错误并返回该码，第二次立刻再调应得到 cudaSuccess；sticky fault 不能靠它恢复 context。"
+        types: [syntax, debug]
+        difficulty: [2]
+        kind: api
+      - id: sticky_error_peek
+        claim: "cudaPeekAtLastError 读取但不清除上次错误，适合在探测后仍把错误留给调用方；它同样不能解开 sticky context。"
+        types: [compare, syntax]
+        difficulty: [2]
+        kind: api
+      - id: sticky_error_async_report
+        claim: "kernel 内 fault 默认异步上报，host 栈可能指到后续无关的 cudaMemcpy；CUDA_LAUNCH_BLOCKING=1 把 launch 变成同步，使错误点回到真正的 kernel。"
+        types: [debug, profiling]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: sticky_error_async_only
+        claim: "sticky 错误只来自设备执行本身（异步错误）；cudaMalloc 失败、非法 launch 配置等同步错误可用 cudaGetLastError 清掉并继续使用同一 context。"
+        types: [compare, conceptual]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: sticky_error_process_exit
+        claim: "runtime API 下被 sticky 污染的 primary context 不能 cudaDeviceReset 可靠恢复到可发射状态；文档要求结束拥有该 context 的进程再重启。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: failure
+      - id: sticky_error_every_api
+        claim: "sticky 之后 cudaMemcpy/cudaLaunchKernel/cudaMalloc 都会返回同一错误码（如 cudaErrorIllegalAddress=700），不能靠换 API 绕过。"
+        types: [debug, counterfactual]
+        difficulty: [2, 3]
+        kind: failure
+      - id: sticky_error_driver_vs_runtime
+        claim: "Driver API 只记住 sticky；Runtime 还另有线程局部 last-error。cuCtxSynchronize 看到的 sticky 与 cudaGetLastError 清掉的线程局部码不是同一层状态。"
+        types: [compare, conceptual]
+        difficulty: [3]
+        kind: api
+      - id: sticky_error_second_sync
+        claim: "判定 sticky：cudaDeviceSynchronize 得码 E，cudaGetLastError 后再 sync 仍得 E，则 context 已毁；若第二次 sync 为 cudaSuccess 则 E 只是已清除的非 sticky。"
+        types: [debug, code_complete]
+        difficulty: [3]
+        kind: mechanism
+  - id: device_assert
+    name: 设备断言
+    leaves:
+      - id: device_assert_sticky
+        claim: "device 代码 assert(cond) 失败产生 cudaErrorAssert，属 sticky，当前进程的该 GPU context 无法继续 launch，必须重建 context 或退出进程。"
+        types: [debug, conceptual]
+        difficulty: [2, 3]
+        kind: failure
+      - id: device_assert_debug_build
+        claim: "NDEBUG 定义时 <assert.h> 的 assert 被编译掉，device 断言不会触发；要在发行配置留下检查必须用显式 if(!cond) __trap()。"
+        types: [syntax, counterfactual]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: device_assert_msg_sync
+        claim: "断言消息写到 stderr 需要阻塞式同步才能在 host 立刻看见；异步运行时往往只看到后续 API 的 device-side assert triggered，无行号。"
+        types: [debug, profiling]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: device_assert_cuda_api
+        claim: "设备侧调用 cudaGetLastError 只能看到本线程先前的 device-runtime 错误，看不见其他 block 的 assert；host 必须 cudaDeviceSynchronize 才能收获该 sticky 码。"
+        types: [compare, debug]
+        difficulty: [3]
+        kind: api
+      - id: device_assert_host_header
+        claim: "设备 assert 需要在该翻译单元包含 <assert.h> 且按 nvcc 设备路径编译；纯 host 的 assert 失败不会置 cudaErrorAssert。"
+        types: [syntax, compare]
+        difficulty: [2]
+        kind: api
+      - id: device_assert_one_thread
+        claim: "warp 内单线程 assert(false) 即令整 context sticky；其余通道线程继续跑几条指令也不能挽救，随后 API 一律失败。"
+        types: [debug, conceptual]
+        difficulty: [2, 3]
+        kind: failure
+      - id: device_assert_vs_printf
+        claim: "printf(\"err\") 只写 fifo，不把 context 打成 sticky；用 printf 代替 assert 在发行版能继续 launch，但不会自动失败后续 CUDA 调用。"
+        types: [compare, counterfactual]
+        difficulty: [2]
+        kind: mechanism
+      - id: device_assert_lineinfo
+        claim: "要用断言消息里的文件名行号，需 nvcc -lineinfo 或 Debug；缺 lineinfo 时 host 常只看到 generic device-side assert triggered。"
+        types: [debug, profiling]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: device_assert_graph_replay
+        claim: "CUDA Graph replay 中若节点内 assert 失败，同样 sticky；重放同一 exec 图不能清断言，必须销毁进程或至少丢弃被毁 context。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: failure
+  - id: fp_nondet
+    name: 浮点非确定性
+    leaves:
+      - id: fp_nondet_atomicadd
+        claim: "多线程对同一地址 atomicAdd(float*) 的求和顺序随调度变化，因 FP 加非结合，两次运行的 bit 模式可以不同。"
+        types: [conceptual, debug]
+        difficulty: [2, 3]
+        kind: numeric
+      - id: fp_nondet_block_reduce
+        claim: "跨 block 的树形归约若用原子把各 block 部分和注入全局累加器，grid 映射一变归约树就变，run-to-run 不保证 bitwise 相同。"
+        types: [conceptual, compare]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: fp_nondet_tf32
+        claim: "Ampere sm_80 起 cuBLAS 默认 TF32 把 FP32 输入截到 10-bit 尾数，与 CUBLAS_COMPUTE_32F 的 IEEE FP32 累加 bit 不一致，不能当确定性基线。"
+        types: [compare, optimization]
+        difficulty: [2, 3]
+        kind: feature
+      - id: fp_nondet_cccl_env
+        claim: "CUB 3.1 DeviceReduce 可通过 cuda::execution::determinism::gpu_to_gpu 强制跨 GPU bitwise 可复现，默认 run_to_run 只保证同一 GPU 重复运行一致。"
+        types: [syntax, compare]
+        difficulty: [3]
+        kind: api
+      - id: fp_nondet_atomicadd_double
+        claim: "atomicAdd(double*) 在 sm_60+ 硬件原子上同样非结合：同一地址多线程累加 run-to-run 可不 bitwise 相同，只是舍入误差通常小于 float 原子加。"
+        types: [compare, conceptual]
+        difficulty: [2, 3]
+        kind: numeric
+      - id: fp_nondet_warp_tree
+        claim: "固定 mask 的 __shfl_down_sync 二叉树归约在同一 warp 内 bitwise 确定；不确定性来自跨 warp/block 的会合顺序，而不是 shuffle 本身。"
+        types: [compare, conceptual]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: fp_nondet_cublas_atomics
+        claim: "cublasSetAtomicsMode(CUBLAS_ATOMICS_ALLOWED) 允许库用原子归约换性能，GEMM/归约结果可不 bitwise 重复；CUBLAS_ATOMICS_NOT_ALLOWED 才关闭该源。"
+        types: [syntax, optimization]
+        difficulty: [3]
+        kind: api
+      - id: fp_nondet_splitk
+        claim: "cuBLASLt split-K 把 K 切开多 CTA 再归约，归约树随算法/occupancy 变；同一 A、B 两次 heuristic 选中不同 split-K 则 C 的 bit 可不同。"
+        types: [optimization, conceptual]
+        difficulty: [3]
+        kind: numeric
+      - id: fp_nondet_grid_sync
+        claim: "cooperative grid.sync 不恢复浮点结合律：各 block 仍可按不同顺序把部分和写入全局缓冲，除非规定固定归约树。"
+        types: [conceptual, counterfactual]
+        difficulty: [3]
+        kind: mechanism
+  - id: graph_update
+    name: Graph 更新约束
+    leaves:
+      - id: graph_update_topology
+        claim: "cudaGraphExecUpdate 要求新图与实例化图拓扑同构，增删边或节点会得到 cudaErrorGraphExecUpdateFailure，必须重新 instantiate。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: failure
+      - id: graph_update_cdp_flag
+        claim: "原先不含设备 launch 的 kernel 节点不能更新成使用 CDP 的函数，反之亦然；cooperative 与非 cooperative 节点也不能互换。"
+        types: [syntax, compare]
+        difficulty: [3]
+        kind: api
+      - id: graph_update_memcpy_1d
+        claim: "可更新的 memcpy/memset 节点必须是 1D，且新缓冲与原缓冲属于同一 context；cudaMemcpy2D 捕获的节点调用 ExecMemcpyNodeSetParams 返回 cudaErrorInvalidValue。"
+        types: [debug, syntax]
+        difficulty: [3]
+        kind: failure
+      - id: graph_update_kernel_ctx
+        claim: "kernel 节点的函数所属 CUDA context 不能改，只能换同一 context 内的新 CUfunction 以及参数/grid/block；跨 context 必须重建 exec graph。"
+        types: [conceptual, compare]
+        difficulty: [3]
+        kind: mechanism
+      - id: graph_update_failure_unmodified
+        claim: "cudaGraphExecUpdate 失败时已实例化图保持更新前拓扑与参数，返回 cudaErrorGraphExecUpdateFailure=910，不能把半更新图拿去 launch 当新图。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: failure
+      - id: graph_update_grid_block
+        claim: "同构更新允许改 kernel 的 gridDim/blockDim/dynSmem 与参数缓冲，但新 block 必须仍满足该函数编译时 launch bounds 与 smem opt-in 上限。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: graph_update_node_type
+        claim: "不能把 kernel 节点更新成 memset 节点或相反：节点类型是拓扑的一部分，类型变化 → 必须 cudaGraphExecDestroy 后重新 instantiate。"
+        types: [compare, debug]
+        difficulty: [2, 3]
+        kind: failure
+      - id: graph_update_setparams_vs_update
+        claim: "cudaGraphExecKernelNodeSetParams 只改单个已实例化节点参数，不检查整图同构；cudaGraphExecUpdate 用整份新图替换，拓扑不一致才失败。"
+        types: [compare, syntax]
+        difficulty: [3]
+        kind: api
+      - id: graph_update_capture_id
+        claim: "对同一 stream 再次 BeginCapture 得到的新图若多了一个无关 cudaEventRecord，拓扑已变，ExecUpdate 失败，即使 kernel 集合看起来相同。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: failure
+  - id: async_error
+    name: 异步错误传播
+    leaves:
+      - id: async_error_stream_capture
+        claim: "stream capture 期间禁止 cudaMalloc（非 async）、host-device 同步和跨流未声明依赖，违例使 capture 失败并留下不可 launch 的图。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: failure
+      - id: async_error_launch_oob
+        claim: "grid/block 超设备上限或动态 smem 超过 opt-in 上限时，<<<>>> 在 host 侧立即失败，错误是同步的，不进入 sticky device fault。"
+        types: [compare, debug]
+        difficulty: [2]
+        kind: mechanism
+      - id: async_error_user_object
+        claim: "cudaUserObject 引用计数在图销毁时才释放，提前 cudaFree 图节点仍持有的缓冲会在后续 replay 上变成 sticky illegal address。"
+        types: [debug, counterfactual]
+        difficulty: [3, 4]
+        kind: failure
+      - id: async_error_compute_sanitizer
+        claim: "compute-sanitizer memcheck 能抓住越界与未初始化，但对合法但顺序不确定的 atomicAdd(float) 不会报错，因为它不是地址错误。"
+        types: [profiling, compare]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: async_error_stream_ordered_malloc
+        claim: "capture 中必须用 cudaMallocAsync 到正在 capture 的流（或已声明依赖的池），同步 cudaMalloc 会使 cudaStreamEndCapture 失败。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: async_error_query_notready
+        claim: "cudaStreamQuery 在流未完成时返回 cudaErrorNotReady=600，这不是 sticky，也不应被当成 launch 失败；随后 Query/Sync 仍可变为 cudaSuccess。"
+        types: [syntax, compare]
+        difficulty: [2]
+        kind: api
+      - id: async_error_callback_forbidden
+        claim: "cudaStreamAddCallback 在 capture 中非法；要把 host 逻辑放进图必须用 cudaGraphAddHostNode，否则 EndCapture 失败。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: failure
+      - id: async_error_legacy_sync
+        claim: "capture 期间对该流或 legacy 默认流的隐式同步（如同步 cudaMemcpy 到默认流）会打断 capture，得到 invalid/not permitted 类错误。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: failure
+      - id: async_error_memcheck_vs_racecheck
+        claim: "memcheck 抓非法地址，racecheck 抓共享内存数据竞争；racecheck 报的 hazard 默认不把 context 打成 sticky illegal address。"
+        types: [profiling, compare]
+        difficulty: [3]
+        kind: mechanism
+  - id: last_error_thread
+    name: GetLastError 与 Peek
+    leaves:
+      - id: last_error_thread_local
+        claim: "cudaGetLastError/cudaPeekAtLastError 是调用 host 线程局部状态，线程 A 的 launch 错误不会出现在线程 B 的 GetLastError 里。"
+        types: [conceptual, debug]
+        difficulty: [2]
+        kind: api
+      - id: last_error_thread_peek_twice
+        claim: "连续两次 cudaPeekAtLastError 返回同一错误码；随后一次 cudaGetLastError 仍返回该码并清成 cudaSuccess。"
+        types: [syntax, compare]
+        difficulty: [1, 2]
+        kind: api
+      - id: last_error_thread_launch_success
+        claim: "<<<>>> 配置合法时 host 立即 GetLastError 得到 cudaSuccess，即使 kernel 稍后会非法寻址；异步 sticky 必须再 DeviceSynchronize/StreamSynchronize 才出现。"
+        types: [debug, conceptual]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: last_error_thread_name_string
+        claim: "cudaGetErrorName(cudaErrorIllegalAddress) 得到枚举名，cudaGetErrorString 得到说明字符串；二者都不清除 last error。"
+        types: [syntax, compare]
+        difficulty: [1, 2]
+        kind: api
+      - id: last_error_thread_driver_mix
+        claim: "同一线程混用 cuLaunchKernel 与 cudaLaunchKernel 时，runtime last-error 看不到纯 driver 的非 sticky 失败，必须查 CUresult。"
+        types: [compare, debug]
+        difficulty: [3]
+        kind: api
+      - id: last_error_thread_device_runtime
+        claim: "设备线程的 cudaGetLastError 只覆盖该设备线程的 device-runtime 发射错误，不会把其他 warp 的 sticky 断言码读到本线程。"
+        types: [compare, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: last_error_thread_clear_success
+        claim: "在已知成功的 cudaMalloc 之后调用 GetLastError 会清掉更早未读的非 sticky 码，导致错误被吞；检查点必须紧挨可能失败的调用。"
+        types: [debug, counterfactual]
+        difficulty: [2]
+        kind: failure
+      - id: last_error_thread_peek_sticky
+        claim: "sticky 时 Peek 与 GetLastError 都返回同一 sticky 码；GetLastError 可能把线程局部槽写成 Success，但下一次同步 API 仍返回 sticky。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: failure
+  - id: illegal_address
+    name: cudaErrorIllegalAddress
+    leaves:
+      - id: illegal_address_code_700
+        claim: "cudaErrorIllegalAddress=700 表示设备执行了无效地址的 load/store，属异步 sticky，进程必须退出后才能再安全使用该 GPU context。"
+        types: [debug, conceptual]
+        difficulty: [2]
+        kind: failure
+      - id: illegal_address_oob
+        claim: "kernel 对 cudaMalloc(N) 缓冲写 index=N 即越界，通常上报 700 而不是同步的 cudaErrorInvalidValue。"
+        types: [debug, counterfactual]
+        difficulty: [2]
+        kind: failure
+      - id: illegal_address_misaligned_v4
+        claim: "float4 向量加载要求 16B 对齐，基址 8B 对齐的 reinterpret_cast<float4*> 可在设备上变成 misaligned/illegal address sticky。"
+        types: [layout, debug]
+        difficulty: [2, 3]
+        kind: failure
+      - id: illegal_address_use_after_free
+        claim: "host cudaFree 后仍有飞行 kernel 解引用该指针 → 700；必须先 stream/device 同步再释放，或改用图的 user object 寿命。"
+        types: [debug, conceptual]
+        difficulty: [2, 3]
+        kind: failure
+      - id: illegal_address_null
+        claim: "设备解引用 nullptr（含失败的 cudaMalloc 未检查）是 illegal address，不是 cudaErrorMemoryAllocation；后者只在分配 API 同步返回。"
+        types: [compare, debug]
+        difficulty: [2]
+        kind: failure
+      - id: illegal_address_host_ptr
+        claim: "kernel 解引用未注册的 host malloc 指针在独立地址空间上是 700；cudaMallocHost/mapped 才可能合法。"
+        types: [debug, conceptual]
+        difficulty: [2, 3]
+        kind: failure
+      - id: illegal_address_stack_overflow
+        claim: "设备线程栈溢出常表现为 illegal address 或 illegal instruction sticky，而不是同步的 launch 配置错误。"
+        types: [debug, profiling]
+        difficulty: [3]
+        kind: failure
+      - id: illegal_address_blocking_pinpoint
+        claim: "CUDA_LAUNCH_BLOCKING=1 下 700 会在真正 fault 的 kernel launch 同步返回，便于二分；默认异步时同步点可能是之后的无关 memcpy。"
+        types: [profiling, debug]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: illegal_address_memcheck
+        claim: "compute-sanitizer --tool memcheck 能在非法访问处打印线程、PC 与分配信息；它报告的是地址错误，不能用来证明浮点不确定。"
+        types: [profiling, compare]
+        difficulty: [2, 3]
+        kind: mechanism
+  - id: trap_instr
+    name: trap 与非法指令
+    leaves:
+      - id: trap_instr_intrinsic
+        claim: "__trap() 在设备上发出 trap 指令，把 context 打成 sticky（常见 cudaErrorIllegalInstruction 或等价执行失败），不能当作可恢复的 C++ 异常。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: failure
+      - id: trap_instr_asm
+        claim: "asm volatile(\"trap;\") 与 __trap() 同属不可恢复设备 trap；NDEBUG 不会删除手写 trap，只会删除 assert 宏。"
+        types: [syntax, compare]
+        difficulty: [2]
+        kind: api
+      - id: trap_instr_illegal_opcode
+        claim: "在 sm_80 cubin 里执行只属于 sm_90a 的 wgmma 操作码 → cudaErrorIllegalInstruction=715 sticky，与越界 700 不同码。"
+        types: [debug, compare]
+        difficulty: [3]
+        kind: feature
+      - id: trap_instr_assert_path
+        claim: "设备 assert 失败路径最终 trap；发行版定义 NDEBUG 后 assert 消失，但显式 __trap() 仍在，二者不可互换当日志。"
+        types: [compare, counterfactual]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: trap_instr_brkpt
+        claim: "__brkpt() 是断点，给 debugger 停住用；无 debugger 附着时行为是 trap/挂起类故障，不是 cudaSuccess 的日志点。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: api
+      - id: trap_instr_surface_mode
+        claim: "cudaBoundaryModeTrap 的 surf 越界写会 trap 并使 kernel 失败；BoundaryModeZero 越界写忽略，不会置 700/715。"
+        types: [compare, debug]
+        difficulty: [2, 3]
+        kind: failure
+      - id: trap_instr_nan_not_trap
+        claim: "IEEE 浮点产生 NaN/Inf 默认不 trap；要检查必须 isnan 或 fenv，不能指望 GPU 对除零自动 sticky。"
+        types: [conceptual, counterfactual]
+        difficulty: [2]
+        kind: numeric
+      - id: trap_instr_launch_failure
+        claim: "部分驱动把 trap 上报为 cudaErrorLaunchFailure=719（仍 sticky）；无论 715 还是 719，cudaGetLastError 都不能恢复 context。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: failure
+  - id: graph_rebuild
+    name: Graph 更新 vs 重建
+    leaves:
+      - id: graph_rebuild_instantiate_cost
+        claim: "拓扑变化必须 cudaGraphExecDestroy + cudaGraphInstantiate；Update 失败后继续 launch 旧 exec 跑的是旧拓扑，不会自动采用新 capture。"
+        types: [conceptual, debug]
+        difficulty: [3]
+        kind: mechanism
+      - id: graph_rebuild_when_update_ok
+        claim: "仅当节点集合、边集合与节点类型完全同构时 ExecUpdate 成功；只改 kernel 参数/1D memcpy 指针应走 Update 而不是每次重建。"
+        types: [compare, optimization]
+        difficulty: [3]
+        kind: api
+      - id: graph_rebuild_coop_flag
+        claim: "把普通 kernel 节点换成 cudaLaunchCooperativeKernel 捕获的节点属于标志变化，Update 失败，必须重建 exec。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: failure
+      - id: graph_rebuild_device_launch_flag
+        claim: "CUDA 12 实例化时的 DeviceLaunch 标志不能通过 Update 补上；要对已有 exec 做设备发射必须带着该标志重新 instantiate。"
+        types: [syntax, compare]
+        difficulty: [3, 4]
+        kind: feature
+      - id: graph_rebuild_cond_node
+        claim: "CUDA 12 条件/循环节点改变子图结构属于拓扑变化，ExecUpdate 返回 GraphExecUpdateFailure，只能重建。"
+        types: [debug, conceptual]
+        difficulty: [3, 4]
+        kind: failure
+      - id: graph_rebuild_upload
+        claim: "cudaGraphUpload 只把已实例化图预传到设备，不代替 instantiate，也不能在 Update 失败后修复拓扑。"
+        types: [compare, syntax]
+        difficulty: [2, 3]
+        kind: api
+      - id: graph_rebuild_setparams_oob
+        claim: "ExecKernelNodeSetParams 把 dynSmem 设到超过该函数 opt-in 上限时，该次 launch/replay 同步失败，但一般不改图拓扑，也不是 sticky 700。"
+        types: [debug, compare]
+        difficulty: [3]
+        kind: failure
+      - id: graph_rebuild_capture_same_stream
+        claim: "同一 cudaGraph_t 不能边 replay 边在另一线程改节点；要换拓扑应 capture 到新 graph、instantiate 新 exec，再切换发射句柄。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: mechanism
+  - id: fp_env
+    name: 编译器浮点环境
+    leaves:
+      - id: fp_env_fmad_default
+        claim: "nvcc 默认 --fmad=true，把 a*b+c 收缩成 FMA，结果 bit 可不同于先 mul 再 add；要 IEEE 分步必须 --fmad=false 或 __fmul_rn+__fadd_rn。"
+        types: [syntax, compare]
+        difficulty: [2, 3]
+        kind: numeric
+      - id: fp_env_ftz
+        claim: "设备端 float 计算默认 flush-to-zero：小于最小正规数的中间结果变 0，与 host IEEE 保留 denormal 的 bit 不一致。"
+        types: [conceptual, compare]
+        difficulty: [2, 3]
+        kind: numeric
+      - id: fp_env_add_rn
+        claim: "__fadd_rn(x,y) 强制 round-to-nearest 且不与相邻乘融合；表达式 x+y 仍可被收缩成 FMA 的一部分。"
+        types: [syntax, counterfactual]
+        difficulty: [2, 3]
+        kind: api
+      - id: fp_env_prec_div
+        claim: "-prec-div=false 允许近似倒数做除法，float 除法 bit 偏离 IEEE；默认精确除法才可与 host 逐步对比。"
+        types: [syntax, optimization]
+        difficulty: [2, 3]
+        kind: numeric
+      - id: fp_env_fast_math
+        claim: "--use_fast_math 隐含 flush、近似 sqrt/div/sinf，同一输入两次编译（开/关）的 kernel 输出不必 bitwise 相同。"
+        types: [optimization, compare]
+        difficulty: [2]
+        kind: mechanism
+      - id: fp_env_assoc_reassoc
+        claim: "编译器不得把 (a+b)+c 重写成 a+(b+c) 除非 relax；但 FMA 收缩仍可改变舍入，确定性测试应固定 --fmad 与同一 nvcc 版本。"
+        types: [conceptual, debug]
+        difficulty: [3]
+        kind: numeric
+      - id: fp_env_tf32_cvt
+        claim: "sm_80+ 上显式 cvt.rna.tf32.f32 把 float 截到 10-bit 尾数再进 MMA；未截断的 IEEE FP32 累加不能当 TF32 GEMM 的 bit 金标准。"
+        types: [compare, conceptual]
+        difficulty: [3]
+        kind: feature
+      - id: fp_env_host_device_long_double
+        claim: "device 不支持 80-bit long double 运算，long double 在 nvcc 设备侧按 double；与 host x87 long double 比 bit 必然失败。"
+        types: [compare, syntax]
+        difficulty: [2]
+        kind: numeric
+  - id: lib_math_det
+    name: 库数学确定性开关
+    leaves:
+      - id: lib_math_det_tf32_mathmode
+        claim: "cublasSetMathMode(CUBLAS_TF32_TENSOR_OP_MATH) 在 sm_80+ 允许 TF32 Tensor Core；要 IEEE FP32 累加需 CUBLAS_PEDANTIC 或 CUBLAS_COMPUTE_32F_PEDANTIC。"
+        types: [syntax, compare]
+        difficulty: [2, 3]
+        kind: api
+      - id: lib_math_det_disallow_reduced
+        claim: "CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION 禁止内部降精度归约，关闭后同一 GEMM 更可能 bitwise 重复，但可能更慢。"
+        types: [optimization, syntax]
+        difficulty: [3]
+        kind: api
+      - id: lib_math_det_compute32f_pedantic
+        claim: "cuBLASLt CUBLAS_COMPUTE_32F_PEDANTIC 要求内部累加严格 FP32 且限制允许的算法集；CUBLAS_COMPUTE_32F 仍可能用 TF32/混合路径。"
+        types: [compare, conceptual]
+        difficulty: [3]
+        kind: numeric
+      - id: lib_math_det_workspace_config
+        claim: "环境变量 CUBLAS_WORKSPACE_CONFIG 改变 per-stream workspace 切片，可能换算法从而改 bit；确定性回归必须固定该变量。"
+        types: [profiling, counterfactual]
+        difficulty: [3]
+        kind: mechanism
+      - id: lib_math_det_cusparse_alg
+        claim: "cusparseSpMM 仅 COO_ALG2、CSR_ALG3、BSR_ALG1 保证 bitwise 确定；ALG_DEFAULT 可能落到非确定算法。"
+        types: [syntax, compare]
+        difficulty: [3]
+        kind: numeric
+      - id: lib_math_det_cufft_repro
+        claim: "同一 cufftHandle、同一输入、同一 GPU 上 cuFFT 通常 bitwise 重复；换 plan 实现（callback/不同 workspace）或换 SM 架构不保证 bit 相同。"
+        types: [compare, conceptual]
+        difficulty: [3]
+        kind: numeric
+      - id: lib_math_det_heuristic
+        claim: "cublasLtMatmulAlgoGetHeuristic 的首选算法随 occupancy 与 workspace 上限变；要 bit 稳定必须保存并强制同一 cublasLtMatmulAlgo_t。"
+        types: [debug, optimization]
+        difficulty: [3]
+        kind: mechanism
+      - id: lib_math_det_deterministic_api
+        claim: "部分 CUDA 12+ 库提供 determinism 提示（如 CUB gpu_to_gpu）；未设置时默认不是跨设备 bitwise 金标准。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: api
+  - id: error_taxonomy
+    name: 错误码分类
+    leaves:
+      - id: error_taxonomy_invalid_value
+        claim: "cudaErrorInvalidValue=1 是同步非 sticky：如空指针传入 cudaMemcpy 或非法 enum，改正参数后同一 context 可继续。"
+        types: [compare, debug]
+        difficulty: [1, 2]
+        kind: failure
+      - id: error_taxonomy_oom
+        claim: "cudaErrorMemoryAllocation=2 是同步非 sticky：cudaMalloc 失败不毁 context，随后较小的 malloc 可以成功。"
+        types: [compare, conceptual]
+        difficulty: [1, 2]
+        kind: failure
+      - id: error_taxonomy_misaligned_716
+        claim: "cudaErrorMisalignedAddress=716 是设备遇到对齐陷阱的 sticky 码，与 700 illegal address 分列；二者都不能 GetLastError 恢复。"
+        types: [debug, compare]
+        difficulty: [3]
+        kind: failure
+      - id: error_taxonomy_assert_710
+        claim: "cudaErrorAssert 在设备断言失败后置位，属 sticky；它与 700 不同，compute-sanitizer 会标成 assert 而非 invalid load。"
+        types: [debug, compare]
+        difficulty: [2, 3]
+        kind: failure
+      - id: error_taxonomy_graph_910
+        claim: "cudaErrorGraphExecUpdateFailure=910 是同步的更新失败，不毁 context；exec 图保持旧版，随后仍可 launch 旧图。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: failure
+      - id: error_taxonomy_launch_timeout
+        claim: "WDDM 上 kernel 超过 TDR 时限可报 cudaErrorLaunchTimeout/LaunchFailure 并可能重置设备；Linux TCC/compute 模式默认无此 watchdog。"
+        types: [profiling, compare]
+        difficulty: [3]
+        kind: failure
+      - id: error_taxonomy_illegal_state
+        claim: "cudaErrorIllegalState=401 表示资源当前状态不允许该操作（如对非 capture 流 EndCapture），通常非 sticky，但该流/图句柄可能已作废。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: api
+      - id: error_taxonomy_capture_unsupported
+        claim: "capture 中调用不支持的 API（同步 malloc、设备同步）返回 capture 相关错误并使这次 capture 失败，一般不把整个 context 打成 700。"
+        types: [compare, debug]
+        difficulty: [2, 3]
+        kind: failure

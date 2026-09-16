@@ -1,39 +1,112 @@
-# 每个 question_type 的问法。Planner 抽一条写入 brief.angle，Writer 必须按该 angle 出题。
+# Planner 抽一条写入 brief.angle。条目可以是字符串或卡片。
 angles:
   debug:
-    - 发散死锁：同步或分支只被部分线程走到，问会怎样、为什么
-    - 未定义行为：错误 mask / 错误 launch / 错误 scope，问是否 UB
-    - 静默错误：结果看起来能跑但数值或访存已错，问根因
-    - 竞态：async copy 未 wait、缺 barrier，问数据何时可见
+    - id: divergent_deadlock
+      ask: 发散死锁：同步或分支只被部分线程走到，问会怎样、为什么
+      must_have: [代码或伪代码里的部分线程路径, 可观察后果（死锁/静默错/UB）]
+      must_not: [笼统的 "这段代码有什么问题"]
+      kinds: [failure, mechanism]
+    - id: ub_mask
+      ask: 未定义行为：错误 mask / 错误 launch / 错误 scope，问是否 UB
+      must_have: [具体 API 或 mask/scope]
+      kinds: [failure, api]
+    - id: silent_wrong
+      ask: 静默错误：结果看起来能跑但数值或访存已错，问根因
+      kinds: [failure]
+    - id: race_async
+      ask: 竞态：async copy 未 wait、缺 barrier，问数据何时可见
+      kinds: [failure, mechanism]
   syntax:
-    - 哪条能编译：给 2～3 个片段，指出合法/非法
-    - 缺限定符：少写 __device__/__global__/__restrict__ 的后果
-    - launch 参数：<<<>>> 或 cluster 维度某个参数的精确含义
+    - id: which_compiles
+      ask: 哪条能编译：给 2～3 个片段，指出合法/非法
+      artifacts: [code]
+      kinds: [api]
+    - id: missing_qualifier
+      ask: 缺限定符：少写 __device__/__global__/__restrict__ 的后果
+      kinds: [api, failure]
+    - id: launch_param
+      ask: launch 参数：<<<>>> 或 cluster 维度某个参数的精确含义
+      kinds: [api, feature]
   code_complete:
-    - 补一行同步：barrier / mbarrier / __syncwarp
-    - 补 TMA wait：commit_group 与 wait_group 配对
-    - 补 partition：TiledCopy/TiledMMA 缺的那一次 partition
+    - id: fill_sync
+      ask: 补一行同步：barrier / mbarrier / __syncwarp
+      artifacts: [code]
+      kinds: [failure, api]
+    - id: fill_tma_wait
+      ask: 补 TMA wait：commit_group 与 wait_group 配对
+      kinds: [feature, failure]
+    - id: fill_partition
+      ask: 补 partition：TiledCopy/TiledMMA 缺的那一次 partition
+      kinds: [mechanism, api]
   layout:
-    - 求 composition 后的 Shape/Stride
-    - 画出或说明 shared memory bank 映射
-    - 判断给定 stride 是否满足 TMA/向量化对齐
+    - id: composition_shape
+      ask: 求 composition 后的 Shape/Stride
+      kinds: [formula, mechanism]
+      must_have: [具体 Shape 与 Stride]
+    - id: bank_map
+      ask: 画出或说明 shared memory bank 映射
+      kinds: [formula, mechanism]
+    - id: tma_align
+      ask: 判断给定 stride 是否满足 TMA/向量化对齐
+      kinds: [feature, formula]
   optimization:
-    - 选 ILP 还是 TLP：给出占用与延迟，问该加独立访存还是加 warp
-    - 算合并事务次数：给 warp 访问模式，问 32B/128B 事务数
-    - 融合副作用：kernel fusion 对寄存器/occupancy 的影响
+    - id: ilp_vs_tlp
+      ask: 选 ILP 还是 TLP：给出占用与延迟，问该加独立访存还是加 warp
+      kinds: [numeric, mechanism]
+    - id: txn_count
+      ask: 算合并事务次数：给 warp 访问模式，问 32B/128B 事务数
+      kinds: [formula, numeric]
+    - id: fusion_side
+      ask: 融合副作用：kernel fusion 对寄存器/occupancy 的影响
+      kinds: [numeric, mechanism]
   profiling:
-    - 哪个 stall reason 会上升，代码该怎么改
-    - 哪条 SOL 管道（l1tex/dram/tensor）是瓶颈
-    - occupancy 升高是否一定更快，用指标说明
+    - id: stall_reason
+      ask: 哪个 stall reason 会上升，代码该怎么改
+      kinds: [mechanism, failure]
+    - id: sol_pipe
+      ask: 哪条 SOL 管道（l1tex/dram/tensor）是瓶颈
+      kinds: [mechanism]
+    - id: occ_faster
+      ask: occupancy 升高是否一定更快，用指标说明
+      kinds: [formula, numeric]
+    - id: counter_backsolve
+      ask: 公式回推：由计数器读数反推事务数、AI 或占用
+      kinds: [formula, numeric]
   compare:
-    - 两个 API 的语义差（如 syncthreads vs syncwarp）
-    - 两代硬件同一算法的编程模型差
-    - WMMA / mma.sync / WGMMA / UMMA 谁适用
+    - id: api_semantics
+      ask: 两个 API 的语义差（如 syncthreads vs syncwarp）
+      kinds: [api, mechanism]
+    - id: arch_model
+      ask: 两代硬件同一算法的编程模型差
+      kinds: [feature, mechanism]
+    - id: mma_family
+      ask: WMMA / mma.sync / WGMMA / UMMA 谁适用
+      kinds: [feature, api]
   counterfactual:
-    - 只改 stride，问 coalescing 或 TMA 是否仍合法
-    - 只改 dtype，问 Tensor Core 形状与累加精度
-    - 去掉 cooperative launch，问 grid sync 是否仍合法
+    - id: change_stride
+      ask: 只改 stride，问 coalescing 或 TMA 是否仍合法
+      kinds: [formula, feature]
+    - id: change_dtype
+      ask: 只改 dtype，问 Tensor Core 形状与累加精度
+      kinds: [feature, numeric]
+    - id: drop_coop
+      ask: 去掉 cooperative launch，问 grid sync 是否仍合法
+      kinds: [api, failure]
   conceptual:
-    - 机制因果：A 导致 B 的硬件/执行模型理由（禁止名词解释）
-    - 约束从哪来：为什么必须 128B / 32-bank / warp-group
-    - 可见性：内存在哪一层、谁能看到这次写
+    - id: causal_hw
+      ask: 机制因果：A 导致 B 的硬件/执行模型理由（禁止名词解释）
+      kinds: [mechanism]
+    - id: constraint_origin
+      ask: 约束从哪来：为什么必须 128B / 32-bank / warp-group
+      kinds: [mechanism, feature]
+    - id: visibility
+      ask: 可见性：内存在哪一层、谁能看到这次写
+      kinds: [mechanism, failure]
+    - id: formula_plug
+      ask: 公式代入：给出参数，求出占用/事务数/offset/bank/字节
+      kinds: [formula, numeric]
+      must_have: [可代入数字或符号, 唯一数值或符号答案]
+    - id: feature_bound
+      ask: 特性边界：某代硬件该功能的合法范围与硬约束（禁止宣传腔）
+      kinds: [feature]
+      must_have: [架构或 CUDA 版本门槛, 一条可证伪约束]

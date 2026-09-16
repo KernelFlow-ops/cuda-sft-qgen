@@ -17,7 +17,17 @@ GRANULARITY = ["api", "kernel", "pipeline", "system"]
 HARDWARE = ["agnostic", "ampere", "hopper", "blackwell"]
 
 
-def load_angles(path: Path | None = None) -> dict[str, list[str]]:
+def _as_angle_card(item: Any) -> dict[str, Any]:
+    if isinstance(item, dict):
+        ask = str(item.get("ask") or item.get("angle") or "")
+        card = dict(item)
+        card["ask"] = ask
+        card["id"] = str(item.get("id") or "")
+        return card
+    return {"id": "", "ask": str(item), "kinds": []}
+
+
+def load_angles(path: Path | None = None) -> dict[str, list[dict[str, Any]]]:
     if path is None:
         from cuda_sft_qgen.config import find_project_root
 
@@ -26,13 +36,14 @@ def load_angles(path: Path | None = None) -> dict[str, list[str]]:
         return {}
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     table = raw.get("angles") or {}
-    return {str(k): [str(x) for x in (v or [])] for k, v in table.items()}
+    return {str(k): [_as_angle_card(x) for x in (v or [])] for k, v in table.items()}
 
 
 def _instance_hint(leaf: Leaf, rng: random.Random) -> str:
     if leaf.hints:
         return rng.choice(list(leaf.hints))
-    parts = re.split(r"[、，,/]| vs |\s+and\s+", leaf.claim)
+    # Do not split on `/` — it appears in fractions (3/5) and API paths.
+    parts = re.split(r"[、，,]| vs |\s+and\s+", leaf.claim)
     parts = [p.strip(" .") for p in parts if len(p.strip()) >= 6]
     return rng.choice(parts) if parts else leaf.claim[:80]
 
@@ -50,13 +61,22 @@ def _stems_for_leaf(accepted: Sequence[Question], l3_id: str, k: int = 3) -> lis
 def _pick_angle(
     rng: random.Random,
     qtype: str,
-    table: dict[str, list[str]],
+    table: dict[str, list[dict[str, Any]]],
     *,
     avoid: str | None = None,
-) -> str:
-    options = list(table.get(qtype) or ["机制因果：给出可证伪的判断"])
+    kind: str | None = None,
+) -> dict[str, Any]:
+    fallback = {"id": "", "ask": "机制因果：给出可证伪的判断", "kinds": []}
+    options = list(table.get(qtype) or [fallback])
+    if kind:
+        matched = [c for c in options if kind in (c.get("kinds") or [])]
+        if matched:
+            options = matched
+        else:
+            # Do not attach an unrelated ask (e.g. missing __device__ on a formula leaf).
+            options = [fallback]
     if avoid:
-        alt = [x for x in options if x != avoid]
+        alt = [c for c in options if c.get("ask") != avoid]
         if alt:
             options = alt
     return rng.choice(options)
@@ -102,10 +122,14 @@ def plan_briefs(
     evolver_fraction: float,
     seed_pool: Sequence[Question],
     rng: random.Random | None = None,
-    angles: dict[str, list[str]] | None = None,
+    angles: dict[str, list[Any]] | None = None,
+    anti_cap: int = 15,
 ) -> list[QuestionBrief]:
     rng = rng or random.Random()
-    angle_table = angles if angles is not None else load_angles()
+    raw_angles = angles if angles is not None else load_angles()
+    angle_table: dict[str, list[dict[str, Any]]] = {
+        k: [_as_angle_card(x) for x in (v or [])] for k, v in raw_angles.items()
+    }
     pool = list(accepted) + list(pending)
     l1_counts = _count_axis(pool, "l1")
     type_counts = _count_axis(pool, "question_type")
@@ -193,8 +217,10 @@ def plan_briefs(
         n_evolver = min(int(round(n * evolver_fraction)), n, len(seed_pool))
 
     briefs: list[QuestionBrief] = []
-    anti = list(steering.forbidden_templates[:8])
-    avoid = steering.style_notes or "do not write definition-only questions"
+    anti = list(steering.forbidden_templates[: max(1, int(anti_cap))])
+    # style_notes already go into the steering prompt block; stuffing them
+    # into MUST_AVOID inverts the chair's request.
+    avoid = "do not write definition-only questions"
     used_l3: set[str] = set()
     used_pair: set[tuple[str, str]] = set()
     all_leaves = [lf for v in leaves_by_l1.values() for lf in v]
@@ -239,12 +265,32 @@ def plan_briefs(
             seed_q = seed.question
             seed_id = seed.id
         hint = _instance_hint(leaf, rng)
-        angle = _pick_angle(rng, qtype, angle_table)
+        card = _pick_angle(rng, qtype, angle_table, kind=leaf.kind or None)
+        angle = str(card.get("ask") or "")
         if (leaf.l3_id, angle) in used_pair:
-            angle = _pick_angle(rng, qtype, angle_table, avoid=angle)
+            card = _pick_angle(
+                rng, qtype, angle_table, avoid=angle, kind=leaf.kind or None
+            )
+            angle = str(card.get("ask") or angle)
         used_l3.add(leaf.l3_id)
         used_pair.add((leaf.l3_id, angle))
-        guide = "\n".join(f"- {a}" for a in (angle_table.get(qtype) or [angle]))
+        guide_parts: list[str] = []
+        if card.get("must_have"):
+            guide_parts.append(
+                "Must have:\n" + "\n".join(f"- {x}" for x in card["must_have"])
+            )
+        if card.get("must_not"):
+            guide_parts.append(
+                "Must not:\n" + "\n".join(f"- {x}" for x in card["must_not"])
+            )
+        others = [
+            c for c in (angle_table.get(qtype) or []) if c.get("ask") != angle
+        ]
+        if others:
+            guide_parts.append(
+                "Other angles (contrast only, do not mix in):\n"
+                + "\n".join(f"- {c.get('ask')}" for c in others)
+            )
         briefs.append(
             QuestionBrief(
                 topic_path=list(leaf.path),
@@ -263,7 +309,9 @@ def plan_briefs(
                 angle=angle,
                 instance_hint=hint,
                 must_avoid_stems=_stems_for_leaf(accepted, leaf.l3_id),
-                angle_guide=guide,
+                angle_guide="\n".join(guide_parts),
+                angle_id=str(card.get("id") or ""),
+                kind=leaf.kind or "mechanism",
                 role=role,  # type: ignore[arg-type]
                 seed_question=seed_q,
                 seed_id=seed_id,

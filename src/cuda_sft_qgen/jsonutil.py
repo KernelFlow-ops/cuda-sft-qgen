@@ -9,6 +9,19 @@ _FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 _CODE_FENCE = re.compile(r"```[\w+-]*\n.*?```", re.DOTALL)
 _THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _KEYS = ("question", "tests_claim", "language")
+_LANG_TOKEN = re.compile(r"^[\"']?(en|zh|cn)(?:glish|inese)?", re.IGNORECASE)
+
+
+def normalize_language(value: Any, fallback: str = "zh") -> str:
+    """Map model output to zh/en; tolerate leaked extra JSON after the token."""
+    text = str(value or "").strip()
+    if text:
+        m = _LANG_TOKEN.match(text.strip("\"'"))
+        if m:
+            token = m.group(1).lower()
+            return "en" if token == "en" else "zh"
+    fb = str(fallback or "zh").strip().strip("\"'").lower()
+    return "en" if fb.startswith("en") else "zh"
 
 
 def strip_think(text: str) -> str:
@@ -167,6 +180,19 @@ def _read_jsonish_value(text: str, start: int, end: int | None) -> str:
     return _unescape_json_string(chunk)
 
 
+def _read_short_token(text: str, start: int) -> str | None:
+    m = re.match(r'\s*"([A-Za-z_-]{1,16})"', text[start:])
+    if m:
+        return m.group(1)
+    m = re.match(r"\s*'([A-Za-z_-]{1,16})'", text[start:])
+    if m:
+        return m.group(1)
+    m = re.match(r"\s*([A-Za-z_-]{1,16})", text[start:])
+    if m:
+        return m.group(1)
+    return None
+
+
 def _scan_fields(text: str) -> dict[str, Any] | None:
     """Pull schema fields without treating inner quotes as JSON string ends."""
     out: dict[str, Any] = {}
@@ -174,6 +200,11 @@ def _scan_fields(text: str) -> dict[str, Any] | None:
         start = _field_start(text, key)
         if start is None:
             continue
+        if key == "language":
+            token = _read_short_token(text, start)
+            if token:
+                out[key] = token
+                continue
         others = tuple(k for k in _KEYS if k != key)
         end = _next_key_index(text, start, others)
         if end is None:
@@ -268,10 +299,12 @@ def parse_question_payload(
     question = str(obj.get("question") or "").strip()
     if not question:
         return None
+    obj["question"] = question
     claim = str(obj.get("tests_claim") or "").strip()
     if not claim and fallback_claim and keep_truncated and len(question) >= min_question_chars:
         obj["tests_claim"] = fallback_claim
         obj.setdefault("warnings", [])
         if isinstance(obj["warnings"], list):
             obj["warnings"].append("json_truncated")
+    obj["language"] = normalize_language(obj.get("language"), fallback="zh")
     return obj

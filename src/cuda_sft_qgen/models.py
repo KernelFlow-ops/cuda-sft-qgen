@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 QuestionType = Literal[
@@ -52,6 +52,8 @@ class QuestionBrief(BaseModel):
     instance_hint: str = ""
     must_avoid_stems: list[str] = Field(default_factory=list)
     angle_guide: str = ""
+    angle_id: str = ""
+    kind: str = ""
     role: Literal["writer", "evolver"] = "writer"
     seed_question: str | None = None
     seed_id: str | None = None
@@ -63,6 +65,7 @@ class Question(BaseModel):
     tests_claim: str
     topic_path: list[str]
     l3_id: str = ""
+    l3_claim: str = ""
     question_type: str
     difficulty: int
     bloom: str
@@ -82,6 +85,17 @@ class Question(BaseModel):
     review_status: ReviewStatus = "pending"
     reject_reason: str | None = None
     warnings: list[str] = Field(default_factory=list)
+    kind: str = ""
+
+    @field_validator("language", mode="before")
+    @classmethod
+    def _coerce_language(cls, value: Any) -> str:
+        text = str(value or "").strip().strip("\"'").lower()
+        if text.startswith("en"):
+            return "en"
+        if text.startswith("zh") or text.startswith("cn"):
+            return "zh"
+        return "zh"
 
     def to_jsonl(self) -> dict[str, Any]:
         return self.model_dump()
@@ -95,7 +109,7 @@ class SteeringBrief(BaseModel):
     difficulty_nudge: Literal["up", "down", "hold"] = "hold"
     style_notes: str = ""
 
-    def to_prompt_block(self) -> str:
+    def to_prompt_block(self, *, anti_cap: int = 15) -> str:
         if not any(
             [
                 self.underrepresented,
@@ -107,10 +121,11 @@ class SteeringBrief(BaseModel):
             ]
         ):
             return "(empty — no steering yet)"
+        cap = max(1, int(anti_cap))
         lines = [
             f"underrepresented: {self.underrepresented}",
             f"overrepresented: {self.overrepresented}",
-            f"forbidden_templates: {self.forbidden_templates[:8]}",
+            f"forbidden_templates: {self.forbidden_templates[:cap]}",
             f"preferred_types: {self.preferred_types}",
             f"difficulty_nudge: {self.difficulty_nudge}",
             f"style_notes: {self.style_notes}",
@@ -136,6 +151,7 @@ class DiversityReport(BaseModel):
     hardware_hist: dict[str, int] = Field(default_factory=dict)
     granularity_hist: dict[str, int] = Field(default_factory=dict)
     leaf_coverage: float = 0.0
+    kind_hist: dict[str, int] = Field(default_factory=dict)
     kl_l1: float = 0.0
     kl_type: float = 0.0
     kl_difficulty: float = 0.0

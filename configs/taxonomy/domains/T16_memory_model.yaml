@@ -1,0 +1,623 @@
+id: T16
+name: CUDA 内存模型与一致性
+children:
+  - id: memory_scopes
+    name: 作用域与可见性
+    leaves:
+      - id: memory_scopes_block_not_device
+        claim: "cuda::thread_scope_block 的 atomic 只与同一 CTA 内线程建立同步关系，其他 CTA 即使读同一 global 地址也不构成 synchronizes-with。"
+        types: [conceptual, debug]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: memory_scopes_system_atomic
+        claim: "cuda::atomic<int, cuda::thread_scope_system> 的 store 才能与 host 或 peer GPU 上的 system-scope load 配对；thread_scope_device 对 CPU 无可见性保证。"
+        types: [syntax, compare]
+        difficulty: [2, 3]
+        kind: api
+      - id: memory_scopes_ptx_map
+        claim: "CUDA thread_scope → PTX 作用域映射为 block=.cta、device=.gpu、system=.sys。"
+        types: [conceptual, syntax]
+        difficulty: [2]
+        kind: formula
+      - id: memory_scopes_its_syncwarp
+        claim: "sm_70+ Independent Thread Scheduling 下，同一 warp 线程对 shared 的普通写读必须 __syncwarp(mask) 才保证可见，不能依赖 Volta 前的隐式 lockstep。"
+        types: [debug, conceptual]
+        difficulty: [2, 3]
+        kind: feature
+        hints: ["if (lane<16) smem[lane]=x; 无 __syncwarp 后 lane>=16 读", "mask 只含一半线程"]
+      - id: memory_scopes_thread_self
+        claim: "cuda::thread_scope_thread 的 atomic 只约束本线程后续访存，与任何其他线程的 synchronizes-with 边数 = 0。"
+        types: [conceptual, counterfactual]
+        difficulty: [2]
+        kind: formula
+      - id: memory_scopes_cluster_scope
+        claim: "sm_90 Hopper 的 cuda::thread_scope_cluster 映射 PTX .cluster，只与同一 thread-block cluster 内 CTA 同步；cluster 外 device-scope 读不构成配对。"
+        types: [syntax, conceptual]
+        difficulty: [3, 4]
+        kind: feature
+      - id: memory_scopes_mismatch
+        claim: "生产者 thread_scope_block release-store 与消费者 thread_scope_device acquire-load 作用域不匹配时，synchronizes-with 边数 = 0。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: formula
+      - id: memory_scopes_shared_only_block
+        claim: "对 __shared__ 对象只能用 thread_scope_block 或更窄；thread_scope_device atomic 操作 shared 是未定义，ptxas 可报错或生成非法空间访存。"
+        types: [debug, syntax]
+        difficulty: [3]
+        kind: failure
+        hints: ["cuda::atomic_ref<int, thread_scope_device> 绑 smem", "atomicAdd_system 打 shared"]
+      - id: memory_scopes_atomicadd_gpu
+        claim: "atomicAdd(global_ptr, x) 编译为 atom.relaxed.gpu.add，作用域 = device 而非 system，CPU 侧普通 load 看不到该 RMW。"
+        types: [syntax, compare]
+        difficulty: [2, 3]
+        kind: api
+      - id: memory_scopes_cta_vs_gpu_shared
+        claim: "block-scope atomic 对 global 地址只与同 CTA 同步；他 CTA 要用 device-scope 才能看到该 RMW，否则可无限读旧值。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: mechanism
+  - id: release_acquire
+    name: release/acquire 序
+    leaves:
+      - id: release_acquire_synchronizes_with
+        claim: "同一 cuda::atomic 对象上的 release-store 与读到该值的 acquire-load 构成 synchronizes-with，从而把 store 之前的 non-atomic 写传给 load 之后的读。"
+        types: [conceptual, debug]
+        difficulty: [3]
+        kind: mechanism
+      - id: release_acquire_relaxed_hb_zero
+        claim: "对同一 atomic 先 memory_order_relaxed store 再 acquire-load，happens-before 边数 = 0，不建立同步。"
+        types: [conceptual, counterfactual]
+        difficulty: [3]
+        kind: formula
+      - id: release_acquire_thread_fence
+        claim: "cuda::atomic_thread_fence(cuda::memory_order_acq_rel, cuda::thread_scope_device) 对应 PTX fence.acq_rel.gpu，本身不汇合 CTA 控制流。"
+        types: [syntax, compare]
+        difficulty: [3]
+        kind: api
+      - id: release_acquire_pointer_publish
+        claim: "用 relaxed atomic 发布指针、payload 用普通 store，是 CUDA 内存模型下的 data race，消费者可能读到未初始化 payload。"
+        types: [debug, counterfactual]
+        difficulty: [3, 4]
+        kind: failure
+        hints: ["producer: data=1; flag.store(1, relaxed)", "consumer: while(!flag.load(relaxed)); use data"]
+      - id: release_acquire_rmw_acq_rel
+        claim: "fetch_add(1, memory_order_acq_rel) 在 RMW 成功时既 acquire 又 release，可把本线程此前的写传给看到新值的下一线程。"
+        types: [conceptual, debug]
+        difficulty: [3]
+        kind: mechanism
+      - id: release_acquire_st_release_ptx
+        claim: "PTX st.release.gpu.b32 与 ld.acquire.gpu.b32 配对；把 release 写成 st.relaxed.gpu 则消费者 acquire-load 不建立 synchronizes-with。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: release_acquire_consume_dropped
+        claim: "CUDA C++ 把 memory_order_consume 提升为 acquire，不提供比 acquire 更弱的依赖序；按 consume 写代码仍按 acquire 编译。"
+        types: [conceptual, compare]
+        difficulty: [3, 4]
+        kind: mechanism
+      - id: release_acquire_different_obj
+        claim: "A 对 atomic x 做 release-store、B 对 atomic y 做 acquire-load，即使地址相邻，synchronizes-with 边数 = 0。"
+        types: [counterfactual, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: release_acquire_seq_cst_stronger
+        claim: "memory_order_seq_cst store 对同 scope 的 seq_cst/acquire load 仍构成 synchronizes-with，且额外加入该 scope 的 total order S。"
+        types: [conceptual, compare]
+        difficulty: [3, 4]
+        kind: mechanism
+      - id: release_acquire_plain_payload_before
+        claim: "payload 的普通 store 必须 sequenced-before 同一线程的 release-store；反过来先发 flag 再写 payload，消费者 acquire 后仍可读到旧 payload。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: failure
+        hints: ["flag.store(1, release); data=x;", "消费者 while(!flag.load(acquire)); use data"]
+  - id: volatile_atomic
+    name: volatile 与 atomic
+    leaves:
+      - id: volatile_atomic_no_hb
+        claim: "volatile 只禁止编译器省略或合并对该地址的 ld/st，不提供 RMW 原子性，也不建立 inter-thread happens-before。"
+        types: [conceptual, compare]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: volatile_atomic_ld_volatile_l1
+        claim: "PTX ld.volatile.global 在 sm_20+ 绕过 L1 从 L2 取值，语义仍不是 acquire，不能替代 atomic load。"
+        types: [conceptual, debug]
+        difficulty: [3]
+        kind: feature
+      - id: volatile_atomic_tearing_width
+        claim: "自然对齐的 4-byte 与 8-byte volatile 访问保证不撕裂；未对齐或非向量的 16-byte 访问可拆成多次事务。"
+        types: [debug, conceptual]
+        difficulty: [2, 3]
+        kind: numeric
+      - id: volatile_atomic_flag_spin
+        claim: "把 volatile int 当发布锁（A 写 flag=1，B while(!flag)）在 CUDA C++ 模型中是 data race，B 可无限自旋或看到撕裂值。"
+        types: [debug, counterfactual]
+        difficulty: [2, 3]
+        kind: failure
+      - id: volatile_atomic_no_rmw
+        claim: "volatile 读改写编译为分离的 ld+op+st，两线程同时 ++ 同一 volatile int 可丢失更新，最终值可以 = 初值+1 而非 +2。"
+        types: [debug, counterfactual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: volatile_atomic_relaxed_replace
+        claim: "设备上自旋旗标应换成 cuda::atomic<int>::load(relaxed)+store(relaxed) 或 atomicCAS；volatile 不能合法替换 relaxed atomic。"
+        types: [syntax, compare]
+        difficulty: [2, 3]
+        kind: api
+      - id: volatile_atomic_mmio_device
+        claim: "映射的设备 MMIO 仍须 volatile 或 atomic 才能阻止编译器合并访问；仅 volatile 不保证与 CPU 的 system-scope 可见性。"
+        types: [conceptual, debug]
+        difficulty: [3]
+        kind: mechanism
+      - id: volatile_atomic_alias_cast
+        claim: "先 atomic 写再通过 volatile* 别名读同一地址，在 CUDA 内存模型中是 data race，读值未定义而非“一定看到原子写”。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: failure
+        hints: ["atomic_ref store 后 *(volatile int*)p", "union {atomic<int>; int;}"]
+      - id: volatile_atomic_compiler_barrier
+        claim: "asm volatile(\"\" ::: \"memory\") 只挡编译器重排，不发 PTX fence，对其它线程 happens-before 边数 = 0。"
+        types: [conceptual, compare]
+        difficulty: [2, 3]
+        kind: formula
+      - id: volatile_atomic_st_wt
+        claim: "PTX st.wt.global 写穿并视为 volatile，仍不是 release；不能替代 st.release.gpu 做发布。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+  - id: fences_barriers
+    name: fence 与 barrier
+    leaves:
+      - id: fences_barriers_threadfence_vis
+        claim: "__threadfence() 把本线程此前对 global/shared 的写推到对设备上其他线程可见的点，但不汇合 CTA 控制流。"
+        types: [conceptual, debug]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: fences_barriers_three_threadfence
+        claim: "__threadfence_block() / __threadfence() / __threadfence_system() 分别发出 CTA、GPU、system 作用域的内存栅栏。"
+        types: [syntax, compare]
+        difficulty: [2]
+        kind: api
+      - id: fences_barriers_syncthreads_eq
+        claim: "__syncthreads() = CTA 控制流 barrier ∧ implicit block-scope memory fence；只 fence 不 barrier 时，未到达的线程可以尚未发出 store。"
+        types: [conceptual, debug]
+        difficulty: [2, 3]
+        kind: formula
+      - id: fences_barriers_proxy_async
+        claim: "sm_90 上 generic 空间写入要被 TMA/async-proxy 读，需要 fence.proxy.async.shared::cta（或 cuda::memcpy_async 完成路径），普通 __threadfence_block 不够。"
+        types: [debug, conceptual]
+        difficulty: [3, 4]
+        kind: feature
+      - id: fences_barriers_membar_ptx_map
+        claim: "Volta+ 上 __threadfence_block/__threadfence/__threadfence_system 分别对应 fence.sc.cta / fence.sc.gpu / fence.sc.sys，不是 Ampere 前的 membar.cta/gl/sys 别名保证。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: feature
+      - id: fences_barriers_syncwarp_scope
+        claim: "__syncwarp(mask) 只对 mask 内线程做 warp 级 fence+汇合，不替代 __syncthreads，也不对 mask 外 lane 的 shared 写建立可见性。"
+        types: [debug, compare]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: fences_barriers_cooperative_grid
+        claim: "cudaLaunchCooperativeKernel 后 grid.sync() 提供 grid 级控制流汇合与 device-scope 可见性；普通 kernel 里调用会失败或死锁。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: fences_barriers_aligned_cta
+        claim: "bar.sync.aligned 要求 CTA 内所有线程最终执行同一条 barrier；部分线程 divergent 跳过时死锁，与 __syncthreads 条件调用同类。"
+        types: [debug, counterfactual]
+        difficulty: [2, 3]
+        kind: failure
+        hints: ["if(tid<32) __syncthreads();", "warp0 return 后其余 bar.sync"]
+      - id: fences_barriers_fence_not_wait
+        claim: "atomic_thread_fence(acq_rel, block) 之后立刻读他线程 shared，未到达的写手数可以 > 0，因为 fence 不减少未到齐线程数。"
+        types: [conceptual, debug]
+        difficulty: [3]
+        kind: numeric
+      - id: fences_barriers_nanosleep_no_mm
+        claim: "__nanosleep(n) 只暂停本线程时钟周期，不发 fence、不建立 happens-before，不能用来“等”他线程的普通 store。"
+        types: [counterfactual, conceptual]
+        difficulty: [2]
+        kind: mechanism
+  - id: cross_unit_visibility
+    name: 跨单元可见性
+    leaves:
+      - id: cross_unit_visibility_l2_point
+        claim: "Ampere+ 的 GPU 全局一致性点在 L2；跨 SM 的普通 ld.global 可命中本 SM L1，从而看不到他 SM 已到达 L2 的 store。"
+        types: [conceptual, profiling]
+        difficulty: [3]
+        kind: mechanism
+      - id: cross_unit_visibility_mapped_sys
+        claim: "mapped pinned 上 GPU st.relaxed.gpu 不对 CPU 保证可见；要对 host 可见必须 system-scope fence 或 st.release.sys，否则 x86 load 可无限期读旧值。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: numeric
+      - id: cross_unit_visibility_atomic_ref_host
+        claim: "cuda::atomic_ref<int, cuda::thread_scope_system> 可绑到 cudaHostAlloc mapped 指针，与 CPU 同步要求双方都用 system-scope 且对象表示兼容。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: cross_unit_visibility_dsmem_cluster
+        claim: "Hopper cluster 内对本 CTA dsmem 的写，须 cluster.sync 或配对 mbarrier arrive/wait 之后才对其它 CTA 可见。"
+        types: [conceptual, debug]
+        difficulty: [3, 4]
+        kind: mechanism
+        hints: ["cta0 写 dsmem 后 cta1 立刻读", "缺 cluster.sync"]
+      - id: cross_unit_visibility_ld_cv
+        claim: "ld.cv.global / ld.volatile.global 绕过 L1 从 L2 取，可看到他 SM 已达 L2 的 store，但仍不是 acquire，不能配普通 store 当锁。"
+        types: [optimization, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: cross_unit_visibility_p2p_enable
+        claim: "未 cudaDeviceEnablePeerAccess 时，peer GPU 地址上的 device-scope atomic 不保证可见；需要 P2P 使能且双方 system 或支持 native atomics 的路径。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: api
+      - id: cross_unit_visibility_wc_mapped
+        claim: "cudaHostAllocWriteCombined 的 host 写对 GPU 无 store 顺序保证，GPU 侧须 system-scope acquire/atomic 才能避免读到部分更新。"
+        types: [debug, conceptual]
+        difficulty: [3, 4]
+        kind: failure
+      - id: cross_unit_visibility_l2persisting
+        claim: "sm_80 Ampere 的 cudaAccessPolicyWindow persisting 只影响 L2 保留优先级，不改变内存模型，也不能让 relaxed store 提前对 CPU 可见。"
+        types: [optimization, conceptual]
+        difficulty: [3]
+        kind: feature
+      - id: cross_unit_visibility_const_ro
+        claim: "__constant__ 对 kernel 是只读镜像；host cudaMemcpyToSymbol 完成后才对随后 launch 可见，kernel 内写 constant 非法。"
+        types: [conceptual, debug]
+        difficulty: [2]
+        kind: mechanism
+      - id: cross_unit_visibility_local_private
+        claim: "__local__ / 栈对象只对本线程可见；把 local 指针传入他线程再解引用是非法，不因 __threadfence 而变成 shared。"
+        types: [debug, counterfactual]
+        difficulty: [2, 3]
+        kind: failure
+  - id: cuda_std_atomic
+    name: cuda::std::atomic
+    leaves:
+      - id: cuda_std_atomic_is_system
+        claim: "cuda::std::atomic<T> = cuda::atomic<T, cuda::thread_scope_system>，默认 system 作用域而非 device。"
+        types: [syntax, compare]
+        difficulty: [2, 3]
+        kind: formula
+      - id: cuda_std_atomic_headers
+        claim: "cuda::std::atomic 在 <cuda/std/atomic>；带 scope 的 cuda::atomic 在 <cuda/atomic>；混用命名空间不改变默认 scope。"
+        types: [syntax, conceptual]
+        difficulty: [2]
+        kind: api
+      - id: cuda_std_atomic_lock_free
+        claim: "设备上对齐的 32/64-bit cuda::std::atomic 是 lock-free；对过大或未对齐 T 走锁路径，可能死锁或非法指令。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: failure
+      - id: cuda_std_atomic_ref_sys
+        claim: "cuda::std::atomic_ref<T> 默认 system-scope，可绑 mapped host 或 device 全局对象；绑 CTA shared 应用 cuda::atomic_ref<T, thread_scope_block>。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: cuda_std_atomic_wait_notify
+        claim: "cuda::std::atomic::wait/notify_one 即使在 CUDA 12+ libcu++ 中出现，也不提供 CTA 控制流汇合；未 notify 时 wait 可永久阻塞，不能当 __syncthreads。"
+        types: [syntax, conceptual]
+        difficulty: [3, 4]
+        kind: feature
+      - id: cuda_std_atomic_fetch_add_ret
+        claim: "atomic.fetch_add(k, relaxed) 的返回值 = 加之前的旧值，新值 = 旧值+k；把它当新值用会导致 off-by-k。"
+        types: [debug, code_complete]
+        difficulty: [2]
+        kind: formula
+      - id: cuda_std_atomic_fence_overload
+        claim: "cuda::atomic_thread_fence(order, scope) 是 libcu++ 重载；cuda::std::atomic_thread_fence(order) 固定 system 作用域。"
+        types: [syntax, compare]
+        difficulty: [3]
+        kind: api
+      - id: cuda_std_atomic_not_volatile
+        claim: "cuda::std::atomic 对象本身不可再标 volatile 来“加强”；正确方式是选 memory_order 与 thread_scope，volatile atomic 是冗余且易误导。"
+        types: [conceptual, compare]
+        difficulty: [2, 3]
+        kind: mechanism
+  - id: mapped_host_vis
+    name: mapped host 可见性
+    leaves:
+      - id: mapped_host_vis_maphost_flag
+        claim: "使用零拷贝前必须 cudaSetDeviceFlags(cudaDeviceMapHost) 或等价主上下文标志，否则 cudaHostGetDevicePointer 失败。"
+        types: [syntax, debug]
+        difficulty: [2]
+        kind: api
+      - id: mapped_host_vis_get_device_ptr
+        claim: "cudaHostAlloc(*, cudaHostAllocMapped) 后 host 指针与 cudaHostGetDevicePointer 得到的 device 指针在非 UVA 设备上可以不相等，kernel 必须用 device 指针。"
+        types: [debug, conceptual]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: mapped_host_vis_gpu_store_sys
+        claim: "GPU 对 mapped 页 st.relaxed.gpu 后 CPU 普通 load 可见性保证 = 0；须 __threadfence_system 或 st.release.sys 才对 host 发布。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: mapped_host_vis_cpu_atomic
+        claim: "CPU 侧须用 std::atomic 或系统级 fence 写 mapped 旗标，GPU 用 system-scope acquire-load；CPU 普通 store + GPU volatile 读是 data race。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: failure
+        hints: ["host: *flag=1; device: while(!*flag)", "缺 cuda::thread_scope_system"]
+      - id: mapped_host_vis_uva
+        claim: "UVA 设备上 mapped pinned 的 host/device 地址数值相等，但仍要 system-scope 同步；地址相等 ≠ 缓存一致性自动成立。"
+        types: [conceptual, compare]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: mapped_host_vis_pageable_illegal
+        claim: "对 pageable malloc 指针直接当 mapped 传给 kernel 是非法；必须 cudaHostAlloc/cudaHostRegister 成功后才能零拷贝。"
+        types: [debug, syntax]
+        difficulty: [2]
+        kind: failure
+      - id: mapped_host_vis_register_mapped
+        claim: "cudaHostRegister(ptr, n, cudaHostRegisterMapped) 把已有页登记为零拷贝；未 RegisterIoMemory 时不能把真正 MMIO 当普通 mapped DRAM。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: mapped_host_vis_wc_order
+        claim: "cudaHostAllocWriteCombined 缓冲写合并，CPU store 可延迟且重排；GPU system-scope load 仍可能看到旧值直到 WC 冲刷。"
+        types: [profiling, debug]
+        difficulty: [3, 4]
+        kind: mechanism
+  - id: rmw_cas_orders
+    name: RMW 与 CAS 序
+    leaves:
+      - id: rmw_cas_orders_success_fail
+        claim: "compare_exchange_weak(expected, desired, success, failure) 的 failure 序不能强于 success；failure 只能是 relaxed/acquire/seq_cst 中不超过 success 的那档。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: api
+      - id: rmw_cas_orders_atomicadd_relaxed
+        claim: "CUDA atomicAdd 是 relaxed device-scope RMW，返回旧值；它不 release 此前的普通 store，不能当发布锁。"
+        types: [conceptual, debug]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: rmw_cas_orders_cas_loop
+        claim: "CAS 循环必须写回 compare_exchange 更新后的 expected，否则下次仍用旧 expected，自旋次数可 → ∞。"
+        types: [debug, code_complete]
+        difficulty: [2, 3]
+        kind: failure
+        hints: ["expected 固定为 0", "忽略 cas 返回值"]
+      - id: rmw_cas_orders_red_no_ret
+        claim: "PTX red.gpu.add 不返回旧值，只做归约写；需要旧值时必须 atom.add 而非 red.add。"
+        types: [syntax, compare]
+        difficulty: [2]
+        kind: api
+      - id: rmw_cas_orders_128cas
+        claim: "sm_70+ 对齐 16-byte atomicCAS / atom.cas.b128 才保证 128-bit 不撕裂；未对齐 16-byte 拆成两次 8-byte，丢失原子性。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: feature
+      - id: rmw_cas_orders_float_add
+        claim: "atomicAdd(float*) 在 sm_20+ 对 global 可用，shared float atomicAdd 需 sm_32+；更早架构要用 CAS 循环模拟。"
+        types: [syntax, conceptual]
+        difficulty: [2, 3]
+        kind: feature
+      - id: rmw_cas_orders_acqrel_ticket
+        claim: "ticket = fetch_add(1, acq_rel) 后 spin 到 serving.load(acquire)==ticket，才能看到上一持有者 release 之前的 payload。"
+        types: [code_complete, conceptual]
+        difficulty: [3, 4]
+        kind: mechanism
+      - id: rmw_cas_orders_shared_bank
+        claim: "同 warp 32 个线程 atomicAdd 同一 shared 地址串行化为 32 次 RMW，bank 冲突次数 = 31，不是一次广播完成。"
+        types: [optimization, profiling]
+        difficulty: [2, 3]
+        kind: formula
+  - id: litmus_hb
+    name: happens-before 与 litmus
+    leaves:
+      - id: litmus_hb_mp_relaxed
+        claim: "MP litmus：A 写 data 再 relaxed 写 flag，B relaxed 读 flag==1 后读 data，允许 data 仍为旧值，因为 HB 边数 = 0。"
+        types: [counterfactual, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: litmus_hb_sb
+        claim: "Store Buffering：两线程各 relaxed store 自己再 load 对方，CUDA 允许双方都读到旧值，与 x86 TSO 不同。"
+        types: [compare, conceptual]
+        difficulty: [3, 4]
+        kind: mechanism
+      - id: litmus_hb_iriw
+        claim: "IRIW 四线程对两个 atomic 的 seq_cst 观察在 CUDA system-scope 下应嵌入单一 total order；改 relaxed 则允许交叉观察。"
+        types: [conceptual, counterfactual]
+        difficulty: [4]
+        kind: mechanism
+      - id: litmus_hb_publication
+        claim: "合法发布：data 普通 store → flag.store(v, release)，消费者 while(flag.load(acquire)!=v); 读 data，此时 payload 可见。"
+        types: [code_complete, conceptual]
+        difficulty: [2, 3]
+        kind: api
+      - id: litmus_hb_race_ub
+        claim: "两线程无同步地对同一非 atomic 地址一写一读是 data race，整个 kernel 行为未定义，不能用“多数时候看到新值”当正确性。"
+        types: [debug, counterfactual]
+        difficulty: [2, 3]
+        kind: failure
+      - id: litmus_hb_ctrl_dep
+        claim: "if (flag.load(relaxed)) { use data; } 的控制依赖在 CUDA 中不构成 acquire，data 的普通读仍可与 flag 的 store 竞争。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: litmus_hb_co_rr
+        claim: "同一线程两次 atomic load 同一对象，若无干预 store，第二次不能读到比第一次更旧的值（coherence RR）。"
+        types: [conceptual, compare]
+        difficulty: [3]
+        kind: mechanism
+      - id: litmus_hb_fence_mp
+        claim: "A: store data; fence(release, device); flag=1 与 B: while(!flag); fence(acquire, device); load data 可建立与 release/acquire 原子对等价的同步。"
+        types: [code_complete, conceptual]
+        difficulty: [3]
+        kind: api
+  - id: async_proxy_mm
+    name: async proxy 内存模型
+    leaves:
+      - id: async_proxy_mm_generic_tma
+        claim: "sm_90 上 generic/shared 写入要被 TMA 异步代理读取，必须 fence.proxy.async 把 generic proxy 同步到 async proxy，否则 TMA 可读旧 smem。"
+        types: [debug, conceptual]
+        difficulty: [4]
+        kind: feature
+      - id: async_proxy_mm_cp_async_group
+        claim: "cp.async 完成只保证目的 shared 对该 CTA 后续 wait_group 之后的 ld.shared 可见，不自动对其他 CTA 或 TMA 代理可见。"
+        types: [conceptual, debug]
+        difficulty: [3]
+        kind: mechanism
+      - id: async_proxy_mm_memcpy_async
+        claim: "cuda::memcpy_async + barrier.arrive_and_wait 完成后 outstanding 拷贝数 = 0 才允许消费 dst；只 arrive 不 wait 时 outstanding 可以 > 0。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: formula
+      - id: async_proxy_mm_alias_generic
+        claim: "同一 smem 字节经 generic 指针与 TMA desc 同时写，若缺 proxy fence，是跨代理 data race，结果未定义。"
+        types: [debug, counterfactual]
+        difficulty: [4]
+        kind: failure
+        hints: ["st.shared 后立刻 TMA store 同一 tile", "缺 fence.proxy.async"]
+      - id: async_proxy_mm_tensormap
+        claim: "sm_90 tensormap.replace 后须 fence.proxy.tensormap::generic.acquire 才能让后续 TMA 看到新 descriptor。"
+        types: [syntax, conceptual]
+        difficulty: [4]
+        kind: feature
+      - id: async_proxy_mm_mbarrier_tx
+        claim: "TMA 完成计入 mbarrier 的 tx_count，try_wait 成功 ⇒ 事务字节数已到 0 且 arrive 够数，此时 smem payload 对等待线程可见。"
+        types: [conceptual, debug]
+        difficulty: [3, 4]
+        kind: mechanism
+      - id: async_proxy_mm_sm80_no_tma
+        claim: "sm_80 Ampere 的 cp.async 没有 async proxy/TMA；在 sm_80 上发 fence.proxy.async.shared::cta 非法或被工具链拒绝。"
+        types: [syntax, compare]
+        difficulty: [3]
+        kind: feature
+      - id: async_proxy_mm_bulk_shared
+        claim: "cp.async.bulk.shared::cluster.global 写入远端 CTA smem，完成可见性由 cluster 作用域 mbarrier 决定，cta 作用域 wait 不够。"
+        types: [debug, conceptual]
+        difficulty: [4]
+        kind: mechanism
+  - id: seq_cst_sc
+    name: seq_cst 与 SC fence
+    leaves:
+      - id: seq_cst_sc_total_order
+        claim: "同一 thread_scope 上所有 seq_cst 原子操作嵌入一个 total order S，S 必须与每线程 sequenced-before 一致。"
+        types: [conceptual, compare]
+        difficulty: [3, 4]
+        kind: mechanism
+      - id: seq_cst_sc_fence_ptx
+        claim: "memory_order_seq_cst 的 atomic_thread_fence(device) 编译为 fence.sc.gpu；acq_rel fence 是 fence.acq_rel.gpu，二者不可互换。"
+        types: [syntax, compare]
+        difficulty: [3]
+        kind: api
+      - id: seq_cst_sc_mixed
+        claim: "seq_cst store 与另一线程 relaxed load 之间不自动进入 S 的观察约束，relaxed 侧仍可长期读旧值。"
+        types: [counterfactual, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: seq_cst_sc_cost
+        claim: "seq_cst 在 GPU 上通常比 acq_rel 多一次 sc fence，对 hot atomicAdd 计数器应保持 relaxed，除非需要跨线程 total order。"
+        types: [optimization, profiling]
+        difficulty: [3]
+        kind: mechanism
+      - id: seq_cst_sc_single_loc
+        claim: "单地址上 seq_cst 与 acq_rel 对发布-订阅的可见性相同；seq_cst 的额外承诺只在多地址多观察者时显现。"
+        types: [compare, conceptual]
+        difficulty: [3, 4]
+        kind: mechanism
+      - id: seq_cst_sc_threadfence
+        claim: "__threadfence() 在 sm_70+ 是 SC-scope GPU fence，强于仅 acq_rel 的 cuda::atomic_thread_fence(acq_rel, device)。"
+        types: [compare, conceptual]
+        difficulty: [3]
+        kind: feature
+      - id: seq_cst_sc_block_not_device
+        claim: "block-scope seq_cst 的 total order 只覆盖本 CTA；他 CTA 的 device-scope 操作不在该 S 中。"
+        types: [conceptual, debug]
+        difficulty: [3]
+        kind: mechanism
+      - id: seq_cst_sc_store_load
+        claim: "seq_cst store 后同线程 seq_cst load 另一对象，不允许观察到与 S 矛盾的重排；两条 relaxed 则允许 store-load 重排。"
+        types: [conceptual, counterfactual]
+        difficulty: [4]
+        kind: mechanism
+  - id: peer_p2p_vis
+    name: P2P 与多 GPU 可见性
+    leaves:
+      - id: peer_p2p_vis_enable
+        claim: "cudaDeviceEnablePeerAccess(peer, 0) 成功后本 GPU 才能合法 ld/st/atom peer 显存；未使能时访问是非法。"
+        types: [syntax, debug]
+        difficulty: [2]
+        kind: api
+      - id: peer_p2p_vis_native_atomics
+        claim: "cudaDeviceGetP2PAttribute(..., cudaDevP2PAttrNativeAtomicSupported) = 1 时才支持对 peer 地址的 native atomic；否则 system-scope atomic 可能走锁或不支持。"
+        types: [conceptual, debug]
+        difficulty: [3]
+        kind: formula
+      - id: peer_p2p_vis_sys_scope
+        claim: "跨 GPU 同步必须 thread_scope_system 的 release/acquire 或 __threadfence_system；thread_scope_device 只覆盖本 GPU。"
+        types: [conceptual, compare]
+        difficulty: [3]
+        kind: mechanism
+      - id: peer_p2p_vis_l2_private
+        claim: "每 GPU 有私有 L2，peer store 到达远端 L2 前本 GPU 的 ld.global 可命中本侧缓存旧行，需 atomic/cv/fence.sys 才能观察。"
+        types: [profiling, conceptual]
+        difficulty: [3, 4]
+        kind: mechanism
+      - id: peer_p2p_vis_managed
+        claim: "cudaMallocManaged 跨 GPU 的可见性还受并发 managed 访问规则约束；缺 cudaDeviceSynchronize/prefetch 时可 page-fault 或读旧页。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: failure
+      - id: peer_p2p_vis_nvlink
+        claim: "NVLink P2P 降低延迟但不改变作用域：无 system-scope 同步时，peer 普通 load 仍可不看到普通 store。"
+        types: [compare, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: peer_p2p_vis_can_access
+        claim: "cudaDeviceCanAccessPeer(&ok, a, b) 中 ok=0 时 EnablePeerAccess 必失败，应改走 cudaMemcpyPeer 而非 kernel 直访。"
+        types: [syntax, debug]
+        difficulty: [2]
+        kind: api
+      - id: peer_p2p_vis_cluster_not_peer
+        claim: "Hopper cluster/dsmem 只在同一 GPU 的 SM 集合内，不能把 thread_scope_cluster 当成跨 GPU P2P 作用域。"
+        types: [conceptual, compare]
+        difficulty: [3]
+        kind: feature
+  - id: const_local_mm
+    name: constant/local 与别名
+    leaves:
+      - id: const_local_mm_constant_ro
+        claim: "__constant__ 容量上限 64 KiB/设备，对 kernel 只读；host 更新须 cudaMemcpyToSymbol，完成后对下一次 launch 可见。"
+        types: [conceptual, syntax]
+        difficulty: [2]
+        kind: numeric
+      - id: const_local_mm_local_spill
+        claim: "寄存器溢出到 local 的 spill 只对本线程，不经 L1 与他线程共享；对 spill 地址做跨线程同步没有内存模型对象。"
+        types: [conceptual, debug]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: const_local_mm_generic
+        claim: "generic 指针按高位选择 space；把 shared 指针当 global 解引用会走到错误空间，fence 不能修复错误空间。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: failure
+        hints: ["cvta.to.global 用在 smem 指针", "kernel 参数里传 &smem"]
+      - id: const_local_mm_param
+        claim: "kernel 参数驻 .param 空间，只读且 launch 时拷贝一份；kernel 内写参数缓冲或取其可变指针给他 CTA 不建立可见性。"
+        types: [conceptual, syntax]
+        difficulty: [2]
+        kind: mechanism
+      - id: const_local_mm_grid_constant
+        claim: "CUDA 11.7+ __grid_constant__ 参数按 launch 只读镜像，须 trivially copyable；不能当可变 global 缓冲。"
+        types: [syntax, conceptual]
+        difficulty: [2, 3]
+        kind: feature
+      - id: const_local_mm_texture
+        claim: "texture/surface 走独立采样路径，不参与 generic atomic 的 happens-before；对同一物理地址混用 suface 写与 ld.global 需 API 文档规定的同步。"
+        types: [conceptual, debug]
+        difficulty: [3]
+        kind: mechanism
+      - id: const_local_mm_alias_union
+        claim: "非 atomic 的 union 或指针别名让两线程以不同类型写同一字节，仍是 data race，与 C++ 严格别名叠加。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: failure
+      - id: const_local_mm_memcpy_symbol
+        claim: "cudaMemcpyToSymbolAsync 完成后才对后续依赖 stream 上的 kernel 可见；未 stream 同步就 launch，kernel 可读到旧 constant。"
+        types: [debug, conceptual]
+        difficulty: [2, 3]
+        kind: api

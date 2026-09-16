@@ -6,15 +6,18 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from cuda_sft_qgen.errors import JsonSalvageNeeded, RateLimitError
 from cuda_sft_qgen.graph.state import PipelineState
-from cuda_sft_qgen.jsonutil import parse_question_payload
+from cuda_sft_qgen.jsonutil import normalize_language, parse_question_payload
+from cuda_sft_qgen.keys import PRI_SALVAGE, PRI_WRITER
 from cuda_sft_qgen.llm import NvidiaLLM
 from cuda_sft_qgen.models import Question, QuestionBrief, SteeringBrief
 from cuda_sft_qgen.prompts import load_prompt
+from cuda_sft_qgen.prompts.fewshot import FewshotCorpus
+from cuda_sft_qgen.prompts.structured_writer import StructuredPrompt
 from cuda_sft_qgen.review.fingerprint import fingerprint
 from cuda_sft_qgen.runtime import get_runtime
 from cuda_sft_qgen.sieve import sieve_question
@@ -46,7 +49,7 @@ def question_from_obj(
 ) -> Question:
     question_text = str(obj.get("question") or "").strip()
     tests_claim = str(obj.get("tests_claim") or brief.l3_claim).strip()
-    language = str(obj.get("language") or brief.language).strip() or brief.language
+    language = normalize_language(obj.get("language"), fallback=brief.language)
     warnings = obj.get("warnings") if isinstance(obj.get("warnings"), list) else []
     fp = fingerprint(question_text)
     return Question(
@@ -55,6 +58,7 @@ def question_from_obj(
         tests_claim=tests_claim,
         topic_path=list(brief.topic_path),
         l3_id=brief.l3_id,
+        l3_claim=brief.l3_claim,
         question_type=brief.question_type,
         difficulty=int(brief.difficulty),
         bloom=brief.bloom,
@@ -68,104 +72,38 @@ def question_from_obj(
         source=source,
         review_status="pending",
         warnings=[str(w) for w in warnings],
+        kind=brief.kind or "",
     )
 
 
-def _render(template: str, mapping: dict[str, str]) -> str:
-    out = template
-    for key, value in mapping.items():
-        out = out.replace("{{" + key + "}}", value)
-    return out
-
-
-def _fewshot_block(brief: QuestionBrief) -> str:
+def generate_from_brief(
+    brief: QuestionBrief,
+    steering: SteeringBrief,
+    *,
+    corpus: FewshotCorpus | None = None,
+) -> Question:
     rt = get_runtime()
-    accepted = rt.store.load_accepted()
-    if not accepted:
-        return "(none yet)"
-    picked: list = []
-    seen_l3: set[str] = {brief.l3_id}
-    seen_type: set[str] = {brief.question_type}
-    for q in reversed(accepted):
-        if q.l3_id in seen_l3 and q.question_type in seen_type:
-            continue
-        picked.append(q)
-        seen_l3.add(q.l3_id)
-        seen_type.add(q.question_type)
-        if len(picked) >= 2:
-            break
-    if not picked:
-        picked = accepted[-2:]
-    lines = []
-    for q in picked:
-        lines.append(f"- ({q.question_type}/{q.l3_id}) {q.question[:400]}")
-    return "\n".join(lines)
-
-
-def _anti_block(brief: QuestionBrief) -> str:
-    items = list(brief.anti_templates)
-    rt = get_runtime()
-    k = int(rt.settings.generation.get("fewshot_negatives", 8))
-    for skel in rt.store.recent_rejected_skeletons(k):
-        if skel not in items:
-            items.append(skel)
-    if not items:
-        return "(none)"
-    return "\n".join(f"- {s[:240]}" for s in items[:k])
-
-
-def _persona(brief: QuestionBrief) -> tuple[str, str]:
-    meta = get_runtime().settings.personas.get(brief.persona) or {}
-    return str(meta.get("name") or brief.persona), str(meta.get("voice") or "")
-
-
-def generate_from_brief(brief: QuestionBrief, steering: SteeringBrief) -> Question:
-    rt = get_runtime()
-    persona_name, persona_voice = _persona(brief)
-    mapping = {
-        "persona_name": persona_name,
-        "persona_voice": persona_voice,
-        "l3_claim": brief.l3_claim,
-        "topic_path": ".".join(brief.topic_path),
-        "question_type": brief.question_type,
-        "difficulty": str(brief.difficulty),
-        "bloom": brief.bloom,
-        "hardware": brief.hardware,
-        "granularity": brief.granularity,
-        "language": brief.language,
-        "must_include": brief.must_include,
-        "must_avoid": brief.must_avoid,
-        "steering": steering.to_prompt_block(),
-        "anti_templates": _anti_block(brief),
-        "fewshot": _fewshot_block(brief),
-        "seed_question": brief.seed_question or "",
-        "angle": brief.angle or "",
-        "instance_hint": brief.instance_hint or brief.must_include or brief.l3_claim,
-        "must_avoid_stems": "\n".join(f"- {s}" for s in brief.must_avoid_stems) or "(none)",
-        "angle_guide": brief.angle_guide or "",
-        "min_chars": str(rt.settings.question_min_chars),
-        "max_chars": str(rt.settings.question_max_chars),
-    }
-    if brief.role == "evolver" and brief.seed_question:
-        system = _render(load_prompt("evolver"), mapping)
-        user = (
-            f"CLAIM: {brief.l3_claim}\nTYPE: {brief.question_type}\n"
-            f"HARDWARE: {brief.hardware}\nSEED: {brief.seed_question}"
+    anti_k = int(rt.settings.generation.get("anti_templates_max", 15))
+    if corpus is None:
+        corpus = FewshotCorpus.from_store(rt.store, anti_k=anti_k)
+    builder = getattr(rt, "prompt_builder", None)
+    if builder is None:
+        builder = StructuredPrompt(
+            rt.settings, corpus, cache=getattr(rt, "prompt_cache", None)
         )
-        source = "evolver"
     else:
-        system = _render(load_prompt("writer"), mapping)
-        user = (
-            f"CLAIM: {brief.l3_claim}\nTYPE: {brief.question_type}\n"
-            f"HARDWARE: {brief.hardware}\nBLOOM: {brief.bloom}\n"
-            f"Write the JSON now."
-        )
-        source = "writer"
+        builder.corpus = corpus
+    bundle = builder.build(brief, steering)
+    source = "evolver" if brief.role == "evolver" and brief.seed_question else "writer"
     messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
+        {"role": "system", "content": bundle.system},
+        {"role": "user", "content": bundle.user},
     ]
-    raw = rt.llm.complete(messages)
+    raw = rt.llm.complete(
+        messages,
+        priority=PRI_WRITER,
+        prompt_cache_key=bundle.cache_key or None,
+    )
     obj = parse_question_payload(
         raw,
         fallback_claim=brief.l3_claim,
@@ -195,11 +133,12 @@ def _safe_generate(
     steering: SteeringBrief,
     *,
     attempts: int = 1,
+    corpus: FewshotCorpus | None = None,
 ) -> GenerateOutcome:
     brief = QuestionBrief.model_validate(brief_data)
     rt = get_runtime()
     try:
-        question = generate_from_brief(brief, steering)
+        question = generate_from_brief(brief, steering, corpus=corpus)
     except RateLimitError as exc:
         logger.warning("generation rate-limited, will retry later: %s", exc)
         return GenerateOutcome(
@@ -231,6 +170,7 @@ def _safe_generate(
             tests_claim=brief.l3_claim,
             topic_path=list(brief.topic_path),
             l3_id=brief.l3_id,
+            l3_claim=brief.l3_claim,
             question_type=brief.question_type,
             difficulty=brief.difficulty,
             bloom=brief.bloom,
@@ -251,6 +191,99 @@ def _safe_generate(
     return GenerateOutcome(status="ok", question=question, attempts=attempts)
 
 
+def salvage_item(item: dict[str, Any]) -> GenerateOutcome:
+    rt = get_runtime()
+    brief = QuestionBrief.model_validate(item["brief"])
+    raw = str(item.get("raw") or "")
+    obj = parse_question_payload(
+        raw,
+        fallback_claim=brief.l3_claim,
+        min_question_chars=rt.settings.sieve_min_chars,
+        keep_truncated=rt.settings.json_keep_truncated,
+    )
+    if obj and str(obj.get("question") or "").strip():
+        q = question_from_obj(brief, obj, source=brief.role)
+        reason = sieve_question(q, rt.settings, rt.llm)
+        if reason:
+            q.reject_reason = reason
+            rt.store.append_rejected(q)
+            return GenerateOutcome(status="hard_fail", reason=reason)
+        return GenerateOutcome(status="ok", question=q)
+
+    if not rt.settings.salvage_use_llm:
+        return GenerateOutcome(
+            status="retry",
+            brief=brief.model_dump(),
+            reason="json_parse",
+            attempts=1,
+        )
+
+    prompt = (
+        load_prompt("salvage")
+        .replace("{{l3_claim}}", brief.l3_claim)
+        .replace("{{raw}}", raw[:12000])
+        .replace("{{min_chars}}", str(rt.settings.question_min_chars))
+        .replace("{{max_chars}}", str(rt.settings.question_max_chars))
+    )
+    last_err: str | None = f"local parse failed raw_chars={len(raw)}"
+    for _ in range(max(1, rt.settings.salvage_llm_attempts)):
+        try:
+            text = rt.llm.complete(
+                [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": "Return the repaired JSON object now."},
+                ],
+                thinking_level=rt.settings.salvage_thinking_level,
+                max_tokens=rt.settings.salvage_max_tokens,
+                priority=PRI_SALVAGE,
+            )
+        except RateLimitError:
+            return GenerateOutcome(
+                status="retry",
+                brief=brief.model_dump(),
+                reason="429",
+                attempts=1,
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_err = f"{type(exc).__name__}: {exc}"
+            continue
+        obj = parse_question_payload(
+            text,
+            fallback_claim=brief.l3_claim,
+            min_question_chars=rt.settings.sieve_min_chars,
+            keep_truncated=rt.settings.json_keep_truncated,
+        )
+        if obj and str(obj.get("question") or "").strip():
+            q = question_from_obj(brief, obj, source=brief.role)
+            reason = sieve_question(q, rt.settings, rt.llm)
+            if reason:
+                q.reject_reason = reason
+                rt.store.append_rejected(q)
+                return GenerateOutcome(status="hard_fail", reason=reason)
+            return GenerateOutcome(status="ok", question=q)
+        last_err = f"unparseable salvage output chars={len(text or '')}"
+    logger.warning("salvage failed: %s", last_err)
+    return GenerateOutcome(
+        status="retry",
+        brief=brief.model_dump(),
+        reason="json_parse",
+        attempts=1,
+    )
+
+
+def generate_or_salvage(
+    brief_data: dict,
+    steering: SteeringBrief,
+    *,
+    attempts: int = 1,
+    corpus: FewshotCorpus | None = None,
+) -> GenerateOutcome:
+    outcome = _safe_generate(brief_data, steering, attempts=attempts, corpus=corpus)
+    if outcome.status == "salvage" and outcome.brief is not None:
+        return salvage_item({"brief": outcome.brief, "raw": outcome.raw or ""})
+    return outcome
+
+
 def enqueue_retry(brief: dict[str, Any], *, reason: str, attempts: int) -> None:
     rt = get_runtime()
     if attempts >= rt.settings.retry_max_attempts:
@@ -260,6 +293,7 @@ def enqueue_retry(brief: dict[str, Any], *, reason: str, attempts: int) -> None:
             tests_claim=str(brief.get("l3_claim") or ""),
             topic_path=list(brief.get("topic_path") or []),
             l3_id=str(brief.get("l3_id") or ""),
+            l3_claim=str(brief.get("l3_claim") or ""),
             question_type=str(brief.get("question_type") or "conceptual"),
             difficulty=int(brief.get("difficulty") or 2),
             bloom=str(brief.get("bloom") or "apply"),
@@ -328,12 +362,18 @@ def generate_batch_node(state: PipelineState) -> dict:
     salvage_items: list[dict] = []
     counts = {"ok": 0, "salvage": 0, "retry": 0, "hard_fail": 0}
     lock = threading.Lock()
+    anti_k = int(rt.settings.generation.get("anti_templates_max", 15))
+    corpus = FewshotCorpus.from_store(rt.store, anti_k=anti_k)
 
     def _one(brief_data: dict) -> None:
-        outcome = _safe_generate(brief_data, steering, attempts=1)
+        outcome = generate_or_salvage(brief_data, steering, attempts=1, corpus=corpus)
         kind = apply_outcome(
             outcome, pending=pending, salvage_items=salvage_items, lock=lock
         )
+        if kind == "ok" and outcome.question is not None:
+            prefetch = getattr(rt, "prefetch_embed", None)
+            if callable(prefetch):
+                prefetch(outcome.question.question)
         with lock:
             counts[kind] = counts.get(kind, 0) + 1
 

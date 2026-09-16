@@ -11,12 +11,26 @@ generation:
   writer_concurrency: 6
   llm_per_key_concurrency: 2
   embed_per_key_concurrency: 2
+  embed_oversub: 2
   embed_chunk_size: 8
+  prompt_cache: true
+  embedding_cache: true
   evolver_fraction: 0.30
-  fewshot_positives: 3
-  fewshot_negatives: 8
+  fewshot_positives: 5
+  fewshot_negatives: 2
+  anti_templates_max: 15
+  fewshot_snippet_chars: 500
+  fewshot_max_nn_cosine: 0.50
+  fewshot_nn_cosine_fallback: 0.80
+  fewshot_simhash_hamming_max: 20
+  prompt_cot: true
   sieve_min_chars: 24
   max_parse_retries: 1
+
+taxonomy:
+  target_leaves_per_l2: 30
+  target_leaf_count: 4500
+  expand_max_per_call: 40
 
 review:
   batch_size: 20

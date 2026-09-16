@@ -34,6 +34,28 @@ def test_sieve_too_short_and_too_long():
     assert rule_sieve(ok, settings) is None
 
 
+def test_sieve_accepts_exam_stems_without_question_mark():
+    settings = load_settings(fake_llm=True)
+    settings.question_min_chars = 40
+    fill = _q(
+        "下面是 Hopper 上使用 Tensor Core 与 TMA 的 kernel 片段。"
+        "请在标记 // <<<FILL>>> 处补全两行代码，使 copy_async 的提交与等待配对。"
+        "题干考查 __syncthreads 与 TMA wait 的配对。"
+    )
+    compute = _q(
+        "A GEMM kernel computes C = A*B with fp16 C. Given M = 1024, N = 2048: "
+        "Compute the total HBM traffic before fusion. Mention __syncthreads only "
+        "as the CTA barrier before the store."
+    )
+    which = _q(
+        "Examine the three host-side fragments below and indicate which ones are legal "
+        "CUDA launches that still reach __syncthreads. Select the fragment(s) that are legal."
+    )
+    assert rule_sieve(fill, settings) is None
+    assert rule_sieve(compute, settings) is None
+    assert rule_sieve(which, settings) is None
+
+
 def test_question_length_from_env(monkeypatch):
     monkeypatch.setenv("QUESTION_MIN_CHARS", "55")
     monkeypatch.setenv("QUESTION_MAX_CHARS", "900")

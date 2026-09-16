@@ -8,8 +8,10 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from cuda_sft_qgen.cache import EmbeddingCache
 from cuda_sft_qgen.config import Settings
 from cuda_sft_qgen.keys import ApiKeyPool
+from cuda_sft_qgen.review.normalize import exact_hash
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,11 @@ def _split_even(items: list[str], n_parts: int) -> list[list[str]]:
     return batches
 
 
+def _chunks(items: list[str], size: int) -> list[list[str]]:
+    size = max(1, int(size))
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
 def l2_normalize(mat: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     mat = np.asarray(mat, dtype=np.float32)
     if mat.ndim == 1:
@@ -38,8 +45,38 @@ def l2_normalize(mat: np.ndarray, eps: float = 1e-12) -> np.ndarray:
 
 class Embedder:
     dim: int | None = None
+    cache: EmbeddingCache | None = None
+    uncached_calls: int = 0
 
     def embed(self, texts: Sequence[str]) -> np.ndarray:
+        items = list(texts)
+        if not items:
+            return np.zeros((0, self.dim or 1024), dtype=np.float32)
+        cache = self.cache
+        if cache is None:
+            return self._embed_uncached(items)
+        hits, miss_idx = cache.lookup_texts(items)
+        if not miss_idx:
+            stacked = np.stack([h for h in hits if h is not None], axis=0)
+            self.dim = stacked.shape[1]
+            return stacked
+        miss_texts = [items[i] for i in miss_idx]
+        mat = self._embed_uncached(miss_texts)
+        digests = [exact_hash(t) for t in miss_texts]
+        cache.put_many(digests, mat)
+        out_dim = mat.shape[1]
+        self.dim = out_dim
+        rows: list[np.ndarray] = []
+        miss_iter = 0
+        for i, hit in enumerate(hits):
+            if hit is None:
+                rows.append(np.asarray(mat[miss_iter], dtype=np.float32))
+                miss_iter += 1
+            else:
+                rows.append(hit)
+        return np.stack(rows, axis=0)
+
+    def _embed_uncached(self, texts: list[str]) -> np.ndarray:
         raise NotImplementedError
 
 
@@ -48,15 +85,17 @@ class NvidiaEmbedder(Embedder):
         self.settings = settings
         self.pool = pool
         self.dim = None
+        self.uncached_calls = 0
 
-    def embed(self, texts: Sequence[str]) -> np.ndarray:
+    def _embed_uncached(self, texts: list[str]) -> np.ndarray:
         items = list(texts)
         if not items:
             return np.zeros((0, self.dim or 1024), dtype=np.float32)
-        n_parts = min(len(items), self.pool.embed_capacity)
-        batches = _split_even(items, n_parts)
+        chunk_size = max(1, int(self.settings.embed_chunk_size))
+        batches = _chunks(items, chunk_size)
+        workers = min(len(batches), max(1, self.pool.embed_capacity))
         rows: list[np.ndarray | None] = [None] * len(batches)
-        workers = len(batches)
+        self.uncached_calls += len(batches)
 
         def _one(idx: int, batch: list[str]) -> None:
             rows[idx] = self._embed_batch_with_retry(batch)
@@ -84,7 +123,7 @@ class NvidiaEmbedder(Embedder):
                 text = str(exc).lower()
                 if "429" in str(exc) or "too many requests" in text or "overloaded" in text:
                     wait = min(60.0, 8.0 * (2 ** min(attempt, 3)))
-                    self.pool.mark_cooldown(slot, wait)
+                    self.pool.mark_cooldown(slot, wait, kind="embed")
                     logger.warning(
                         "embed %s rate-limited (attempt %s/%s)",
                         slot.label,
@@ -115,6 +154,7 @@ class NvidiaEmbedder(Embedder):
         vectors = [item.embedding for item in resp.data]
         mat = l2_normalize(np.asarray(vectors, dtype=np.float32))
         self.dim = mat.shape[1]
+        self.pool.note_success("embed")
         return mat
 
 
@@ -129,7 +169,8 @@ class HuggingFaceEmbedder(Embedder):
         self._model = SentenceTransformer(settings.embedding_model)
         self.dim = int(self._model.get_sentence_embedding_dimension())
 
-    def embed(self, texts: Sequence[str]) -> np.ndarray:
+    def _embed_uncached(self, texts: list[str]) -> np.ndarray:
+        self.uncached_calls += 1
         if not texts:
             return np.zeros((0, self.dim or 1024), dtype=np.float32)
         vecs = self._model.encode(
@@ -146,8 +187,10 @@ class FakeEmbedder(Embedder):
 
     def __init__(self, dim: int = 64) -> None:
         self.dim = dim
+        self.uncached_calls = 0
 
-    def embed(self, texts: Sequence[str]) -> np.ndarray:
+    def _embed_uncached(self, texts: list[str]) -> np.ndarray:
+        self.uncached_calls += 1
         rows = []
         for text in texts:
             seed = int(hashlib.sha256(text.encode("utf-8")).hexdigest()[:16], 16) % (

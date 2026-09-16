@@ -1,0 +1,984 @@
+id: T13
+name: 算法核
+children:
+- id: gemm
+  name: GEMM
+  leaves:
+  - id: gemm_tiling
+    claim: BM/BN/BK tile、K 流水深度与 smem 容量/寄存器的权衡
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+  - id: gemm_epilogue
+    claim: epilogue 里 bias/activation 融合与边界 predication
+    types:
+    - optimization
+    - code_complete
+    difficulty:
+    - 3
+  - id: gemm_tile_bytes
+    claim: A tile 字节 = BM*BK*sizeof(elem)，双缓冲则 ×2；BM=128 BK=32 FP16 双缓冲 smem 仅 A 就 16KB
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    kind: formula
+  - id: gemm_k_stages
+    claim: K pipeline stages 增加 outstanding TMA，藏 DRAM 延迟，但 smem 乘 stages；stages=4 在 164KB 预算下可能挤掉 epilogue smem
+    types:
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+  - id: gemm_pred_k
+    claim: K 不是 BK 倍数时最后一轮必须 predication；否则多读的 K 尾会累加垃圾并可能 OOB
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: gemm_acc_fp32
+    claim: FP16 输入 MMA 累加到 FP32 寄存器；acc 用 FP16 时 K=4096 部分和易溢到 Inf
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: gemm_smem_bank
+    claim: 无 swizzle 的 row-major FP16 tile 按 32-bit bank 观察，相邻 lane 跨 8 half 仍可能 2-way 冲突
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: gemm_vec_n
+    claim: epilogue 向量写 C 要求 N 维满足 8 元素对齐；尾列必须标量+predication，不能用同一向量指针扫过
+    types:
+    - layout
+    - code_complete
+    difficulty:
+    - 3
+    kind: api
+- id: reduce_scan
+  name: Reduction / Scan
+  leaves:
+  - id: warp_block_reduce
+    claim: warp shuffle reduce + block 共享内存归约的两级结构与 bank conflict
+    types:
+    - code_complete
+    - optimization
+    difficulty:
+    - 2
+    - 3
+  - id: decoupled_lookback
+    claim: device-wide scan 的 decoupled look-back 与单 CTA 扫的差异
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    - 4
+  - id: reduce_scan_bank_pad
+    claim: block reduce 的 smem[tid] 连续 32-bit 无冲突；若按 smem[tid*2] 存则 2-way conflict，padding 成 33 列可解开
+    types:
+    - code_complete
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: reduce_scan_lookback
+    claim: decoupled look-back 依赖前缀 flag 的 acquire 可见性，单 CTA 扫没有这个跨 CTA 依赖，两者正确性证明不同
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: reduce_scan_shfl_xor
+    claim: warp reduce 的 shfl_xor 偏移序列为 16,8,4,2,1；只 xor 1 得到相邻和，不是 32 元归约
+    types:
+    - code_complete
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+  - id: reduce_scan_atomic
+    claim: 各 CTA 局部和再 atomicAdd 到全局，跨 run 非确定；需要确定应写回数组再单 CTA 扫
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: reduce_scan_identity
+    claim: 空 CTA 或 n=0 时必须写 identity；漏写会让 host 读到未初始化 device 内存
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 1
+    - 2
+    kind: failure
+  - id: reduce_scan_cg
+    claim: cooperative_groups::reduce 的 op 须匹配值类型；对 float 用 plus 与手工 shfl 的舍入树可能不同
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+- id: attn
+  name: Softmax / Attention
+  leaves:
+  - id: online_softmax
+    claim: online softmax 的 running max/sum 数值稳定与 warp 级实现
+    types:
+    - conceptual
+    - code_complete
+    difficulty:
+    - 3
+  - id: flash_attn_tiling
+    claim: FlashAttention SRAM tiling、不物化 S 矩阵与 causal mask 的 tile 边界
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    - 4
+  - id: attn_online_m_state
+    claim: online softmax 的 running m 必须先 warp-max 再 rescale running l，m_new=max(m_old,m_tile)；先加后 max 会破坏数值稳定
+    types:
+    - conceptual
+    - code_complete
+    difficulty:
+    - 3
+    kind: formula
+  - id: attn_flash_br
+    claim: FlashAttention 不物化 S，Br×Bc tile 受 smem 限制；causal 下 Bc 超界必须 predication，否则读到未来 key
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: attn_rescale_l
+    claim: m_new = max(m_old, m_tile) 后 l_new = exp(m_old-m_new)*l_old + sum(exp(x-m_new))；漏乘 exp 差会破坏归一化
+    types:
+    - code_complete
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: attn_kv_cache
+    claim: 推理 KV cache 的 K tile 沿 seq 增长；Br 固定而 Bc 受 smem 限，不能按训练时 N 一次性装下
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: attn_dropout_mask
+    claim: dropout mask 必须在 softmax 之后、乘 V 之前；掩在 softmax 前会改变归一化分母
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: attn_scale_dk
+    claim: QK^T 缩放因子 = 1/sqrt(d_k)；d_k=64 时为 0.125，漏缩放在 FP16 上更易溢出
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+- id: conv_sparse
+  name: Conv 与稀疏
+  leaves:
+  - id: implicit_gemm
+    claim: implicit GEMM conv 的 NHWC 布局、tile 与 im2col 物化的差别
+    types:
+    - compare
+    - layout
+    difficulty:
+    - 3
+  - id: structured_sparse
+    claim: Sparse Tensor Core 2:4 结构稀疏的剪枝约束与 mma.sp
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 3
+    - 4
+  - id: conv_sparse_24
+    claim: Sparse Tensor Core 2:4 要求每 4 个元素恰 2 个非零且走 mma.sp；密度对但位置不满足 2:4 会得到错误乘积而非 fallback 稠密
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: conv_implicit_nhwc
+    claim: implicit GEMM conv 的 NHWC 使 channel 连续以满足 128B 向量；NCHW 同一算法会把 channel 变成 stride，合并失败
+    types:
+    - compare
+    - layout
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: conv_sparse_im2col_bytes
+    claim: 显式 im2col 把输入膨胀约 stride 与 k 的倍数；k=3 stride=1 时缓冲远大于 implicit GEMM 的输入驻留
+    types:
+    - compare
+    - layout
+    difficulty:
+    - 3
+    kind: numeric
+  - id: conv_sparse_mma_sp_meta
+    claim: mma.sp 的 metadata 每 16 个元素用 2 bit 选 2:4 位置；metadata 与稀疏 A 不一致则乘积错而非回退稠密
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: conv_sparse_nhwc_c32
+    claim: implicit GEMM 的 NHWC 且 C 对齐 32 才能 128B 向量；C=3 未 pad 时合并失败，与稀疏无关
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: conv_sparse_pruned_dense
+    claim: 密度 50% 但不满足每 4 个恰 2 个非零，不能走 Sparse TC；强走行会错，应走稠密 MMA
+    types:
+    - conceptual
+    - counterfactual
+    difficulty:
+    - 3
+    kind: feature
+- id: gemm_pipe
+  name: GEMM 流水公式
+  leaves:
+  - id: gemm_pipe_bytes_stage
+    claim: 每 stage 需要 (BM*BK + BN*BK) * sizeof(elem) 的 smem（不计 swizzle padding）；stages=3 则乘 3
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    kind: formula
+  - id: gemm_pipe_overlap
+    claim: 隐藏 TMA 延迟需要 stages >= ceil(TMA_lat / MMA_lat_per_tile)，stage 不够时 scoreboard 上升
+    types:
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: gemm_pipe_wgmma_wait
+    claim: wgmma.wait_group 与 TMA mbarrier wait 是两条流水，只等其中一个会读错
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 4
+    kind: failure
+  - id: gemm_pipe_epilogue_start
+    claim: K 未完成时提前 epilogue 写 C 会写出部分和，必须 wait 最后一次 MMA
+    types:
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: gemm_pipe_bytes_ab
+    claim: 单 stage 的 A+B smem = (BM*BK + BN*BK)*sizeof；BM=BN=128 BK=32 FP16 为 16KB，stages=4 则 64KB
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    kind: formula
+  - id: gemm_pipe_tma_mbar
+    claim: TMA 完成必须 mbarrier wait 后才能 wgmma；只 wait_group 等 MMA 完成不能代替数据到达
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 4
+    kind: failure
+  - id: gemm_pipe_k_tail
+    claim: K 尾小于 BK 时仍占一整 stage 缓冲；不 predication 会把 padding 当有效 K 累加
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    kind: failure
+  - id: gemm_pipe_reg_acc
+    claim: acc 寄存器块 = (BM/warp_m)*(BN/warp_n)*atom 个向量；BM=256 可能挤掉 pipeline 的 stage 寄存器
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+- id: softmax_num
+  name: Softmax 数值
+  leaves:
+  - id: softmax_num_max_first
+    claim: softmax 必须先减 max 再 exp；online 版 l_new = exp(m_old-m_new)*l_old + sum(exp(x-m_new))
+    types:
+    - conceptual
+    - code_complete
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: softmax_num_fp16_exp
+    claim: FP16 exp 在 x>11 左右溢到 Inf，flash attention 在 tile 内仍建议 FP32 累加 running l
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: softmax_num_warp_max
+    claim: warp max 用 shfl_xor 树，mask 必须覆盖参与 lane；部分 mask 会得到局部 max 导致整行 rescale 错
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+  - id: softmax_num_causal
+    claim: causal mask 应在 max/exp 之前把未来位置设为 -inf，之后再 max，否则 max 来自非法位置
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: softmax_num_logsumexp
+    claim: logsoftmax = x - m - log(sum exp(x-m))；用 softmax 再 log 在近 0 处丢精度
+    types:
+    - conceptual
+    - code_complete
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: softmax_num_ftz
+    claim: exp 下溢到非规格化后 FTZ 变 0，running l 可能变成 0 再除零；tile 内应用 FP32 l
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: softmax_num_row_split
+    claim: 一行拆多 warp 必须先跨 warp 再 max；只做 warp-local max 会得到偏大的 exp 和
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 3
+    kind: failure
+  - id: softmax_num_inf_mask
+    claim: mask 应写 -inf 再参与 max；写 0 会让非法位置在全负行上变成 max
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+- id: attn_arith
+  name: Attention tiling 算术
+  leaves:
+  - id: attn_arith_sram
+    claim: Q tile Br×d 与 K tile Bc×d 的 smem ≈ (Br+Bc)*d*sizeof + S 不物化；d=128 FP16 Br=Bc=64 约 32KB 级
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: attn_arith_flops
+    claim: attention FLOP ≈ 4 N^2 d（QK^T 与 PV 各 2N^2 d 量级），AI 随 d 上升、随 N 的 SRAM tile 限制变化
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: attn_arith_causal_bc
+    claim: causal 下每行有效 Bc 不同，负载不均；固定 Bc 不做 predication 会读未来 K
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: attn_arith_gqa
+    claim: GQA 下 K/V head 数 < Q head，tile 循环应按 kv_head 映射，不能假设 1:1 head 对齐
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: attn_arith_smem_qkv
+    claim: smem ≈ (Br*d + Bc*d)*sizeof(Q/K) + Br*Bc*sizeof(S或acc)；S 不物化则去掉 Br*Bc 项，d=128 FP16 Br=Bc=64 约 32KB
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: attn_arith_occupancy
+    claim: d=128 FP16 Br=Bc=128 的 QK tile 已超许多架构 CTA smem 上限，必须降 Br/Bc 而不是指望 Occupancy API 自动切
+    types:
+    - optimization
+    - counterfactual
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+  - id: attn_arith_gqa_repeat
+    claim: GQA 下每个 KV head 对应 q_heads/kv_heads 个 Q head；8 Q / 1 KV 时重复因子=8，用 1 会读错 K 头
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: formula
+  - id: attn_arith_causal_flops
+    claim: causal 大约把 QK/PV FLOP 减半，但固定 Bc tile 仍可能读满 Bc，需 predication 才能拿到这 1/2
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+- id: gemm_swizzle
+  name: GEMM smem swizzle
+  leaves:
+  - id: gemm_swizzle_xor
+    claim: col = col ^ (row % n) 类 swizzle 把 32-bit bank 冲突打散；n 取 8 对 FP32 128 列常见
+    types:
+    - layout
+    - code_complete
+    difficulty:
+    - 3
+    kind: formula
+  - id: gemm_swizzle_ldmatrix
+    claim: ldmatrix 要求 smem 8x8/16x16 的 K-major 布局；swizzle 后物理地址变了，描述必须与 TMA box 一致
+    types:
+    - layout
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: gemm_swizzle_pad
+    claim: padding 成 33 列可解 32-bit 冲突但浪费带宽；swizzle 不增字节，padding 增 33/32 倍行跨度
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: gemm_swizzle_vec
+    claim: 128-bit 向量 load 要求 16B 对齐；swizzle 后若某 lane 地址只 8B 对齐，向量指令非法
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    kind: failure
+  - id: gemm_swizzle_phase
+    claim: 双缓冲两块必须用同一 swizzle 函数；phase 间公式不同会导致 MMA 读错 B 面板
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 3
+    kind: failure
+  - id: gemm_swizzle_cute
+    claim: CuTe Swizzle<B,M,S> 的 B 是 xor 位数；B=0 等于无 swizzle，不是“自动选最优”
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: gemm_swizzle_bank32
+    claim: 共享内存 32 个 bank，每 bank 4B；FP16 两列占 4B 同一 bank 当 row stride 为 32 half 且无 xor
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: gemm_swizzle_tma
+    claim: TMA 描述符的 swizzle 模式必须与 smem 解读一致；描述 128B swizzle、kernel 按 32B 解读会错 tile
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 4
+    kind: failure
+- id: scan_device
+  name: Device-wide scan
+  leaves:
+  - id: scan_device_lookback
+    claim: decoupled look-back 用前缀 flag 的 acquire 读上一 CTA 的 inclusive；缺 fence 会读到局部未完成前缀
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: scan_device_single_pass
+    claim: 单遍 scan 依赖 CTA 按 tile id 递增发布；grid-stride 乱序完成时 look-back 可能自旋
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: scan_device_exclusive
+    claim: device exclusive scan 的全局 out[0]=identity，out[i]=sum(in[0..i-1])；与 block exclusive 拼接要扣掉块内自身
+    types:
+    - code_complete
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: scan_device_temp
+    claim: CUB DeviceScan temp 随 tile 数增长，不是常数；n 从 1e6 升到 1e8 必须重新查询 bytes
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: scan_device_det
+    claim: 整数 scan 确定；浮点 scan 的结合树固定才逐 bit 确定，并行 look-back 的浮点加法顺序仍可能变
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: scan_device_alias
+    claim: 部分 DeviceScan 允许 in==out；与 temp 别名仍非法
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: scan_device_init
+    claim: inclusive scan 不写独立 identity 槽；把 exclusive 的 identity 语义套到 inclusive 会多一个 0 元素
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: scan_device_warp_agg
+    claim: CTA 内先 warp scan 再把 warp 和做 block scan；漏掉 warp 和这一级会得到每 32 元局部前缀
+    types:
+    - code_complete
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+- id: flash_bwd
+  name: FlashAttention 反向
+  leaves:
+  - id: flash_bwd_recompute
+    claim: 反向重算 softmax 而不是存 S；重算必须用正向保存的 m/l，缺统计只能物化 S
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: flash_bwd_dO
+    claim: dO tile 与 O 同 Br×d；smem 同时驻留 Q/K/V/dO 时 Br/Bc 通常比正向更小
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+  - id: flash_bwd_ds
+    claim: dS = P ⊙ (dP - rowsum(dP ⊙ P)) 一类恒等式；漏减 rowsum 项梯度偏置
+    types:
+    - conceptual
+    - code_complete
+    difficulty:
+    - 4
+    kind: formula
+  - id: flash_bwd_causal
+    claim: causal 反向仍须挡住未来位置；只在正向 mask 会让 dK/dV 含未来 token 梯度
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: flash_bwd_atomic
+    claim: dQ 按序列散射时可能原子加；原子浮点加破坏确定性，训练对拍失败不一定是正向错
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+  - id: flash_bwd_sram
+    claim: 反向峰值 smem 常 ≥ 正向；正向刚好 100KB 的 tile 在反向可能无法 launch
+    types:
+    - optimization
+    - counterfactual
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+  - id: flash_bwd_gqa
+    claim: GQA 反向把多个 Q head 的 dK/dV 累到同一 KV head；8 Q / 1 KV 时漏累加会少因子 8
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: flash_bwd_dropout
+    claim: 反向必须用正向同一 dropout mask；重新采样等于对另一稀疏模式求梯度
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+- id: conv_im2col
+  name: im2col 与 implicit GEMM
+  leaves:
+  - id: conv_im2col_expand
+    claim: 显式 im2col 输出列数 = kH*kW*C，行数 = N*Ho*Wo；k=3 C=64 时列=576，缓冲远超原图
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: conv_im2col_implicit
+    claim: implicit GEMM 不物化该矩阵，按坐标把 GEMM k 维映射回输入像素；坐标公式错等于读错邻域
+    types:
+    - compare
+    - code_complete
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: conv_im2col_winograd
+    claim: Winograd F(2x2,3x3) 降低乘法但增加变换；小通道或大 stride 时常不如 implicit GEMM
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 3
+    kind: feature
+  - id: conv_im2col_nhwc
+    claim: NHWC 下 channel 连续，implicit k 维向量化好；NCHW 要把 C 做成 stride，同一 tile 代码合并失败
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: conv_im2col_pad
+    claim: padding 像素在 implicit 路径用 predication 或零填充；im2col 物化时必须写出 0，漏 pad 等于缩小核
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: conv_im2col_stride
+    claim: stride=2 时输出空间减约 4 倍，im2col 行数按 Ho*Wo 计不是 Hi*Wi
+    types:
+    - conceptual
+    - layout
+    difficulty:
+    - 2
+    kind: formula
+  - id: conv_im2col_group
+    claim: 分组卷积把 C/K 切成 group 个独立 GEMM；group=C=K 即 depthwise，implicit tile 的 k 维只剩 kH*kW
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: conv_im2col_ws
+    claim: cuDNN IMPLICIT_PRECOMP_GEMM 把索引表放 workspace；ws=0 会迫使换 algo 或失败
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 3
+    kind: api
+- id: sparse_meta
+  name: 2:4 稀疏元数据
+  leaves:
+  - id: sparse_meta_bit
+    claim: 每 4 元素选 2 个非零，metadata 用 2 bit/槽指示位置；4 选 2 有 6 种合法模式，不是任意 50% 密度
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: sparse_meta_mma_sp
+    claim: mma.sp 把稀疏 A 与 metadata 配对；只压缩值不传 metadata 得到的乘积无定义
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: sparse_meta_reorder
+    claim: 2:4 剪枝后通常要按硬件顺序重排非零；保持原稠密下标直接当稀疏 A 会乘错列
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: sparse_meta_tc_shape
+    claim: Sparse TC 形状约束与稠密 MMA 不同；沿用稠密 m16n8k16 但不走 sp 变体则忽略 sparsity
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sparse_meta_k_even
+    claim: k 维按 4 元素分组；K 不是 4 的倍数必须 pad，否则最后一组 metadata 越界
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: formula
+  - id: sparse_meta_dense_fallback
+    claim: 位置不满足 2:4 时硬件不会自动稠密回退；得到错误 C 而不是慢的正确结果
+    types:
+    - counterfactual
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: sparse_meta_e2m1
+    claim: FP8/FP4 稀疏路径仍要合法 2:4；只改 dtype 不改 metadata 宽度会错位
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+  - id: sparse_meta_cusparse
+    claim: cuSPARSE 通用 SpMM 不要求 2:4；把它的 CSR 当 Sparse TC 输入缺 metadata，不能直喂 mma.sp
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    kind: api
+- id: reduce_warp
+  name: Warp 归约
+  leaves:
+  - id: reduce_warp_shfl_mask
+    claim: shfl_xor_sync 的 mask 必须覆盖参与 lane；mask=0xFFFF 只归约半 warp，整 warp 和被截断
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: reduce_warp_activemask
+    claim: activemask() 随发散变化；把它当恒定 0xFFFFFFFF 在分支里归约会丢 lane
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 3
+    kind: failure
+  - id: reduce_warp_cg_reduce
+    claim: coalesced_group.reduce 只归约当前 coalesced 集合；发散后集合 <32，结果不是整 warp 和
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: reduce_warp_plus_f32
+    claim: 浮点 shfl 归约树顺序固定则 warp 内确定；再 atomicAdd 跨 warp 后整 device 仍非确定
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: reduce_warp_ballot
+    claim: ballot_sync 计数 popc 可做布尔归约；对 float 求和不能用 ballot 代替 shfl add
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    kind: api
+  - id: reduce_warp_reg
+    claim: ITEMS_PER_THREAD>1 时先线程局部加再 shfl；只 shfl 第一个寄存器会漏掉其余 item
+    types:
+    - code_complete
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: reduce_warp_broadcast
+    claim: tid=0 的结果需 shfl 广播给写回 lane；只让 lane0 写全局时其他 lane 的共享状态不能当已发布
+    types:
+    - code_complete
+    - debug
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: reduce_warp_sync
+    claim: shfl_sync 自带参与者同步；先 shfl 再按旧非 sync  intrinsic 混用在 Volta+ 上是未定义
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+- id: gemm_pred
+  name: GEMM 边界 predication
+  leaves:
+  - id: gemm_pred_m_tail
+    claim: M 不是 BM 倍数的尾块必须 mask 写 C；不 mask 会越过 C 的 m 维写坏邻接内存
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: gemm_pred_n_vec
+    claim: N 尾不足向量宽度时不能发 128-bit 存；用预测关掉多余 lane 或改标量存
+    types:
+    - code_complete
+    - layout
+    difficulty:
+    - 3
+    kind: api
+  - id: gemm_pred_k_pad
+    claim: K pad 到 BK 时 pad 元素必须为 0；未清 smem pad 等于给 GEMM 加了随机 K 列
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: gemm_pred_epilogue_bias
+    claim: bias 只加有效 n 列；尾块向量加载 bias 越界会污染有效列或 OOB
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 3
+    kind: failure
+  - id: gemm_pred_ld
+    claim: predication 比较的是逻辑 (m,n) 与 (M,N)，不是线性 tid；用 tid<M*N 在二维 tile 上会漏遮挡
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: gemm_pred_beta
+    claim: beta≠0 时要先读 C 再写；尾块读 C 也要 predication，否则读 OOB
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: gemm_pred_occupancy
+    claim: 尾块 CTA 有效工作少但启动整块；大量尾块会拉低有效吞吐，应改 grid 而不是加占用
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: numeric
+  - id: gemm_pred_tma
+    claim: TMA 越界填充值由 desc 指定（零或 OOB）；依赖未定义填充当 0 会在边界 K 引入垃圾
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: feature

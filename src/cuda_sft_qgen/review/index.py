@@ -34,6 +34,15 @@ class VectorIndex:
         self._mat = np.concatenate([self._mat, vecs], axis=0)
         self.ids.extend(ids)
 
+    def vector_for(self, qid: str) -> np.ndarray | None:
+        if self._mat is None:
+            return None
+        try:
+            i = self.ids.index(qid)
+        except ValueError:
+            return None
+        return np.asarray(self._mat[i], dtype=np.float32)
+
     def search(
         self, vectors: np.ndarray, top_k: int = 8
     ) -> tuple[np.ndarray, np.ndarray]:

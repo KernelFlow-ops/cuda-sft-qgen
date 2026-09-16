@@ -1,0 +1,534 @@
+id: T22
+name: 虚拟内存与分配器
+children:
+  - id: vmm_map
+    name: VMM 预留与映射
+    leaves:
+      - id: vmm_map_va_pa
+        claim: "CUDA VMM 把 VA 预留（cuMemAddressReserve）与物理分配（cuMemCreate）分开，未 cuMemMap 的 VA 访问会 page fault，而不是自动提交页。"
+        types: [conceptual, debug]
+        difficulty: [3]
+        kind: mechanism
+      - id: vmm_map_api
+        claim: "合法序列是 cuMemAddressReserve → cuMemCreate → cuMemMap → cuMemSetAccess；缺 SetAccess 的 map 仍对 kernel 不可读写。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: vmm_map_granularity
+        claim: "cuMemMap 的 offset 与 size 必须满足 offset % granularity == 0 且 size % granularity == 0，granularity 由 cuMemGetAllocationGranularity 给出。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: vmm_map_no_access
+        claim: "Map 后不调用 cuMemSetAccess，kernel 解引用该 VA 会触发 illegal access（memcheck 可见），host cudaMemcpy 同样失败。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: failure
+        hints: ["只 Map 不 SetAccess", "PROT_NONE 后 kernel 写"]
+      - id: vmm_map_unmap_remap
+        claim: "cuMemUnmap(va, size) 只拆掉 VA→物理 的映射，CUmemGenericAllocationHandle 仍持有物理页；随后可把同一 handle 再 cuMemMap 到另一 VA，实现不拷贝的搬迁。"
+        types: [conceptual, optimization]
+        difficulty: [3]
+        kind: mechanism
+      - id: vmm_map_partial
+        claim: "允许只把 handle 的 [offset, offset+len) 映射进预留 VA 的一个子区间，未映射空洞对 kernel 仍是 MMU fault；稀疏提交靠多次 Map，不是 cudaMalloc 式整段提交。"
+        types: [layout, conceptual]
+        difficulty: [3, 4]
+        kind: mechanism
+      - id: vmm_map_overlap
+        claim: "对已映射且未 Unmap 的 VA 再 cuMemMap 会失败（CUDA_ERROR_ALREADY_MAPPED 一类）；不能靠重叠 Map 做 alias，必须先 Unmap。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: failure
+      - id: vmm_map_release_order
+        claim: "释放顺序是 cuMemUnmap → cuMemRelease(handle) → cuMemAddressFree(va, size)；先 Release 仍 mapped 的 handle、或先 AddressFree 仍 mapped 的 VA，行为未定义或返回错误。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: vmm_map_peer_access
+        claim: "cuMemSetAccess 的 CUmemAccessDesc.location 可指向 peer GPU；仅 cudaDeviceEnablePeerAccess 不能让 VMM 映射对 peer kernel 可读写，必须对该 VA 显式 SetAccess。"
+        types: [syntax, compare]
+        difficulty: [3, 4]
+        kind: api
+      - id: vmm_map_cuda102
+        claim: "cuMemAddressReserve/cuMemCreate/cuMemMap/cuMemSetAccess 自 CUDA 10.2 起作为 Driver API 提供；runtime 的 cudaMalloc 不会隐式走这套可拆映射。"
+        types: [conceptual, compare]
+        difficulty: [2, 3]
+        kind: feature
+  - id: fabric_multicast
+    name: Fabric 与 multicast
+    leaves:
+      - id: fabric_multicast_handle
+        claim: "CUmemAllocationProp.requestedHandleTypes 含 CU_MEM_HANDLE_TYPE_FABRIC 时，cuMemExportToShareableHandle 才能导出 fabric handle 给其他进程/节点。"
+        types: [syntax, conceptual]
+        difficulty: [3, 4]
+        kind: api
+      - id: fabric_multicast_imex
+        claim: "Fabric 物理页通过 IMEX/NVLink 在多 GPU 间共享同一 allocation handle，映射到各进程独立 VA；这不是 cudaMalloc 后再 cudaIpcGetMemHandle 的别名。"
+        types: [conceptual, compare]
+        difficulty: [4]
+        kind: mechanism
+      - id: fabric_multicast_cu
+        claim: "CUDA 12.3+ 在 Hopper+NVSwitch 上提供 cuMulticastCreate/BindAddr：多设备 VA 绑定同一 multicast 对象，TMA multicast 才能对 fabric 内存发。"
+        types: [syntax, conceptual]
+        difficulty: [4]
+        kind: feature
+      - id: fabric_multicast_no_nvswitch
+        claim: "在没有 NVSwitch/fabric 支持的 PCIe 拓扑上 cuMulticastAddDevice 失败；不能把 P2P enable 当成 multicast 已可用。"
+        types: [debug, counterfactual]
+        difficulty: [3, 4]
+        kind: failure
+      - id: fabric_multicast_cuda124
+        claim: "CU_MEM_HANDLE_TYPE_FABRIC 作为 VMM 导出类型自 CUDA 12.4 起可用，并要求 IMEX daemon；CUDA 12.3 的 multicast API 不等于已有 fabric handle。"
+        types: [conceptual, syntax]
+        difficulty: [4]
+        kind: feature
+      - id: fabric_multicast_import
+        claim: "对端必须 cuMemImportFromShareableHandle(..., CU_MEM_HANDLE_TYPE_FABRIC) 得到本地 allocation handle，再对本进程 VA 做 Map/SetAccess；不能把 CUmemFabricHandle 当设备指针用。"
+        types: [syntax, debug]
+        difficulty: [3, 4]
+        kind: api
+      - id: fabric_multicast_posix
+        claim: "CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR 只覆盖同机 OS IPC；跨节点必须用 FABRIC。Create 时可按位或请求多种 handle type，导出仍要按类型各调一次 Export。"
+        types: [compare, conceptual]
+        difficulty: [3, 4]
+        kind: mechanism
+      - id: fabric_multicast_handle_bytes
+        claim: "CUmemFabricHandle 是长度为 CU_IPC_HANDLE_SIZE=64 字节的不透明 blob，不是 8 字节设备指针；按指针宽度 memcpy 会截断句柄。"
+        types: [layout, debug]
+        difficulty: [3]
+        kind: numeric
+      - id: fabric_multicast_imex_denied
+        claim: "导入进程未加入导出进程同一 IMEX channel 时，cuMemImportFromShareableHandle 对 FABRIC 返回 CUDA_ERROR_NOT_PERMITTED，不是粒度或对齐错误。"
+        types: [debug, counterfactual]
+        difficulty: [4]
+        kind: failure
+      - id: fabric_multicast_bindmem
+        claim: "cuMulticastBindMem 绑定的是 VMM allocation handle，cuMulticastBindAddr 绑定已映射 VA；未先 Create/AddDevice 就 Bind，multicast 对象不能给 TMA 用。"
+        types: [syntax, debug]
+        difficulty: [4]
+        kind: api
+  - id: mempool
+    name: Mempool
+    leaves:
+      - id: mempool_reuse
+        claim: "cudaMemPool 在同一设备上缓存已释放块，cudaMallocAsync 优先从池复用，避免每次向 OS/驱动提交新页。"
+        types: [conceptual, optimization]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: mempool_api
+        claim: "cudaMemPoolCreate + cudaMallocFromPoolAsync / cudaDeviceSetMemPool 指定池；cudaMemPoolSetAttribute(..., RELEASE_THRESHOLD, &bytes) 控制归还水位。"
+        types: [syntax, optimization]
+        difficulty: [2, 3]
+        kind: api
+      - id: mempool_threshold
+        claim: "RELEASE_THRESHOLD = 0 使空闲页尽快还给驱动；阈值 = UINT64_MAX 则池一直持有已分配高水位字节数。"
+        types: [optimization, conceptual]
+        difficulty: [3]
+        kind: numeric
+      - id: mempool_cuda11
+        claim: "cudaMallocAsync/cudaFreeAsync 与 per-device default pool 自 CUDA 11.2 起可用；更早 runtime 没有流序分配器 API。"
+        types: [conceptual, syntax]
+        difficulty: [2]
+        kind: feature
+      - id: mempool_default
+        claim: "cudaDeviceGetDefaultMemPool(&pool, device) 取出该设备默认池；cudaMallocAsync(..., stream) 在未 SetMemPool 时走默认池，不是无名的裸 cudaMalloc。"
+        types: [syntax, conceptual]
+        difficulty: [2, 3]
+        kind: api
+      - id: mempool_trim
+        claim: "cudaMemPoolTrimTo(pool, minBytesToKeep) 把池内空闲缓存压到 ≥minBytesToKeep；TrimTo(0) 尽量归还驱动，但不回收仍被未完成 stream 占用的块。"
+        types: [optimization, profiling]
+        difficulty: [3]
+        kind: api
+      - id: mempool_peer
+        claim: "cudaMemPoolSetAccess(pool, descs, count) 才能让 peer GPU 的 cudaMallocAsync 指针被对方 kernel 合法解引用；只 EnablePeerAccess 不够。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: mechanism
+      - id: mempool_reuse_event
+        claim: "CUDA 11.2+ 属性 REUSE_FOLLOW_EVENT_DEPENDENCIES=1 时，池可在看到 cudaStreamWaitEvent 依赖后跨 stream 复用块；关掉则只在同一 stream 的 free→malloc 序上复用。"
+        types: [optimization, conceptual]
+        difficulty: [3]
+        kind: feature
+      - id: mempool_ipc
+        claim: "cudaMemPoolExportToShareableHandle / ImportFromShareableHandle 导出的是池本身，再 cudaMemPoolExportPointer 才能把某一块指针送给对端；把 pool handle 当设备指针用会失败。"
+        types: [syntax, conceptual]
+        difficulty: [3, 4]
+        kind: api
+      - id: mempool_from_pool
+        claim: "cudaMallocFromPoolAsync(ptr, n, pool, stream) 无视当前 DeviceSetMemPool，固定从给定 pool 分配；与 cudaMallocAsync 混用两套池时，cudaFreeAsync 必须仍按指针所属池记账。"
+        types: [compare, debug]
+        difficulty: [3]
+        kind: mechanism
+  - id: async_stream_order
+    name: 流序异步分配
+    leaves:
+      - id: async_stream_order_happens
+        claim: "cudaMallocAsync(ptr, n, stream) 的返回指针只对随后在同一 stream 上提交的工作 happens-before 可用；这是流序，不是立刻对所有 stream 可见。"
+        types: [conceptual, debug]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: async_stream_order_api
+        claim: "cudaFreeAsync(ptr, stream) 按该 stream 顺序回收；与 cudaMalloc 配对混用（一边 Async 一边同步 free）会破坏池记账。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: api
+      - id: async_stream_order_cross
+        claim: "在 stream B 上使用 stream A 刚 mallocAsync 的指针，若 B 未 cudaStreamWaitEvent(A 的分配完成)，是 use-before-ready，属于未定义。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: failure
+      - id: async_stream_order_graph
+        claim: "CUDA 11.4+ 允许在 stream capture 中使用 cudaMallocAsync，捕获的是分配动作与池依赖；CUDA 11.2 的图捕获对此支持不完整。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: feature
+      - id: async_stream_order_default
+        claim: "cudaMallocAsync(..., cudaStreamLegacy) 仍是流序，但 legacy 默认流与其它 stream 隐式同步，会把池复用的并发性打掉，几乎等价于同步分配的副作用。"
+        types: [optimization, compare]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: async_stream_order_reuse
+        claim: "同一 stream 上 cudaFreeAsync(p,s) 之后再 cudaMallocAsync(&q,n,s)，驱动可在 s 的后续 kernel 之前把同一物理块交给 q，无需设备同步。"
+        types: [optimization, conceptual]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: async_stream_order_sync_free
+        claim: "对 cudaMallocAsync 指针调用同步 cudaFree，或对 cudaMalloc 指针调用 cudaFreeAsync，池与驱动记账不一致，后续 mallocAsync 可能 double-free 或泄漏。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: failure
+      - id: async_stream_order_zero
+        claim: "cudaMallocAsync(&p, 0, stream) 成功时仍得到可 cudaFreeAsync 的唯一指针，nbytes=0；把它当 NULL 跳过 free 会漏记账。"
+        types: [syntax, conceptual]
+        difficulty: [2]
+        kind: formula
+      - id: async_stream_order_nsys
+        claim: "Nsight Systems 里 cudaMallocAsync 耗时接近 0 且无 cudaMalloc 的驱动提交，通常表示命中 mempool 复用；每次都出现长 cudaMalloc 则池未生效或 RELEASE_THRESHOLD=0 把页还掉了。"
+        types: [profiling, optimization]
+        difficulty: [3]
+        kind: numeric
+      - id: async_stream_order_event
+        claim: "跨 stream 安全用法是：A 上 mallocAsync 后 cudaEventRecord(e,A)，B 上 cudaStreamWaitEvent(B,e,0) 再使用指针；只在 host 上看到 mallocAsync 返回码=0 不够。"
+        types: [code_complete, debug]
+        difficulty: [3]
+        kind: api
+  - id: mmu_pages
+    name: MMU 与页大小
+    leaves:
+      - id: mmu_pages_walk
+        claim: "GPU MMU 把设备 VA 译成物理页；VMM 未映射空洞对 kernel 是 fault，不会像 host overcommit 那样延迟分配成功。"
+        types: [conceptual, debug]
+        difficulty: [3]
+        kind: mechanism
+      - id: mmu_pages_granularity_api
+        claim: "cuMemGetAllocationGranularity(&gran, &prop, CU_MEM_ALLOC_GRANULARITY_RECOMMENDED) 通常返回 2 MiB 级；MINIMUM 可能更小但不能假设 4 KiB 一定成功。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: api
+      - id: mmu_pages_align
+        claim: "cudaMalloc 返回指针保证至少 256-byte 对齐；VMM recommended map 粒度常见 = 2 MiB，两者不是同一数字。"
+        types: [conceptual, debug]
+        difficulty: [2, 3]
+        kind: numeric
+      - id: mmu_pages_huge
+        claim: "Hopper/Blackwell 驱动可为大 VMM 分配使用远大于 2 MiB 的页（数十到数百 MiB 级），以降低 TLB miss；sm_70 上不能假设同样的 huge page 策略。"
+        types: [optimization, conceptual]
+        difficulty: [3, 4]
+        kind: feature
+      - id: mmu_pages_fault
+        claim: "kernel 读未 Map 或 PROT_NONE 的 VA 产生 MMU fault → illegal address，cuda-memcheck/compute-sanitizer 报 invalid global read，不是 UVM 那种可恢复迁移。"
+        types: [debug, profiling]
+        difficulty: [3]
+        kind: failure
+      - id: mmu_pages_minimum
+        claim: "MINIMUM 粒度是 cuMemCreate/Map 能成功的下限；用小于 MINIMUM 的 size 调用 cuMemCreate 失败。RECOMMENDED 才是驱动偏好的 TLB 友好大小。"
+        types: [compare, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: mmu_pages_pad
+        claim: "padded_size = ceil(request / granularity) * granularity；例如 request=1 字节且 gran=2 MiB=2097152，则 cuMemCreate 必须提交 2097152 字节。"
+        types: [optimization, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: mmu_pages_tlb
+        claim: "把 1 GiB 工作集拆成 N 个独立 2 MiB handle 再 Map，TLB 项数 ≈ N；合成一个 1 GiB handle 可减少 walk/miss，Nsight 的 Elapsed Cycles 里会出现更多 MIO/TLB stall。"
+        types: [profiling, optimization]
+        difficulty: [3, 4]
+        kind: numeric
+      - id: mmu_pages_no_4k
+        claim: "不能按 host 4 KiB 页去 Map GPU VMM；多数桌面/服务器 GPU 上 MINIMUM 已是 2 MiB=2**21 字节，4 KiB 请求会失败。"
+        types: [debug, counterfactual]
+        difficulty: [2, 3]
+        kind: failure
+      - id: mmu_pages_hole
+        claim: "Unmap 中间一段后，两侧仍 mapped 的 VA 形成空洞：线性 kernel 指针算术跨过空洞即 fault，VA 连续不等于物理连续或全部可访问。"
+        types: [layout, debug]
+        difficulty: [3]
+        kind: mechanism
+  - id: cuda_malloc
+    name: 同步 cudaMalloc
+    leaves:
+      - id: cuda_malloc_sync_ready
+        claim: "cudaMalloc 在返回后把指针对当前设备上所有 stream 立即可用，不建立 stream happens-before；这与 cudaMallocAsync 的流序语义相反。"
+        types: [conceptual, compare]
+        difficulty: [2]
+        kind: mechanism
+      - id: cuda_malloc_api
+        claim: "cudaMalloc(void **devPtr, size_t size) / cudaFree(devPtr) 是 Runtime 同步堆 API；Driver 对应 cuMemAlloc/cuMemFree，不是 cuMemCreate。"
+        types: [syntax, conceptual]
+        difficulty: [1, 2]
+        kind: api
+      - id: cuda_malloc_align256
+        claim: "cudaMalloc 保证设备指针至少 256-byte 对齐，即 (uintptr_t)ptr % 256 == 0；float4 的 16B 与 cache line 的 128B 都弱于该保证。"
+        types: [layout, conceptual]
+        difficulty: [2]
+        kind: numeric
+      - id: cuda_malloc_zero
+        claim: "size=0 时 cudaMalloc 仍返回 cudaSuccess 且 *devPtr 为可 cudaFree 的唯一非空指针；把返回值当 NULL 跳过 free 会泄漏驱动侧分配记录。"
+        types: [syntax, debug]
+        difficulty: [2]
+        kind: formula
+      - id: cuda_malloc_oom
+        claim: "设备堆耗尽时 cudaMalloc 返回 cudaErrorMemoryAllocation 且 *devPtr 不可用；它不会回退到 VMM 稀疏 Map，也不会自动 evict UVM 页来凑额度。"
+        types: [debug, counterfactual]
+        difficulty: [2, 3]
+        kind: failure
+      - id: cuda_malloc_capture
+        claim: "stream capture 期间调用同步 cudaMalloc/cudaFree 使捕获失败；必须改成 cudaMallocAsync/cudaFreeAsync（CUDA 11.4+）或在捕获外分配。"
+        types: [debug, syntax]
+        difficulty: [3]
+        kind: failure
+      - id: cuda_malloc_free_sync
+        claim: "传统 cudaFree 可能插入设备同步；CUDA 11.7+ 在无未完成工作且指针来自同步分配时往往不再同步，但仍不是 stream-ordered free，不能替代 cudaFreeAsync。"
+        types: [conceptual, compare]
+        difficulty: [3]
+        kind: feature
+      - id: cuda_malloc_first_call
+        claim: "进程内第一次 cudaMalloc 常伴随上下文创建，Nsight Systems 上可见数十到数百 ms 的 Runtime API；后续同尺寸分配若仍很慢，才是碎片/同步问题。"
+        types: [profiling, optimization]
+        difficulty: [2, 3]
+        kind: numeric
+      - id: cuda_malloc_no_fabric
+        claim: "cudaMalloc 指针不能传给 cuMemExportToShareableHandle；fabric/POSIX shareable handle 只接受 cuMemCreate 得到的 CUmemGenericAllocationHandle。"
+        types: [compare, debug]
+        difficulty: [3]
+        kind: api
+      - id: cuda_malloc_vs_async
+        claim: "cudaMalloc 走设备同步堆，cudaMallocAsync 走 mempool；同一程序混用两套堆时，cudaFree 不能回收 async 块，峰值显存 ≈ 两套高水位之和。"
+        types: [optimization, compare]
+        difficulty: [2, 3]
+        kind: mechanism
+  - id: aligned_alloc
+    name: 对齐与 pitched 分配
+    leaves:
+      - id: aligned_alloc_pitch_api
+        claim: "cudaMallocPitch(&ptr, &pitch, widthBytes, height) 返回的 pitch 是每行字节步长且 pitch ≥ widthBytes；kernel 地址 = ptr + y * pitch + x * elemSize。"
+        types: [syntax, layout]
+        difficulty: [2, 3]
+        kind: api
+      - id: aligned_alloc_pitch_formula
+        claim: "2D 元素 (x,y) 的字节偏移 offset = y * pitch + x * sizeof(T)，总分配 ≥ pitch * height；把 pitch 当元素个数会按 sizeof(T) 再乘一次而越界。"
+        types: [layout, debug]
+        difficulty: [2]
+        kind: formula
+      - id: aligned_alloc_3d
+        claim: "cudaMalloc3D(&pitchedDevPtr, extent) 的 extent.width 以字节计，height/depth 以元素行/层计；与 cudaMalloc3DArray 的 CUDA array 不是同一对象。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: api
+      - id: aligned_alloc_async_256
+        claim: "cudaMallocAsync 与 cudaMalloc 一样保证 256B 对齐，但不提供 pitch；二维核若假设 pitch==N*sizeof(T) 在 N*sizeof(T) 不是硬件偏好步长时会错行。"
+        types: [compare, layout]
+        difficulty: [2, 3]
+        kind: numeric
+      - id: aligned_alloc_vmm_va
+        claim: "cuMemAddressReserve 的 alignment 参数必须是 granularity 的幂次倍数（0 表示默认）；VA 基址未对齐则后续 cuMemMap 失败，与 cudaMalloc 的 256B 无关。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: aligned_alloc_float4
+        claim: "vectorized float4 要求地址 % 16 == 0；cudaMalloc 的 256B 对齐覆盖该约束，但从 VMM 映射中取 offset=8 的子指针再 float4 加载会 misaligned fault 或拆成标量。"
+        types: [debug, layout]
+        difficulty: [2, 3]
+        kind: failure
+      - id: aligned_alloc_host
+        claim: "cudaMallocHost/cudaHostAlloc 得到页锁定主机内存，对齐通常是页大小（4 KiB）级，不是设备 256B 保证的替代；设备 kernel 不能直接解引用该主机指针，除非 mapped。"
+        types: [compare, conceptual]
+        difficulty: [2]
+        kind: mechanism
+      - id: aligned_alloc_tex_linear
+        claim: "绑定线性内存做 texture 时，cudaMalloc 的 256B 对齐仍可能不满足 1D linear texture 的 512B 基址要求，需按 cudaDeviceProp.textureAlignment 对齐。"
+        types: [layout, debug]
+        difficulty: [3]
+        kind: numeric
+      - id: aligned_alloc_posix
+        claim: "host posix_memalign/aligned_alloc 不能分配设备 VA；把对齐后的主机指针传给 kernel 是非法地址。设备对齐只能 cudaMalloc/VMM/pitch 系列。"
+        types: [debug, counterfactual]
+        difficulty: [1, 2]
+        kind: failure
+      - id: aligned_alloc_sm80
+        claim: "sm_80+ 的 cp.async.cg 16B 要求 smem/global 16B 对齐；global 侧 cudaMalloc 已满足，但手工把 VMM 映射切成 8B 偏移的 tile 会让 cp.async 静默失败或 trap。"
+        types: [optimization, debug]
+        difficulty: [3]
+        kind: feature
+  - id: managed_vs_vmm
+    name: Managed 与 VMM
+    leaves:
+      - id: managed_vs_vmm_migrate
+        claim: "cudaMallocManaged 的物理页可在 CPU 与 GPU 间迁移；VMM cuMemCreate 的 PINNED 设备页钉在 location 上，不会因为 CPU 解引用而搬到主机。"
+        types: [conceptual, compare]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: managed_vs_vmm_api
+        claim: "cudaMallocManaged(&p, size, flags) 的 flags 为 cudaMemAttachGlobal 或 cudaMemAttachHost；它不返回 CUmemGenericAllocationHandle，不能 cuMemMap。"
+        types: [syntax, compare]
+        difficulty: [2, 3]
+        kind: api
+      - id: managed_vs_vmm_concurrent
+        claim: "sm_60+ 且 cudaDevAttrConcurrentManagedAccess=1 时，CPU 与 GPU 可同时访问同一 managed 分配（一致性由 UVM 处理）；VMM 设备页对 CPU 解引用仍是非法的，除非另 map 到 host NUMA。"
+        types: [conceptual, debug]
+        difficulty: [3]
+        kind: feature
+      - id: managed_vs_vmm_oversub
+        claim: "Linux 上 managed 允许工作集超过物理显存（靠迁移/换出）；cuMemCreate 在设备物理不足时直接失败，VMM 只能多预留 VA、少 Map 物理来“稀疏”，不是 UVM oversubscribe。"
+        types: [compare, optimization]
+        difficulty: [3]
+        kind: mechanism
+      - id: managed_vs_vmm_attach
+        claim: "cudaMemAttachHost 使该 managed 段在 GPU 访问前必须 cudaStreamAttachMemAsync 到流；这与 VMM 的 SetAccess PROT 是两套权限模型，不能互相替代。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: api
+      - id: managed_vs_vmm_fault_type
+        claim: "managed 的首次 GPU touch 是可恢复的 UVM page fault（伴随迁移）；VMM 未映射地址是不可恢复 illegal access。用 compute-sanitizer 看到的 fault 类别不同。"
+        types: [debug, profiling]
+        difficulty: [3]
+        kind: failure
+      - id: managed_vs_vmm_cuda6
+        claim: "cudaMallocManaged 自 CUDA 6.0 引入；VMM Driver API 自 CUDA 10.2。不能在只保证 CUDA 9 的代码路径里调用 cuMemCreate。"
+        types: [conceptual, syntax]
+        difficulty: [2]
+        kind: feature
+      - id: managed_vs_vmm_ptr_kind
+        claim: "cudaPointerGetAttributes 对 managed 指针的 type 为 cudaMemoryTypeManaged；对 VMM Map 后的设备 VA 通常是 cudaMemoryTypeDevice。用错类型去做 prefetch 或 Host 解引用会失败。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: api
+      - id: managed_vs_vmm_no_handle
+        claim: "对 cudaMallocManaged 指针调用 cuMemRetainAllocationHandle 不能得到可 Export 的 fabric handle；IPC 应走 cudaIpcGetMemHandle（且 managed/IPC 限制更多）。"
+        types: [compare, debug]
+        difficulty: [3, 4]
+        kind: failure
+      - id: managed_vs_vmm_page_gran
+        claim: "UVM 迁移粒度常见为 64 KiB（或更大 huge page），VMM Map 粒度常见 2 MiB；同一 256 KiB 缓冲：managed 可能按 4 个 64 KiB 页迁，VMM 仍要提交 2 MiB。"
+        types: [optimization, conceptual]
+        difficulty: [3]
+        kind: numeric
+  - id: prefetch_vs_map
+    name: Prefetch 与 Map
+    leaves:
+      - id: prefetch_vs_map_prefetch
+        claim: "cudaMemPrefetchAsync(ptr, count, dstDevice, stream) 把 managed 页按流序迁到 dstDevice；它不创建 VMM 映射，对纯 cudaMalloc 设备指针是空操作或错误。"
+        types: [conceptual, compare]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: prefetch_vs_map_map
+        claim: "cuMemMap 把已有物理 handle 安装进 VA，没有“迁移”语义：物理页事先就在 cuMemCreate 的 location 上，Map 只改页表。"
+        types: [conceptual, compare]
+        difficulty: [3]
+        kind: mechanism
+      - id: prefetch_vs_map_api
+        claim: "cudaMemAdvise(ptr, count, cudaMemAdviseSetPreferredLocation, device) 只影响后续 UVM 放置策略；VMM 权限必须 cuMemSetAccess，Advise 改不了 PROT。"
+        types: [syntax, compare]
+        difficulty: [2, 3]
+        kind: api
+      - id: prefetch_vs_map_cuda8
+        claim: "cudaMemPrefetchAsync / cudaMemAdvise 自 CUDA 8.0 起可用；它们不能替代 CUDA 10.2 的 cuMemMap，也不能把未 Map 的 VMM 空洞变合法。"
+        types: [conceptual, syntax]
+        difficulty: [2]
+        kind: feature
+      - id: prefetch_vs_map_cpu
+        claim: "dstDevice=cudaCpuDeviceId 时 prefetch 把 managed 页拉到主机；对 VMM 设备 PINNED 分配这样做不会变成可解引用的 malloc 主机指针。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: failure
+      - id: prefetch_vs_map_align
+        claim: "prefetch 的 ptr 与 count 应对齐到 UVM 页粒度（常见 64 KiB）：未对齐时驱动会扩到整页，可能把邻居 managed 分配一并迁走。"
+        types: [optimization, layout]
+        difficulty: [3]
+        kind: numeric
+      - id: prefetch_vs_map_first_touch
+        claim: "不做 prefetch 时，managed 的第一次 kernel 读产生迁移故障，Nsight 可见大量 GPU page faults；等价的 VMM 路径应在 launch 前 Map+SetAccess，否则直接 illegal。"
+        types: [profiling, compare]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: prefetch_vs_map_readonly
+        claim: "cudaMemAdviseSetReadMostly 可在多设备间复制 managed 只读副本；VMM 要只读共享应对各设备 SetAccess PROT_READ，不会自动复制物理页。"
+        types: [optimization, compare]
+        difficulty: [3]
+        kind: mechanism
+      - id: prefetch_vs_map_stream
+        claim: "PrefetchAsync 与后续 kernel 必须同一 stream 或插入 1 个 event wait；host 见返回码=0 不代表页已到位。VMM Map 同步改页表，返回后即可 launch。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: prefetch_vs_map_vmm_hole
+        claim: "对 VMM 未 Map 空洞调用 cudaMemPrefetchAsync 不能补页；正确动作是 cuMemCreate+cuMemMap，把 prefetch 当 commit 会留下 fault。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: failure
+  - id: vmm_props
+    name: 分配属性与句柄
+    leaves:
+      - id: vmm_props_pinned_type
+        claim: "CUmemAllocationProp.type 目前设备分配必须是 CU_MEM_ALLOCATION_TYPE_PINNED；这表示物理页钉住，不是 cudaMallocHost 的 host pinned。"
+        types: [conceptual, syntax]
+        difficulty: [3]
+        kind: mechanism
+      - id: vmm_props_location
+        claim: "prop.location.type=CU_MEM_LOCATION_TYPE_DEVICE 且 location.id=device ordinal；id 填错成 peer 序号会在 cuMemCreate 失败或把物理页造在错误 GPU 上。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: vmm_props_handle_at_create
+        claim: "requestedHandleTypes 必须在 cuMemCreate 时声明；创建后再想 Export FABRIC/POSIX 会失败。按位或可同时请求多种类型。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: vmm_props_gdr
+        claim: "CUDA 11.4+ 的 prop.allocFlags.gpuDirectRDMACapable=1 使物理页满足 GPUDirect RDMA 对齐/放置；普通 cudaMalloc 或未设该位的 VMM 页不能假定网卡可 DMA。"
+        types: [optimization, conceptual]
+        difficulty: [3, 4]
+        kind: feature
+      - id: vmm_props_compress
+        claim: "sm_80+ 可在 allocFlags 请求压缩物理页；compression 是物理属性，Map 到 VA 后 kernel 仍见未压缩数据宽度，不能靠它把 2 MiB 粒度改小。"
+        types: [conceptual, optimization]
+        difficulty: [4]
+        kind: feature
+      - id: vmm_props_host_numa
+        claim: "CUDA 12.x 允许 location=CU_MEM_LOCATION_TYPE_HOST_NUMA 做 EGM/主机 NUMA 物理页，再 Map 给 GPU；这与 cudaMallocManaged 迁移不是同一路径。"
+        types: [conceptual, compare]
+        difficulty: [4]
+        kind: feature
+      - id: vmm_props_retain
+        claim: "cuMemRetainAllocationHandle(&h, dptr) 从已映射设备指针取回 allocation handle（需该指针来自 VMM Map）；对 cudaMalloc 指针调用会失败。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: vmm_props_create_size
+        claim: "cuMemCreate(&h, size, &prop, 0) 要求 size % granularity == 0 且 size>0；size=1 且 gran=2 MiB 时必须先 pad，flags 形参保留为 0。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: vmm_props_usage
+        claim: "allocFlags.usage 可标记 tile pool 等特殊用途；普通线性缓冲应保持 0。填错 usage 会导致后续 Map/SetAccess 或 multicast bind 不接受该 handle。"
+        types: [syntax, conceptual]
+        difficulty: [4]
+        kind: api
+      - id: vmm_props_wrong_export
+        claim: "Create 时未请求 FABRIC 却 Export FABRIC，或 POSIX fd 在 Windows 上请求，返回 CUDA_ERROR_INVALID_VALUE/NOT_SUPPORTED，不是 IMEX 权限问题。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: failure

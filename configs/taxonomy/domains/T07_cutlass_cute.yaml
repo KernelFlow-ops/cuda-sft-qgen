@@ -1,0 +1,1052 @@
+id: T07
+name: CUTLASS 与 CuTe 布局
+children:
+- id: layout_algebra
+  name: Layout 代数
+  leaves:
+  - id: shape_stride
+    claim: CuTe Layout 是 Shape 与 Stride 的配对；逻辑坐标到线性偏移的求值
+    types:
+    - layout
+    - conceptual
+    - code_complete
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: composition
+    claim: composition(A, B) 的坐标变换含义及 stride 如何合成
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    hints:
+    - composition(make_layout(Shape<_16,_8>, Stride<_8,_1>), tiler)
+    - inner layout 是 swizzle 后再 composition
+    - 求合成后的 stride 是否仍 128B 对齐
+    kind: formula
+  - id: complement
+    claim: complement(layout, N) 构造剩余空间的 layout，常用于把 CTA tiler 补成问题形状
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: logical_divide
+    claim: logical_divide / logical_product 切分线程与数据坐标的方式
+    types:
+    - layout
+    - code_complete
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: layout_algebra_offset
+    claim: Layout L 上坐标 c 的偏移 offset = inner_product(c, stride)；Shape<_16,_8> + Stride<_8,_1> 的 (1,2)
+      偏移是 8*1+1*2=10
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: layout_algebra_assoc
+    claim: composition(A, composition(B,C)) 与 composition(composition(A,B), C) 在 rank 匹配时同构，但打印出的 Shape
+      嵌套不同
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: layout_algebra_eval
+    claim: composition(A,B)(c) = A(B(c))，先用 B 把逻辑坐标变成中间偏移再经 A；不是 stride 逐元素相乘
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: layout_algebra_not_commute
+    claim: composition(A,B) 与 composition(B,A) 一般不相等；把 tiler 与数据 layout 左右颠倒会得到错误 2D 地址
+    types:
+    - layout
+    - counterfactual
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: layout_algebra_complement_cotarget
+    claim: complement(L, cotarget) 要求 size(L) 整除 cotarget；cotarget=128 而 size(L)=48 时不能静默截断
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+  - id: layout_algebra_rank
+    claim: rank(layout) = 模式个数；Shape<_16,_8> 的 rank=2，Shape<Shape<_16,_8>> 的 rank=1，composition 对 rank 的约束不同
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 3
+    kind: formula
+- id: swizzle_atom
+  name: Swizzle 与 atom
+  leaves:
+  - id: swizzle_layout
+    claim: Swizzle<B,M,S> 对 smem 地址的异或变换如何消除 bank conflict / 满足 TMA 对齐
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: copy_atom
+    claim: Copy_Atom 与 TiledCopy 的线程-值映射，错误 atom 导致的向量宽度不匹配
+    types:
+    - layout
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: swizzle_atom_xor
+    claim: Swizzle<3,4,3> 对地址做 bit-xor，B=3 表示 8-way，M=4 是基，S=3 是 shift；选错 B 会把 128B 向量打散到冲突 bank
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: swizzle_atom_copy_width
+    claim: Copy_Atom 的向量宽度必须整除 TiledCopy 每线程值数；用 128-bit atom 去拷 96-bit 逻辑值会越界写 smem
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: swizzle_atom_128b
+    claim: Swizzle<3,4,3> 的 yyy_msk = ((1<<3)-1)<<(4+3) = 0x380，apply(addr)=addr XOR ((addr & 0x380)>>3)，对应 128B 行
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 4
+    kind: formula
+  - id: swizzle_atom_32_64
+    claim: sm_90 TMA/wgmma 的 smem swizzle 枚举是 32B/64B/128B/none；Swizzle<2,4,3> 是 64B 档，不能当 128B atom 用
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: swizzle_atom_bijection
+    claim: 该 XOR 在 2^(B+M+|S|) 对齐块上是双射；对未对齐基址做同一 swizzle 会把不同逻辑元素打到同一地址
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: swizzle_atom_ldsm
+    claim: SM75_U32x4_LDSM_N 要求 smem 8×8.b16 子块连续且 16B 对齐；128B swizzle 后仍须让每个 8×8 落在合法 LDSM 窗口
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: swizzle_atom_inverse
+    claim: 同一 Swizzle 再 apply 一次等于恒等（XOR 对合）；不能用 composition 一个不同 B 的 swizzle 当“反变换”
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+- id: tiled
+  name: TiledCopy / TiledMMA
+  leaves:
+  - id: tiled_mma
+    claim: TiledMMA 把 atom MMA 铺成 CTA 级 tile，partition_fragment 的源/目坐标
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: tensor_partition
+    claim: cute::Tensor 的 partition / inner_partition 与 predication 处理越界
+    types:
+    - layout
+    - debug
+    - code_complete
+    difficulty:
+    - 3
+    kind: api
+  - id: tiled_mma_k_residue
+    claim: TiledMMA 的 K residue 不会自动 predication；K 不能被 tile K 整除时必须显式清累加器或 pad，否则尾块脏读
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: tiled_partition_tv
+    claim: partition_fragment 得到的是 (thread, value) TV layout，不是 (M,N) 逻辑坐标；拿 TV 当 MN 去做 TMA box 会对错形状
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: tiled_make_mma
+    claim: make_tiled_mma(MMA_Atom, AtomLayoutMNK, Permute) 的 AtomLayout 是 warp/warp-group 铺砖，不是问题矩阵 MN
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: tiled_thrfrg
+    claim: thrfrg_A(mma, tensor) 按 atom 的 LayoutA_TV 切 A；返回 fragment 的 size 必须等于该 atom 每线程寄存器占用（如 m16n8k16.f16 的 A 为 4 个 u32）
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: tiled_copy_partition_sd
+    claim: TiledCopy::partition_S / partition_D 分别切源与目的；S 与 D 的 TV 必须同一 T 集合，否则有的线程读无写或写无读
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: tiled_mma_n_repeat
+    claim: 沿 N 重复 atom（如 16×8 atom × N-repeat=4 → tile N=32）靠 AtomLayout 的 N 模；改 MMA_Atom 的 N 而不是 repeat 会换指令
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: tiled_tv_size
+    claim: sm_80 mma.sync 要求 size(get<0>(TV))=32，sm_90 wgmma 要求 128；把 32-thread TV 套进 wgmma TiledMMA 会静态错或静默错映射
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+- id: cutlass_kernel
+  name: CUTLASS 内核结构
+  leaves:
+  - id: mainloop_epilogue
+    claim: CUTLASS 3.x mainloop 与 epilogue 分离，fusion 在 epilogue visitor 中完成
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cluster_shape
+    claim: Sm90 cluster shape 与 multicast TMA 对 GEMM 分块的约束
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: cutlass_kernel_builder
+    claim: CUTLASS 3.x collective builder 由 tile/arch/alignment 选出 mainloop；alignment<16 的 sm_90 TMA GEMM
+      会拒绝实例化
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: cutlass_kernel_streamk
+    claim: stream-K 把 K 切到多个 CTA 再 reduction；CTA 数不能再按 ceil(M/BM)*ceil(N/BN) 理解，occupancy 与 epilogue 原子次数都会变
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: cutlass_kernel_universal
+    claim: GemmUniversalAdapter 把 CollectiveMainloop/Epilogue 与 TileScheduler 绑成 kernel；改 scheduler 不必重写 MMA atom
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: cutlass_kernel_align_a
+    claim: AlignmentA 以元素计；half 的 AlignmentA=8 表示 16B。sm_90 TMA 路径通常要求 ≥8 个 half，AlignmentA=1 会 static_assert
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cutlass_kernel_smem_carveout
+    claim: StageCountAutoCarveout<sizeof(SharedStorageEpilogue)> 让 stages*KtileBytes + epilogue_smem + mbarrier ≤ smem 容量（H100 上限 228 KiB）
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: cutlass_kernel_archtag
+    claim: ArchTag=Sm80 选出 cp.async+mma.sync mainloop，Sm90 选出 TMA+wgmma；同一 builder 不会在运行时 if 架构
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+- id: cute_hier
+  name: 层次化 Layout
+  leaves:
+  - id: cute_hier_product
+    claim: logical_product(A,B) 把 B 铺进 A 的每个坐标，rank 增加；误用 composition 会得到错误 stride 合成
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: cute_hier_divide
+    claim: logical_divide(L, tiler) 把 L 拆成 (tile, rest)；rest 的 stride 仍指向原数据，不是新缓冲
+    types:
+    - layout
+    - code_complete
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: cute_hier_nested_shape
+    claim: Shape<Shape<_2,_4>,_8> 与 Shape<_8,_8> 元素数相同但坐标语义不同，composition 后 stride 不可互换
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 3
+    kind: formula
+  - id: cute_hier_size
+    claim: size(layout) = 元素个数 = product(shape)，与 cosize（跨度覆盖）在有空洞 stride 时不同
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: cute_hier_zipped
+    claim: zipped_divide 保持 (tile, rest) 成对模式，tiled_divide 把 tiler 拍扁；用错会导致 local_tile 坐标秩不匹配
+    types:
+    - layout
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: cute_hier_cosize
+    claim: cosize(L) = 1 + 最大偏移；紧凑 layout 满足 cosize==size，stride 有洞时 cosize > size，按 size 去分配 smem 会截断
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cute_hier_group
+    claim: group<I,J>(layout) 把连续模收成嵌套 Shape；与 flatten 互逆，但不改变偏移函数
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: cute_hier_product_size
+    claim: 若 B 与 A 可兼容，size(logical_product(A,B)) = size(A)*size(B)；composition 不满足这条乘法
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 3
+    kind: formula
+- id: epilogue_visit
+  name: Epilogue visitor
+  leaves:
+  - id: epilogue_visit_fusion
+    claim: CUTLASS 3.x fusion 在 epilogue visitor 里做，mainloop 只写累加器；把 gelu 塞进 mainloop MMA 不是 3.x 路径
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: epilogue_visit_pred
+    claim: epilogue 对边界 tile 必须 predication，否则 fusion 会写越界 C
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    kind: failure
+  - id: epilogue_visit_vec
+    claim: visitor 向量宽度要对齐 C 的 alignment 参数，alignment=8 的 half 不能按 16 元素向量存
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 3
+    kind: api
+  - id: epilogue_visit_evt
+    claim: EVT（epilogue visitor tree）节点顺序决定先 bias 还是先 activation；顺序反了数值合法但语义错
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: epilogue_visit_lincomb
+    claim: LinCombEltAct<Relu, ElementOutput, ElementCompute> 实现 D=relu(αAC+βC+bias)；ElementCompute 必须能表示 α、β
+    types:
+    - syntax
+    - code_complete
+    difficulty:
+    - 3
+    kind: api
+  - id: epilogue_visit_compute_dtype
+    claim: EVT 的 ElementCompute 位宽必须 ≥ 累加器；用 fp16 compute 做 α*acc 会先量化到 16-bit，结果 ≠ fp32 epilogue
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: epilogue_visit_tma_store
+    claim: sm_90 可选 TMA store 写 D tile；sm_80 builder 没有这条路径，只能 coalesced 向量 st.global
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: epilogue_visit_source
+    claim: 需要 βC 时 epilogue 另读 C；C 与 D 别名且 visitor 先写后读会破坏 βC，必须非别名或分阶段
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+- id: sm90_mainloop
+  name: Sm90 collective mainloop
+  leaves:
+  - id: sm90_mainloop_tma
+    claim: Sm90 GEMM mainloop 用 TMA 填 smem，MMA 从 smem desc 读；换成 cp.async 手工拷会破坏 collective 约定
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sm90_mainloop_pipeline
+    claim: mainloop pipeline 深度等于 smem stage 数；深度 1 时 MMA 与 TMA 无法重叠
+    types:
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+  - id: sm90_mainloop_multicast
+    claim: cluster multicast TMA 让一个 CTA 的 TMA 填多个 CTA smem，cluster shape 必须与 builder 一致
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 4
+    kind: feature
+  - id: sm90_mainloop_wgmma
+    claim: consumer warp-group 发 wgmma.mma_async，producer warp 不得进入 MMA 指令流
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: sm90_mainloop_stages_h100
+    claim: H100 228 KiB smem 上 GEMM 常用 Stages∈[3,7]；Stages=1 无法重叠 TMA 与 MMA，Stages 过大把 epilogue smem 挤掉
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: numeric
+  - id: sm90_mainloop_acquire
+    claim: producer_acquire/commit 与 consumer_wait/release 必须成对；漏 commit 会使 mbarrier 事务计数永远等不到
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: sm90_mainloop_k_tile
+    claim: 每次 TMA 搬一个 K-tile，字节数 = BM*BK*sizeof(A)+BN*BK*sizeof(B)；box 与 TiledMMA 的 K 必须相同
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: sm90_mainloop_underrun
+    claim: consumer_wait 之前就 wgmma 读该 stage，是 pipeline underrun，结果为未定义值而非硬件自动 stall 到 TMA 完成
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+    hints:
+    - Stages=2 但 wait_prior<0
+    - 漏 producer_commit
+- id: coalesce_filter
+  name: coalesce / filter / flatten
+  leaves:
+  - id: coalesce_filter_merge
+    claim: coalesce(L) 在 stride[i]*shape[i]==stride[i+1] 时合并相邻模；合并后 rank 下降但偏移函数不变
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: coalesce_filter_not_always
+    claim: Shape<_8,_8> + Stride<_8,_1> 不能 coalesce 成 Shape<_64>，因为 8*8≠1；强行 flatten 会得到错误线性索引
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: coalesce_filter_size1
+    claim: filter(L) 去掉 shape=1 的模；留下的 stride 仍指向原元素，不是重新 compact
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: coalesce_filter_flatten
+    claim: flatten 把嵌套 Shape 拍成一维模式列表，不改变求值；与 coalesce 不同，flatten 不合并可乘的 stride
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 3
+    kind: api
+  - id: coalesce_filter_before_comp
+    claim: 先 coalesce 再 composition 常能通过静态兼容检查；跳过 coalesce 时 inner 的余域可能盖不住
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: coalesce_filter_swizzle
+    claim: 对已 composition 了 Swizzle 的 layout 再 coalesce 可能破坏 XOR 窗口假设；应在 swizzle 之前 coalesce 数据 layout
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 4
+    kind: failure
+  - id: coalesce_filter_rec
+    claim: coalesce 是递归的，嵌套 Shape 内部也会合并；打印出的 rank 可能比手写嵌套更浅
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: coalesce_filter_api
+    claim: cute::coalesce / cute::filter / cute::flatten 是纯函数，不分配存储；cosize 在 coalesce 后不变
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+- id: tiled_copy
+  name: TiledCopy 细节
+  leaves:
+  - id: tiled_copy_make
+    claim: make_tiled_copy(Copy_Atom, ThrLayout, ValLayout) 中 ThrLayout 是线程坐标，ValLayout 是每线程值坐标
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    kind: api
+  - id: tiled_copy_ldsm_atom
+    claim: Copy_Atom<SM75_U32x4_LDSM_N, uint32_t> 发出 ldmatrix.x4；ValLayout 每线程值数必须是 4 个 u32
+    types:
+    - layout
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: tiled_copy_cpasync
+    claim: SM80_CP_ASYNC_CACHEALWAYS_ZFILL_V4 要求 gmem 16B 对齐且每线程 16B；用它拷 8B half2 会越界或 static_assert
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    kind: failure
+  - id: tiled_copy_stsm
+    claim: SM90_U32x4_STSM_N 把寄存器按 stmatrix 写 smem，供后续 TMA store 或 debug dump；普通 UniversalCopy 不会得到 LDSM 布局
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: tiled_copy_zfill
+    claim: cp.async zfill 变体在谓词假时把目的写成 0；非 zfill 变体留下 smem 旧值，残差 K 必须显式清
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: tiled_copy_thr_shape
+    claim: ThrLayout Shape<_16,_8> 表示 16×8 线程瓦片，必须整除 CTA 线程数；256 线程 CTA 配 128 线程 ThrLayout 会有线程闲置或越界
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: numeric
+  - id: tiled_copy_vector
+    claim: UniversalCopy<uint128_t> 向量宽度 16B，gmem 与 smem 都要 16B 对齐；uint32_t atom 不能靠“多调几次”自动变成 128-bit
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: tiled_copy_pred_if
+    claim: copy_if(pred, tiledCopy, src, dst) 按坐标谓词关 atom；TMA copy atom 不能用线程谓词关掉单次 box
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: tiled_copy_major
+    claim: Copy_Atom 的 Major 方向要与源 tensor 连续维一致；row-major gmem 配 col-major atom 会把 stride-1 维走成跨步
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+- id: mma_atom
+  name: MMA_Atom 与 GMMA
+  leaves:
+  - id: mma_atom_sm80_16x8x16
+    claim: MMA_Atom<SM80_16x8x16_F32F16F16F32_TN> 对应 mma.sync.m16n8k16.f32.f16.f16.f32，TN 表示 A 不转置、B 转置
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: mma_atom_sm90_64x128
+    claim: SM90_64x128x16_F16F16_TN 是 wgmma m64n128k16；把它当 TiledMMA 的 atom 时 TV 的 T 维必须是 128 线程
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: mma_atom_major_k
+    claim: GMMA::Major::K 表示 smem 上 K 连续（对 wgmma 更友好）；Major::MN 要匹配 swizzle 与 desc 的 leading dimension
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: mma_atom_ss_vs_rs
+    claim: Hopper wgmma 的 A 可来自 smem desc（SS）或寄存器（RS）；RS 路径仍要求 B 在 smem，不能 A/B 都在寄存器当 mma.sync
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+  - id: mma_atom_tf32_k8
+    claim: SM90_64xNx8_F32TF32TF32_SS 的 K=8；沿用 F16 的 k16 atom 会在类型列表里选错 GMMA 指令
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: mma_atom_scale
+    claim: GMMA atom 的 ScaleOut::Zero 对应 β=0 丢弃 D；ScaleOut::One 累加进旧 D。这不是任意 α
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: mma_atom_sm100
+    claim: SM100 UMMA atom 的累加器在 TMEM 地址空间，没有与 SM80_16x8x16 兼容的寄存器 fragment 类型
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+  - id: mma_atom_permute
+    claim: make_tiled_mma 的 PermuteA/B/C 在 atom 之上再排线程；Permute 与 swizzle 叠加会改变 bank，不等于替换 atom dtype
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: mma_atom_fp8
+    claim: SM90 FP8 GMMA 的 K=32 且要求 sm_90a；用 F16 k16 atom 再 cvt 到 fp8 寄存器不是硬件 FP8 Tensor Core
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 4
+    kind: feature
+- id: cute_tensor
+  name: cute::Tensor
+  leaves:
+  - id: cute_tensor_make
+    claim: make_tensor(ptr, layout) 把指针与 layout 绑成 Tensor；layout 的 cosize 超出分配长度时后续切片会 OOB
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cute_tensor_engine
+    claim: Tensor 的 Engine 可以是 gmem 指针、smem 指针或寄存器 iterator；把 smem Tensor 传给 TMA gmem desc 会编址错误
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: cute_tensor_local_tile
+    claim: local_tile(tensor, tile_shape, coord) 取出以 coord 为索引的子张量，stride 继承自父 layout，不是紧凑拷贝
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cute_tensor_local_part
+    claim: local_partition(tensor, thr_layout, tid) 按线程切；tid 必须 < size(thr_layout)，否则偏移越界
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cute_tensor_print
+    claim: print(tensor.layout()) 打印 Shape/Stride 嵌套，不打印数据；用它核对 composition 是否 128B 对齐
+    types:
+    - conceptual
+    - code_complete
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cute_tensor_recast
+    claim: recast<uint128_t>(tensor) 要求 size 与对齐能整除 16B；对 half 奇数长度 recast 会改变逻辑元素数
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: cute_tensor_identity
+    claim: make_identity_tensor(shape) 的元素值等于坐标本身，用来做 pred = coord < problem_shape，不是全 1 张量
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: cute_tensor_slice
+    claim: tensor(make_coord(_, j)) 是沿该模切片；_ 保留该维，整数坐标落下该维，秩减 1
+    types:
+    - layout
+    - syntax
+    difficulty:
+    - 3
+    kind: mechanism
+- id: kernel_schedule
+  name: KernelSchedule 策略
+  leaves:
+  - id: kernel_schedule_ws
+    claim: KernelTmaWarpSpecialized 把 CTA 分成 producer 与 consumer warp-group，单 consumer 做全部 MMA
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: feature
+  - id: kernel_schedule_pingpong
+    claim: KernelTmaWarpSpecializedPingpong 两个 consumer WG 交替 MMA 与 epilogue，用来藏 epilogue 延迟
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: kernel_schedule_coop
+    claim: KernelTmaWarpSpecializedCooperative 两个 consumer WG 合作同一输出 tile（拆 M 或 N），累加器要跨 WG 规约或分块写
+    types:
+    - conceptual
+    - layout
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: kernel_schedule_multistage
+    claim: KernelMultistage 是 sm_80 cp.async 多缓冲，没有 TMA 也没有 warp-group MMA；在 sm_90 上选它就用不到 wgmma
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: kernel_schedule_ptr_array
+    claim: KernelPtrArrayTmaWarpSpecialized* 用于 grouped/batched GEMM 的指针数组，每个 tile 可换 A/B/C 基址
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: kernel_schedule_mismatch
+    claim: CollectiveBuilder 的 KernelSchedule 必须与 ArchTag 兼容；Sm80+TmaWarpSpecialized 会拒绝实例化
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+  - id: kernel_schedule_persistent
+    claim: Persistent scheduler 让 CTA 循环领 (m,n) tile，摊销 TMA desc 初始化；短问题上 persistent 可能更慢
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: kernel_schedule_raster
+    claim: tile raster 沿 N 走时 B 的 L2 复用更好（B 列邻接）；沿 M raster 则利于 A。选错方向会掉 L2 hit
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    kind: formula
+- id: smem_desc
+  name: SMEM descriptor
+  leaves:
+  - id: smem_desc_start
+    claim: wgmma smem desc 的 start_address 以 16B 为单位编码，4 个 LSB 被丢掉；基址不是 16B 对齐时描述符会指错行
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 4
+    kind: formula
+  - id: smem_desc_lead
+    claim: leading_dimension_byte_offset 是下一行起始相对当前行的字节差，必须匹配 swizzle 模式的行跨度（如 128）
+    types:
+    - layout
+    - conceptual
+    difficulty:
+    - 4
+    kind: numeric
+  - id: smem_desc_stride
+    claim: stride_byte_offset 描述 K 向（或第二维）步进；与 CuTe stride 的元素步长差 sizeof(T) 倍，混用会差 2× 或 4×
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 4
+    kind: formula
+  - id: smem_desc_swizzle_mode
+    claim: desc 里的 swizzle 模式是硬件 2-bit 枚举（none/32/64/128），不是把 CuTe Swizzle<B,M,S> 整型塞进去
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 4
+    kind: api
+  - id: smem_desc_base_offset
+    claim: base_offset 用于在同一 desc 上滑窗；改 start_address 而不改 offset 可能超出 smem 窗口
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: smem_desc_make
+    claim: cute::make_smem_desc / GMMA::DescriptorIterator 从 Tensor 推 desc；手工填 64-bit 立即数必须与 layout 一致
+    types:
+    - syntax
+    - code_complete
+    difficulty:
+    - 4
+    kind: api
+  - id: smem_desc_not_ptr
+    claim: wgmma 不接受 generic shared 指针当操作数；把 smem T* 转成 uint64 desc 而不编码 layout 是非法的
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: smem_desc_sm100
+    claim: sm_100 UMMA 不再用 Hopper 这套 64-bit smem desc 当累加器路径；沿用 SM90 desc 发 tcgen05.mma 非法
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+- id: copy_pred
+  name: Copy 谓词与边界
+  leaves:
+  - id: copy_pred_elem
+    claim: pred(m,n)=(block_m*BM+m<M)&&(block_n*BN+n<N)；缺一维比较会在尾块写出问题域外
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: copy_pred_tma_oob
+    claim: TMA 的 OOB fill 由硬件完成，不能再用 copy_if 的线程谓词去关 TMA 指令本身；关错会导致整个 box 不发
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+  - id: copy_pred_identity
+    claim: identity tensor 上 elem(coord)==coord，与 problem_shape 做逐维比较得到 mask，不是把 shape 当布尔
+    types:
+    - syntax
+    - layout
+    difficulty:
+    - 3
+    kind: api
+  - id: copy_pred_residue_k
+    claim: K 尾块若用 zfill TMA/cp.async，累加器仍要在进入 MMA 前清零或接受 0 填充；非 zfill 必须谓词关 MMA
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: copy_pred_epilogue
+    claim: 输出谓词要按 C 的问题形状而不是按对齐后的 tile 形状；按 BM×BN 全写会越过 M、N
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    kind: failure
+  - id: copy_pred_warp
+    claim: 谓词按线程而不是按 warp 统一时，ldmatrix 仍要求整 warp 参与；部分 lane 关断会破坏 8×8 矩阵拼装
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: copy_pred_clear
+    claim: clear(acc_fragment) 只清该线程持有的累加器；不能代替对 gmem 尾块的 store 谓词
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: api
+  - id: copy_pred_oob_zero
+    claim: 若 TMA OOB=zero 且 MMA 吃到 pad 列，等于对 pad 做 0 乘；βC 仍必须用输出谓词，否则会把 pad 写进 C
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism

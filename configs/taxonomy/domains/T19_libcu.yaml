@@ -1,0 +1,572 @@
+id: T19
+name: "libcu++ / cuda::"
+children:
+  - id: cuda_barrier
+    name: cuda::barrier
+    leaves:
+      - id: cuda_barrier_arrive_wait
+        claim: "cuda::barrier<cuda::thread_scope_block> 的 arrive 只减少期望计数，必须 wait/arrive_and_wait 才同步；arrive 本身不保证看到他线程此前的 shared 写。"
+        types: [conceptual, debug]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: cuda_barrier_init
+        claim: "cuda::init(&bar, expected) 必须由参与线程在第一次 arrive 之前调用一次；expected 必须等于每 phase 的 arrive 次数，否则永久阻塞。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: api
+        hints: ["expected=blockDim.x 但只有 1 线程 arrive", "重复 init"]
+      - id: cuda_barrier_token_phase
+        claim: "arrive() 返回的 arrival_token 绑定当前 phase；wait(token) 等到该 phase 完成，跨 phase 复用旧 token 会等到错误的一轮或死等。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: cuda_barrier_memcpy_async
+        claim: "CUDA 11+ 的 cuda::memcpy_async(group, dst, src, bytes, barrier) 在拷贝完成后自动 arrive；在 sm_80 下降到 cp.async，在更早架构上同步拷贝。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: feature
+      - id: cuda_barrier_scope
+        claim: "thread_scope_block 的 barrier 只同步同一 CTA；thread_scope_device 才能跨 CTA，且对象必须在参与者都看得见的 global 上，不能替代 __syncthreads 的控制流汇合。"
+        types: [conceptual, compare]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: cuda_barrier_arrive_n
+        claim: "arrive(n) 一次把本 phase 期望计数减 n；n>1 时其余线程的 arrive 次数必须按同一额度减少，否则少到永远 wait。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: cuda_barrier_arrive_and_drop
+        claim: "arrive_and_drop() 完成本 phase arrive 并把后续 phase 的 expected 减 1；提前 return 的线程应 drop 而不是跳过，否则 expected 偏高而死等。"
+        types: [debug, counterfactual]
+        difficulty: [3, 4]
+        kind: failure
+        hints: ["threadIdx.x>=N 直接 return 未 drop", "drop 两次"]
+      - id: cuda_barrier_max
+        claim: "init(&bar, expected) 要求 1 ≤ expected ≤ cuda::barrier<Scope>::max()；expected=0 使 phase 立即完成或成为非法 init。"
+        types: [syntax, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: cuda_barrier_align
+        claim: "shared 中的 cuda::barrier 对象必须至少 8B 对齐；未对齐的 init/arrive 是未定义行为，不是自动 pad。"
+        types: [debug, layout]
+        difficulty: [2, 3]
+        kind: numeric
+      - id: cuda_barrier_phase_inc
+        claim: "全部 arrive 完成后 phase 计数加 1；wait(token) 等到 token 所属那一轮完成，而不是等到下一次任意 arrive。"
+        types: [conceptual, debug]
+        difficulty: [3]
+        kind: mechanism
+  - id: cuda_pipeline
+    name: cuda::pipeline
+    leaves:
+      - id: cuda_pipeline_acquire_commit
+        claim: "producer_acquire 占用流水线头阶段，随后的 memcpy_async 挂到该阶段，producer_commit 才封阶段；acquire 后不 commit 会占死 stage。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: cuda_pipeline_libcu_shared_state
+        claim: "cuda::pipeline_shared_state<Scope, Stages> 把最大未完成阶段数固定为 Stages；非 thread_scope_thread 的 pipeline 必须引用该对象，否则无法协调多线程。"
+        types: [syntax, layout]
+        difficulty: [3]
+        kind: formula
+      - id: cuda_pipeline_wait_prior
+        claim: "pipeline_consumer_wait_prior<N>(pipe) 等到未完成阶段数 ≤ N；对深度 S 的流水线，计算当前 stage 时应 wait_prior<S-1>。"
+        types: [optimization, debug]
+        difficulty: [3]
+        kind: formula
+      - id: cuda_pipeline_quit
+        claim: "cuda::pipeline::quit() 之后再 producer_commit/consumer_wait 是未定义行为，异步拷贝可能永远不完成。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: failure
+      - id: cuda_pipeline_make
+        claim: "cuda::make_pipeline(group, &shared_state) 把 cooperative_groups 线程组绑到 pipeline_shared_state；group.size() 必须覆盖全部 producer 与 consumer 线程。"
+        types: [syntax, code_complete]
+        difficulty: [3]
+        kind: api
+      - id: cuda_pipeline_consumer_release
+        claim: "consumer_wait 之后必须 consumer_release 才能让 producer 复用该 stage；只 wait 不 release 会把深度 S 的流水线卡死。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: cuda_pipeline_libcu_thread_scope
+        claim: "thread_scope_thread 的 pipeline 不需要 pipeline_shared_state；block/device scope 必须提供 Stages 个 stage 的共享状态对象。"
+        types: [syntax, compare]
+        difficulty: [2, 3]
+        kind: api
+      - id: cuda_pipeline_sm80
+        claim: "CUDA 11.1+ 在 sm_80 上 cuda::pipeline + memcpy_async 映射到 cp.async.commit_group；sm_70 回退同步拷贝，Stages>1 不再隐藏延迟。"
+        types: [conceptual, compare]
+        difficulty: [3]
+        kind: feature
+      - id: cuda_pipeline_role_mix
+        claim: "producer_acquire/commit 只能由 producer 角色调用，consumer_wait/release 只能由 consumer 调用；同一线程混用角色会破坏 stage 计数。"
+        types: [debug, counterfactual]
+        difficulty: [3, 4]
+        kind: failure
+        hints: ["同一 warp 既 commit 又 wait", "consumer 调 producer_acquire"]
+      - id: cuda_pipeline_depth_ilp
+        claim: "深度 S 允许最多 S 个未完成拷贝；与计算重叠需要 S≥2，S=1 时 wait_prior<0> 等价于同步拷贝。"
+        types: [optimization, profiling]
+        difficulty: [3]
+        kind: formula
+  - id: annotated_ptr
+    name: annotated_ptr
+    leaves:
+      - id: annotated_ptr_access_property
+        claim: "cuda::annotated_ptr 把 cuda::access_property 绑到指针，编译为带 cache 提示的 ld/st；属性不改变地址空间，也不会让别名对象自动继承提示。"
+        types: [conceptual, optimization]
+        difficulty: [3]
+        kind: mechanism
+      - id: annotated_ptr_streaming
+        claim: "cuda::access_property::streaming 标记为流式、低复用，对应 L1/L2 evict-first 类提示，适合读一次的扫表而不是热 tile。"
+        types: [syntax, optimization]
+        difficulty: [3]
+        kind: api
+      - id: annotated_ptr_persisting
+        claim: "sm_80+ 的 access_property::persisting 配合 cudaAccessPolicyWindow 把指定 VA 窗口钉在 L2；在 sm_70 上该窗口 API 不可用。"
+        types: [optimization, conceptual]
+        difficulty: [3]
+        kind: feature
+      - id: annotated_ptr_space_mismatch
+        claim: "用 global 空间的 annotated_ptr 指向 shared 地址并发 ld.global，会按错误空间寻址，属于静默错误而非类型系统捕获。"
+        types: [debug, counterfactual]
+        difficulty: [3, 4]
+        kind: failure
+      - id: annotated_ptr_normal
+        claim: "access_property::normal 是默认缓存提示，不创建 L2 persistence 窗口；把它当成 persisting 不会钉住热 tile。"
+        types: [conceptual, compare]
+        difficulty: [2, 3]
+        kind: api
+      - id: annotated_ptr_hit_ratio
+        claim: "cuda::access_property(persisting, hit_ratio) 的 hit_ratio ∈ [0,1]；0 表示窗口内不申请保留，1 表示尽量全部走 persisting。"
+        types: [syntax, optimization]
+        difficulty: [3]
+        kind: formula
+      - id: annotated_ptr_alias
+        claim: "只有经 annotated_ptr 的解引用才带提示；同一地址的普通 T* 别名访问不继承 access_property。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: annotated_ptr_space_type
+        claim: "cuda::annotated_ptr 的地址空间写在类型里（global vs shared）；不能 static_cast 成另一种空间指针来改寻址，否则仍按原空间发 ld/st。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: annotated_ptr_l2_cap
+        claim: "A100 L2=40 MiB，persisting 窗口有效容量受此上限；窗口总和超过可用 persisting 容量时按 hitRatio 驱逐，不会无限钉住。"
+        types: [optimization, profiling]
+        difficulty: [3]
+        kind: numeric
+  - id: mdspan
+    name: mdspan
+    leaves:
+      - id: mdspan_layout_mapping
+        claim: "cuda::std::mdspan 的 layout_mapping(i0,i1,...) 把多维索引映射为唯一 offset，layout_right 是行主序，layout_left 是列主序。"
+        types: [layout, conceptual]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: mdspan_ctor
+        claim: "cuda::std::mdspan<T, extents<int, D0, D1>> 需要指针与 extents；运行时 extents 用 dynamic_extent，编译期静态维可进寄存器。"
+        types: [syntax, code_complete]
+        difficulty: [2, 3]
+        kind: api
+      - id: mdspan_offset
+        claim: "layout_right 二维 offset(i,j) = i * extent(1) + j；layout_left 的 offset(i,j) = i + j * extent(0)。"
+        types: [layout, conceptual]
+        difficulty: [2]
+        kind: formula
+      - id: mdspan_device_cccl
+        claim: "device 端 cuda::std::mdspan 属于 CCCL/libcu++，CUDA 12+ 工具链提供；不能把 host std::mdspan 直接 __device__ 解引用到 device 指针。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: feature
+      - id: mdspan_layout_stride
+        claim: "layout_stride 的 offset(i,j) = i*stride(0) + j*stride(1)；stride 可与 extent 独立，不必等于行距或列距。"
+        types: [layout, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: mdspan_rank
+        claim: "extents<Index, D0, D1, D2> 的 rank()=3；rank_dynamic() 等于取 dynamic_extent 的维数。"
+        types: [syntax, conceptual]
+        difficulty: [2]
+        kind: formula
+      - id: mdspan_accessor
+        claim: "default_accessor 不做边界检查；越界 operator() 是 UB，不会抛异常或返回哨兵。"
+        types: [debug, counterfactual]
+        difficulty: [2, 3]
+        kind: failure
+      - id: mdspan_dextents
+        claim: "cuda::std::dextents<int,2> 两维都是 runtime；与 extents<int,64,dynamic_extent> 的静态 64 相比，动态维不能当编译期 tile 尺寸。"
+        types: [syntax, compare]
+        difficulty: [2, 3]
+        kind: api
+      - id: mdspan_submdspan
+        claim: "CUDA 12+ CCCL 的 cuda::std::submdspan(md, slice0, slice1) 返回视图不拷贝元素；源指针生命周期必须覆盖子视图。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: feature
+  - id: atomic_ref
+    name: atomic_ref
+    leaves:
+      - id: atomic_ref_overlay
+        claim: "cuda::atomic_ref<T, Scope> 不拥有存储，只覆盖已有对象；被覆盖对象必须按 alignof(T) 对齐，否则原子访问未定义。"
+        types: [conceptual, debug]
+        difficulty: [3]
+        kind: mechanism
+      - id: atomic_ref_fetch_add
+        claim: "atomic_ref::fetch_add(v, memory_order_relaxed) 返回旧值并原子加上 v；memory_order 与 thread_scope 都是模板/参数，缺省不等于 system 可见。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: api
+      - id: atomic_ref_lock_free
+        claim: "device 上 32/64-bit 对齐 atomic_ref 是 lock-free；128-bit CAS 仅在支持的 SM 与对齐下 lock-free，否则可能走锁路径或编译失败。"
+        types: [conceptual, compare]
+        difficulty: [3]
+        kind: numeric
+      - id: atomic_ref_ptx
+        claim: "device 上 cuda::atomic_ref 的指令宽度 = sizeof(T)（常用 32/64 bit），并编码进 PTX atom 的 scope/order，而不是 host std::atomic_ref 的锁实现。"
+        types: [conceptual, compare]
+        difficulty: [3]
+        kind: numeric
+      - id: atomic_ref_scope
+        claim: "cuda::atomic_ref<T, cuda::thread_scope_block> 的 RMW 只与同 CTA 建立同步；跨 CTA 需要 thread_scope_device。"
+        types: [conceptual, debug]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: atomic_ref_cas
+        claim: "compare_exchange_strong(expected, desired, success, failure) 失败时把旧值写回 expected；success 不能比 failure 更弱（acq_rel+relaxed 合法，relaxed+acquire 不合法）。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: atomic_ref_fetch_min
+        claim: "cuda::atomic_ref 的 fetch_min/fetch_max 是 CUDA 扩展，对有符号整数按数值比较，不是按位模式比较。"
+        types: [syntax, compare]
+        difficulty: [2, 3]
+        kind: api
+      - id: atomic_ref_16bit
+        claim: "sm_70+ 才保证对齐的 16-bit atomic_ref RMW 为 lock-free；sm_60 上 16-bit 原子可能编译失败或非 lock-free。"
+        types: [conceptual, compare]
+        difficulty: [3]
+        kind: feature
+      - id: atomic_ref_const
+        claim: "不能用 atomic_ref 覆盖 const 对象来去掉 const 再原子写，那是 UB，即使底层地址在可变内存。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: failure
+  - id: cuda_ptx
+    name: cuda::ptx
+    leaves:
+      - id: cuda_ptx_header
+        claim: "CUDA 12.1+ 的 <cuda/ptx> 在 cuda::ptx 命名空间提供 PTX 包装，立即数参数类型是 cuda::ptx::n32_t 等，不是随意 int。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: feature
+      - id: cuda_ptx_mbarrier_init
+        claim: "cuda::ptx::mbarrier_init(mbar, count) 对应 mbarrier.init，count 是 arrive 期望；必须在 shared 且 8B 对齐的 64-bit 对象上调用。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: cuda_ptx_expect_tx
+        claim: "cuda::ptx::mbarrier_arrive_expect_tx 把随后 bulk/TMA 的字节计入事务计数；tx_bytes 必须等于实际拷贝字节，少计会提前放行。"
+        types: [debug, conceptual]
+        difficulty: [3, 4]
+        kind: mechanism
+      - id: cuda_ptx_cp_async_bulk
+        claim: "cuda::ptx::cp_async_bulk 是 sm_90 的 bulk 拷贝包装，不能在 sm_80 上当作 cp.async.ca 的别名调用。"
+        types: [syntax, compare]
+        difficulty: [3, 4]
+        kind: feature
+      - id: cuda_ptx_fence_proxy
+        claim: "cuda::ptx::fence_proxy_async() 发出 fence.proxy.async，使 generic 空间写入对 async proxy/TMA 可见；普通 __threadfence_block 不够。"
+        types: [debug, conceptual]
+        difficulty: [3, 4]
+        kind: mechanism
+      - id: cuda_ptx_elect_sync
+        claim: "cuda::ptx::elect_sync(membermask) 在 mask 内选出恰好 1 个线程返回 true，供单线程提交 TMA；mask 外线程不得当选。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: api
+      - id: cuda_ptx_tensormap
+        claim: "sm_90 的 cuda::ptx::tensormap_replace_global_address 运行时改 TMA descriptor 的 gmem 基址，之后需要 tensormap 的 cp_fenceproxy 才对 TMA 引擎可见。"
+        types: [syntax, debug]
+        difficulty: [4]
+        kind: feature
+      - id: cuda_ptx_tcgen05
+        claim: "sm_100 的 cuda::ptx::tcgen05_* 分配/提交 TMEM MMA；在 Arch=sm_90 的编译路径上这些符号不可用。"
+        types: [syntax, compare]
+        difficulty: [4]
+        kind: feature
+      - id: cuda_ptx_n32
+        claim: "cuda::ptx::n32_t<Imm> 把立即数编码进指令；用运行时 int 变量冒充 n32_t 无法形成立即数修饰符。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: cuda_ptx_mbarrier_parity
+        claim: "mbarrier try_wait 的 parity ∈ {0,1}，每完成一轮 arrive 翻转；cuda::ptx 包装仍要求调用方维护 phase，用错 parity 会误通过或死等。"
+        types: [debug, conceptual]
+        difficulty: [4]
+        kind: formula
+  - id: nv_target
+    name: nv/target
+    leaves:
+      - id: nv_target_if
+        claim: "NV_IF_TARGET(NV_IS_DEVICE, (dev), (host)) 按编译通道选分支；host 通道没有 __CUDA_ARCH__，在 __host__ __device__ 里用 #ifdef __CUDA_ARCH__ 会在 host 走错。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: nv_target_provides_sm80
+        claim: "NV_PROVIDES_SM_80 在为 sm_80 或更高架构编译的 device 通道为真；-arch=sm_70 的 device 通道里为假。"
+        types: [syntax, conceptual]
+        difficulty: [2, 3]
+        kind: feature
+      - id: nv_target_dispatch
+        claim: "NV_DISPATCH_TARGET(NV_PROVIDES_SM_90, (...), NV_PROVIDES_SM_80, (...), NV_IS_HOST, (...)) 按第一条匹配展开，不是运行时 switch。"
+        types: [syntax, code_complete]
+        difficulty: [3]
+        kind: api
+      - id: nv_target_host
+        claim: "NV_IS_HOST 在 nvcc/nvc++ 的 host 通道为真、device 通道为假；不能在 NV_IS_HOST 分支里读 threadIdx 或 device 寄存器。"
+        types: [conceptual, debug]
+        difficulty: [2]
+        kind: mechanism
+      - id: nv_target_sm90
+        claim: "NV_PROVIDES_SM_90 在 sm_90 及更高（含 sm_100）的 device 编译为真；要排除 Blackwell 必须再匹配 NV_PROVIDES_SM_100 的否定分支。"
+        types: [syntax, compare]
+        difficulty: [3]
+        kind: feature
+      - id: nv_target_no_runtime
+        claim: "NV_IF_TARGET 在编译期展开，不能用运行时查询的 SM 版本变量去选择 NV_PROVIDES_SM_* 分支。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: failure
+      - id: nv_target_header
+        claim: "必须 #include <nv/target>；该头由 CUDA 11.2+ 工具链提供，cuda_runtime.h 不保证间接包含它。"
+        types: [syntax, conceptual]
+        difficulty: [2]
+        kind: feature
+      - id: nv_target_scope
+        claim: "NV_IF_TARGET 各通道语句块是独立词法作用域，块内声明不会泄漏到另一通道；跨通道共用同一 auto 变量会编译失败。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: api
+  - id: cuda_std
+    name: cuda::std
+    leaves:
+      - id: cuda_std_atomic_scope
+        claim: "cuda::std::atomic<T> 没有 thread_scope 模板参数，device 上默认可见性不等于 cuda::atomic<T, thread_scope_system>。"
+        types: [compare, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: cuda_std_tuple
+        claim: "cuda::std::tuple 可在 __device__ 使用；host std::tuple 在部分工具链的 device 编译中不可用或 ABI 不同。"
+        types: [syntax, compare]
+        difficulty: [2]
+        kind: api
+      - id: cuda_std_bit_cast
+        claim: "CUDA 12+ device 侧 cuda::std::bit_cast<To>(from) 要求 sizeof(To)==sizeof(from) 且双方 trivially copyable。"
+        types: [syntax, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: cuda_std_span
+        claim: "cuda::std::span<T> 是非拥有视图，size() 返回元素个数；它不分配 device 内存，data() 必须已指向合法对象。"
+        types: [syntax, debug]
+        difficulty: [2]
+        kind: api
+      - id: cuda_std_complex
+        claim: "cuda::std::complex<float> 的 operator* 为 (a+bi)*(c+di)=(ac-bd)+(ad+bc)i，不是 float2 的逐元素乘。"
+        types: [conceptual, debug]
+        difficulty: [2, 3]
+        kind: formula
+      - id: cuda_std_optional
+        claim: "cuda::std::optional<T> 在 device 上不可抛 bad_optional_access；应先 has_value()/value_or，不能靠异常控制流。"
+        types: [debug, syntax]
+        difficulty: [2, 3]
+        kind: failure
+      - id: cuda_std_libcxx
+        claim: "libcu++ 的 cuda::std 从 CUDA 11 随工具链提供，CUDA 12.4+ 与 CCCL 统一；#include <optional> 不等于 cuda::std::optional。"
+        types: [syntax, conceptual]
+        difficulty: [2]
+        kind: feature
+      - id: cuda_std_array
+        claim: "cuda::std::array<T,N> 的 sizeof = N*sizeof(T)（无堆分配）；N 必须是编译期常量，不能用运行时 n 当模板实参。"
+        types: [syntax, layout]
+        difficulty: [1, 2]
+        kind: formula
+      - id: cuda_std_expected
+        claim: "CCCL 的 cuda::std::expected<T,E> 用 has_value() 区分值域；device 上 unexpected 路径同样不能抛异常。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: api
+  - id: cuda_atomic
+    name: cuda::atomic
+    leaves:
+      - id: cuda_atomic_owns
+        claim: "cuda::atomic<T, Scope> 拥有 T 的存储，对象必须按 alignof(cuda::atomic<T>) 对齐；与 atomic_ref 覆盖已有 T 不同。"
+        types: [conceptual, compare]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: cuda_atomic_ctor
+        claim: "静态 __shared__ cuda::atomic<int, thread_scope_block> 需要显式 store/cuda::init，未初始化值不是可移植的 0。"
+        types: [debug, syntax]
+        difficulty: [2, 3]
+        kind: api
+      - id: cuda_atomic_fetch_add
+        claim: "fetch_add 返回旧值；memory_order_relaxed 不与他线程的 non-atomic 写建立 happens-before。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: api
+      - id: cuda_atomic_system
+        claim: "cuda::atomic<int, thread_scope_system> 才能与 host 或 peer 的 system-scope 操作配对；thread_scope_device 对 CPU 无可见性保证。"
+        types: [conceptual, compare]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: cuda_atomic_wait
+        claim: "CUDA 11+ 的 device cuda::atomic 不保证提供 C++20 wait/notify；把 host wait 语义套到 kernel 会编译失败或退化成忙等。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: feature
+      - id: cuda_atomic_lock_free
+        claim: "对齐的 32-bit cuda::atomic 在 device 上 is_always_lock_free==true；对超出硬件宽度的 struct 特化会静态失败。"
+        types: [conceptual, syntax]
+        difficulty: [2, 3]
+        kind: numeric
+      - id: cuda_atomic_thread_scope
+        claim: "thread_scope_thread 的 atomic 只约束本线程编译器重排，不向他线程发布；不能当 CTA 锁。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: failure
+      - id: cuda_atomic_ptx_width
+        claim: "device 上 sizeof(T)=4 的 cuda::atomic 编译为 32-bit atom，sizeof(T)=8 为 64-bit atom；scope 编码进 PTX .cta/.gpu/.sys。"
+        types: [conceptual, compare]
+        difficulty: [3]
+        kind: numeric
+  - id: memcpy_async_lib
+    name: cuda::memcpy_async
+    leaves:
+      - id: memcpy_async_lib_group
+        claim: "cuda::memcpy_async(group, dst, src, size, barrier) 由 group 内线程协作拷贝；只让 1 线程调用却按整块 size 计算，会漏拷或越界。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: memcpy_async_lib_aligned
+        claim: "cuda::aligned_size_t<16>(n) 要求 n%16==0 且指针 16B 对齐才能走 16B cp.async；n=12 不能用 aligned_size_t<16>。"
+        types: [syntax, layout]
+        difficulty: [2, 3]
+        kind: formula
+      - id: memcpy_async_lib_barrier
+        claim: "以 barrier 为完成对象时拷贝完成自动 arrive；调用方不要再额外 arrive 一次，否则 expected 会提前耗尽。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: memcpy_async_lib_pipeline
+        claim: "以 pipeline 为完成对象时，拷贝挂到当前 producer stage，必须先 producer_acquire 再 memcpy_async 再 commit。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: memcpy_async_lib_sm80
+        claim: "CUDA 11.0+ 在 sm_80 把 cuda::memcpy_async 降到 cp.async；sm_90 仍可用该 API，但不会自动变成 TMA bulk。"
+        types: [conceptual, compare]
+        difficulty: [3]
+        kind: feature
+      - id: memcpy_async_lib_dst
+        claim: "异步路径的 dst 必须是合法 shared（或文档允许的异步目的）；dst 在 generic global 上不能当 smem staging，行为非法。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: failure
+      - id: memcpy_async_lib_bytes
+        claim: "传输字节数 = size 参数；aligned_size_t<16>(64) 拷 64 字节 = 4 个 16B 事务，不是 64 个元素。"
+        types: [conceptual, debug]
+        difficulty: [2]
+        kind: numeric
+      - id: memcpy_async_lib_fallback
+        claim: "在不支持 cp.async 的架构上 memcpy_async 同步完成仍会 arrive barrier，因此 Stages>1 在 sm_70 上不会缩短关键路径。"
+        types: [optimization, profiling]
+        difficulty: [3]
+        kind: mechanism
+  - id: cuda_semaphore
+    name: latch 与 semaphore
+    leaves:
+      - id: cuda_semaphore_counting
+        claim: "cuda::counting_semaphore<Scope, LeastMaxValue> 的计数上限至少为 LeastMaxValue；release(n) 把计数加 n。"
+        types: [syntax, conceptual]
+        difficulty: [2, 3]
+        kind: api
+      - id: cuda_semaphore_binary
+        claim: "cuda::binary_semaphore<Scope> 等价于 LeastMaxValue=1 的 counting_semaphore；无配对 acquire 时连续 release 两次是 UB。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: formula
+      - id: cuda_semaphore_acquire
+        claim: "acquire() 在计数为 0 时阻塞；block-scope semaphore 必须放在参与线程共享的 shared 内存。"
+        types: [debug, conceptual]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: cuda_semaphore_latch_init
+        claim: "cuda::latch<Scope> 的 expected 在构造/init 时固定，不能在 count_down 之后再改 expected。"
+        types: [syntax, conceptual]
+        difficulty: [2]
+        kind: api
+      - id: cuda_semaphore_latch_wait
+        claim: "latch.arrive_and_wait() = count_down(1) 然后 wait 到计数 0；只 wait 不 count_down 会永久阻塞。"
+        types: [debug, conceptual]
+        difficulty: [2, 3]
+        kind: formula
+      - id: cuda_semaphore_scope
+        claim: "thread_scope_block 的 semaphore/latch 不能跨 CTA acquire/release；跨 CTA 要用 thread_scope_device 且对象在 global。"
+        types: [compare, debug]
+        difficulty: [3]
+        kind: mechanism
+      - id: cuda_semaphore_latch_max
+        claim: "latch::max() 是 expected 上限；expected=0 的 latch 一开始就 ready，wait 立即返回。"
+        types: [conceptual, counterfactual]
+        difficulty: [2]
+        kind: formula
+      - id: cuda_semaphore_cuda11
+        claim: "cuda::counting_semaphore 与 cuda::latch 随 CUDA 11 libcu++ 提供；device 上 try_acquire 失败不抛异常。"
+        types: [syntax, conceptual]
+        difficulty: [2]
+        kind: feature
+  - id: access_policy
+    name: Access Policy Window
+    leaves:
+      - id: access_policy_window
+        claim: "cudaAccessPolicyWindow 的 base_ptr+num_bytes 指定 VA 窗口；hitProp=cudaAccessPropertyPersisting 才请求 L2 钉住。"
+        types: [syntax, optimization]
+        difficulty: [3]
+        kind: api
+      - id: access_policy_hit_ratio
+        claim: "hitRatio ∈ [0.0, 1.0] 表示窗口内按该比例走 hitProp；hitRatio=0 等价于不申请 persisting 容量。"
+        types: [optimization, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: access_policy_stream
+        claim: "cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &attr) 把窗口绑到该 stream，不是进程全局。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: api
+      - id: access_policy_sm80
+        claim: "L2 persistence 与 Access Policy Window 是 sm_80+；sm_75 上设置窗口没有对应硬件路径。"
+        types: [conceptual, compare]
+        difficulty: [3]
+        kind: feature
+      - id: access_policy_reset
+        claim: "用完必须把窗口重置为 num_bytes=0 或 hitProp=Normal，否则后续无关 kernel 仍可能占 persisting 容量。"
+        types: [debug, optimization]
+        difficulty: [3]
+        kind: failure
+      - id: access_policy_discard
+        claim: "sm_80+ 的 discard 提示该地址不再复用；它不释放 VA，也不保证该行立刻从 L2 消失。"
+        types: [conceptual, optimization]
+        difficulty: [3]
+        kind: mechanism
+      - id: access_policy_a100_l2
+        claim: "A100 L2 容量 = 40 MiB，persisting 窗口有效容量受此上限；窗口大于 L2 时不能指望全部钉住。"
+        types: [profiling, optimization]
+        difficulty: [3]
+        kind: numeric
+      - id: access_policy_miss_prop
+        claim: "missProp 描述未命中/窗口外流量，常用 cudaAccessPropertyStreaming；把它设成 Persisting 不会把整个 L2 变成 pinned。"
+        types: [optimization, compare]
+        difficulty: [3]
+        kind: api

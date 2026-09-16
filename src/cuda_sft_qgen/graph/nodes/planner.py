@@ -43,6 +43,7 @@ def planner_node(state: PipelineState) -> dict:
         steering=steering,
         evolver_fraction=rt.settings.evolver_fraction,
         seed_pool=seed_pool,
+        anti_cap=int(rt.settings.generation.get("anti_templates_max", 15)),
     )
     iteration = int(state.get("iteration") or 0) + 1
     return {

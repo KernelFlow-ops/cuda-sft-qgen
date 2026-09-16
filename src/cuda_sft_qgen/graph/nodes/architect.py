@@ -11,13 +11,40 @@ from cuda_sft_qgen.taxonomy import dump_taxonomy, merge_leaves
 logger = logging.getLogger(__name__)
 
 
+def _sparsest_l2(taxonomy) -> tuple[dict, dict] | None:
+    best: tuple[dict, dict] | None = None
+    best_n = 10**9
+    for domain in taxonomy.domains:
+        for child in domain.get("children") or []:
+            n = len(child.get("leaves") or [])
+            if n < best_n:
+                best = (domain, child)
+                best_n = n
+    return best
+
+
 def architect_node(state: PipelineState) -> dict:
     rt = get_runtime()
     system = load_prompt("architect")
+    pair = _sparsest_l2(rt.taxonomy)
+    if pair is None:
+        return {"status": "taxonomy_ready", "log": ["architect skipped: empty taxonomy"]}
+    domain, child = pair
+    cap = min(20, int(rt.settings.generation.get("expand_max_per_call", 20) or 20))
     user = (
-        "Current taxonomy JSON (truncated domains ok to read fully):\n"
+        "Expand ONLY this L2. Mix kinds (mechanism/api/formula/feature/failure/numeric).\n"
         + json.dumps(
-            {"version": rt.taxonomy.version, "domains": rt.taxonomy.domains},
+            {
+                "domain_id": domain["id"],
+                "domain_name": domain.get("name"),
+                "l2_id": child["id"],
+                "l2_name": child.get("name"),
+                "existing_leaves": [
+                    {"id": x.get("id"), "claim": x.get("claim"), "kind": x.get("kind")}
+                    for x in (child.get("leaves") or [])
+                ],
+                "max_new_leaves": cap,
+            },
             ensure_ascii=False,
         )
     )

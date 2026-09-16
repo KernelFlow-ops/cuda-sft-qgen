@@ -1,0 +1,562 @@
+id: T24
+name: 设备侧通信
+children:
+  - id: nvshmem_rma
+    name: NVSHMEM 单边 RMA
+    leaves:
+      - id: nvshmem_rma_put_nbi_quiet
+        claim: "nvshmem_putmem_nbi 只发起传输，本地 source 在随后的 nvshmem_quiet 完成前不可复用，否则远程 dest 内容未定义。"
+        types: [debug, conceptual]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: nvshmem_rma_ptr_null
+        claim: "nvshmem_ptr(sym, pe) 仅在该 PE 的对称对象可通过 NVLink/P2P 直接映射时返回非空设备指针，跨节点 IB 路径必须返回 NULL。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: api
+      - id: nvshmem_rma_fence_vs_quiet
+        claim: "nvshmem_fence 只保证发往同一目标 PE 的 put 顺序，不保证完成；要对所有 PE 可见必须调用 nvshmem_quiet。"
+        types: [compare, conceptual]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: nvshmem_rma_putmem_size
+        claim: "nvshmem_putmem(dest, source, n, pe) 的 n 是字节数且 dest 必须落在对称堆内；把元素个数当字节数传入会使越界写落到未注册区间并失败。"
+        types: [syntax, debug, counterfactual]
+        difficulty: [2, 3]
+        kind: failure
+      - id: nvshmem_rma_put_blocking
+        claim: "nvshmem_putmem 是阻塞 put：返回后本地 source 可立即复用，不必再 quiet；把 nbi 语义套到阻塞 put 上会多余同步。"
+        types: [compare, conceptual]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: nvshmem_rma_p_scalar
+        claim: "nvshmem_p 对单个对称元素做非阻塞标量 put，完成仍依赖后续 nvshmem_quiet 或 nvshmem_fence；它不是集合操作。"
+        types: [syntax, conceptual]
+        difficulty: [2]
+        kind: api
+      - id: nvshmem_rma_ctx_put
+        claim: "nvshmem_ctx_putmem 把 outstanding RMA 隔离到指定 context；对默认 ctx 做 quiet 不会排空另一个 ctx 上的 nbi put。"
+        types: [debug, compare]
+        difficulty: [3]
+        kind: api
+      - id: nvshmem_rma_pe_range
+        claim: "put/get 的 pe 必须满足 0 ≤ pe < nvshmem_n_pes()；pe==nvshmem_my_pe() 的自 put 仍走对称堆拷贝，越界 pe 是未定义行为。"
+        types: [debug, syntax]
+        difficulty: [2, 3]
+        kind: failure
+  - id: ibgda_transport
+    name: IBGDA 设备发起 NIC
+    leaves:
+      - id: ibgda_transport_no_cpu_proxy
+        claim: "IBGDA（GDAKI）由 GPU 线程直接向 ConnectX QP 写 WQE 并敲门铃，不再经过 IBRC 的 Host proxy 线程。"
+        types: [conceptual, compare, optimization]
+        difficulty: [3]
+        kind: mechanism
+      - id: ibgda_transport_inline_12b
+        claim: "IBGDA 内联 RDMA WRITE：payload ≤12B → 数据嵌入 WQE；payload >12B → 走 DMA 且本地缓冲必须已注册。"
+        types: [optimization, conceptual]
+        difficulty: [3, 4]
+        kind: formula
+      - id: ibgda_transport_warp_coalesce
+        claim: "NVSHMEM IBGDA 在同一 warp 内 32 个 nvshmem_p 远程地址连续时可合并成 1 条消息，否则 32 次 scalar put = 32 次 NIC 发送。"
+        types: [optimization, profiling]
+        difficulty: [3]
+        kind: mechanism
+      - id: ibgda_transport_rc_per_pe
+        claim: "NVSHMEM_IBGDA_NUM_RC_PER_PE 为每个远端 PE 创建的 RC QP 数，默认 2；大规模作业改用 DCI 以免 QP 内存随 PE 数平方增长。"
+        types: [syntax, optimization]
+        difficulty: [3]
+        kind: api
+      - id: ibgda_transport_env_enable
+        claim: "IBGDA 需设置 NVSHMEM_IB_ENABLE_IBGDA=1 并配 nvidia-peermem/GDRCopy 可见的 NIC；未启用时 NVSHMEM 回退 IBRC CPU proxy。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: api
+      - id: ibgda_transport_dci_vs_rc
+        claim: "DCI/DCT 用共享可扩展 QP 把连接内存从 O(npes^2) 降到 O(npes)；RC 每对 PE 独立可靠连接，小规模延迟更稳但内存随规模平方增长。"
+        types: [compare, optimization]
+        difficulty: [3]
+        kind: mechanism
+      - id: ibgda_transport_nic_doorbell
+        claim: "IBGDA 把 NIC doorbell 与 QP 蓝图映射进 GPU VA，设备线程 st.global 写 WQE 后写门铃即可发起 RDMA，不经过 CUDA 驱动 ioctl。"
+        types: [conceptual, optimization]
+        difficulty: [3]
+        kind: mechanism
+      - id: ibgda_transport_cx6dx
+        claim: "CUDA 11.7+ / Ampere 起的 IBGDA 要求 ConnectX-6 Dx 及以上并启用 GPUDirect Async；仅 Host proxy 的 IBRC 路径在更旧 NIC 上仍可用但不能设备直接敲门铃。"
+        types: [conceptual, compare]
+        difficulty: [3]
+        kind: feature
+  - id: warp_block_scope
+    name: warp/block 集合通信原语
+    leaves:
+      - id: warp_block_scope_collective_args
+        claim: "nvshmemx_putmem_nbi_warp 必须由该 warp 全部 32 线程以完全相同的 dest/source/nelems/pe 调用，缺线程或参数不一致则行为未定义。"
+        types: [debug, syntax]
+        difficulty: [2, 3]
+        kind: failure
+      - id: warp_block_scope_block_syncthreads
+        claim: "nvshmemx_putmem_block 在块作用域内隐式要求全体线程参与，等价于通信前后的块级会合，不能放在 threadIdx.x==0 的单线程分支里。"
+        types: [debug, compare]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: warp_block_scope_thread_vs_warp
+        claim: "单线程 nvshmem_putmem 只占用 1 条 GPU 线程发 1 次 send，warp 变体用 32 线程协同但仍应是 1 次大消息；把 32 个独立 put 当成 warp API 会把 send 数放大 32 倍。"
+        types: [optimization, compare, counterfactual]
+        difficulty: [3]
+        kind: mechanism
+      - id: warp_block_scope_dci_map
+        claim: "NVSHMEM_IBGDA_DCI_MAP_BY=WARP 把 DCI QP 绑到 warp，使同一 CTA 内 32 个 warp 可并行提交而不在同一 QP 上串行；未设置时默认按 SM×warp 数创建 DCI。"
+        types: [optimization, syntax]
+        difficulty: [3, 4]
+        kind: api
+      - id: warp_block_scope_barrier_all
+        claim: "nvshmemx_barrier_all_block 必须由 CTA 内全部线程调用；它完成该 PE 上 outstanding RMA 并与 team 内其他 PE 会合，不能用 __syncthreads 替代。"
+        types: [debug, compare]
+        difficulty: [2, 3]
+        kind: api
+      - id: warp_block_scope_bcast_warp
+        claim: "nvshmemx_broadcastmem_warp 的 root/dest/nelems 在 32 线程上必须逐比特相同，且 dest 落在对称堆；用线程级 broadcast 循环代替会丢失 warp 协同。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: warp_block_scope_mask_full
+        claim: "warp 级 nvshmemx_*_warp 假定 32 线程全活跃；在 divergent 分支里只有 8 条 lane 调用时行为未定义，必须先 __syncwarp(0xffffffff)。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: failure
+      - id: warp_block_scope_fcollect
+        claim: "nvshmemx_fcollectmem_block 把每个 PE 的源块按 PE 号拼接进 dest，dest 字节数 = npes × nelems；nelems 在全体线程与全体 PE 上必须一致。"
+        types: [layout, syntax]
+        difficulty: [3]
+        kind: formula
+  - id: remote_atomics
+    name: 远端原子与信号
+    leaves:
+      - id: remote_atomics_nvlink_native
+        claim: "仅当 nvshmem_ptr 非空时，对对称地址做 native atomicAdd 才是合法的 NVLink P2P 原子；IB 远端必须改用 nvshmem_int_atomic_add。"
+        types: [debug, compare]
+        difficulty: [3]
+        kind: failure
+      - id: remote_atomics_fetch_add
+        claim: "nvshmem_int_atomic_fetch_add 返回更新前的远端值，完成对该 PE 的 AMO 可见性，但不能代替 nvshmem_quiet 去等待此前 outstanding put。"
+        types: [syntax, conceptual]
+        difficulty: [2, 3]
+        kind: api
+      - id: remote_atomics_signal_wait
+        claim: "nvshmem_putmem_signal_nbi 在数据写完后对 8 字节 signal 地址做原子加/置位，等待方 nvshmem_signal_wait_until 必须轮询同一对称 signal 对象。"
+        types: [code_complete, debug]
+        difficulty: [3]
+        kind: mechanism
+      - id: remote_atomics_system_scope
+        claim: "CUDA 11 起 cuda::atomic_ref 的 system scope 只能序化已 P2P 映射的 UVA 对端，不能跨越未映射的 IB 对称堆；跨节点原子仍走 NVSHMEM AMO。"
+        types: [compare, conceptual]
+        difficulty: [3, 4]
+        kind: feature
+      - id: remote_atomics_cswap
+        claim: "nvshmem_uint64_atomic_compare_swap(dest, cond, val, pe) 仅当远端 *dest==cond 时写入 val 并返回旧值；cond 不匹配时远端不变。"
+        types: [syntax, conceptual]
+        difficulty: [2, 3]
+        kind: api
+      - id: remote_atomics_fetch_and
+        claim: "nvshmem_uint32_atomic_fetch_and/or/xor 在远端对称字上做按位 RMW，返回旧值；对未对齐或非对称地址调用是未定义行为。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: api
+      - id: remote_atomics_nvlink_width
+        claim: "NVLink 原生原子硬件支持 32/64-bit；对 8-bit 或 16-bit 对称对象做 native atomicAdd 不能依赖 P2P 原子路径，必须用 NVSHMEM 宽度匹配的 AMO。"
+        types: [debug, compare]
+        difficulty: [3]
+        kind: failure
+      - id: remote_atomics_set
+        claim: "nvshmem_int_atomic_set 把远端对称字置为给定值且不返回旧值；随后本地线程读同一对称对象仍需 fence/quiet 才能看到远端后续写。"
+        types: [conceptual, debug]
+        difficulty: [2, 3]
+        kind: mechanism
+  - id: symmetric_heap
+    name: 对称堆与组播映射
+    leaves:
+      - id: symmetric_heap_collective_malloc
+        claim: "nvshmem_malloc 是集合操作：所有 PE 必须传入相同 size 并同时调用，否则对称偏移不一致，后续 put 会写到错误远端地址。"
+        types: [debug, conceptual]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: symmetric_heap_vmm_granularity
+        claim: "默认动态对称堆走 CUDA VMM，物理长度 size = k × max(cuMemGetAllocationGranularity(RECOMMENDED), NVSHMEM_CUMEM_GRANULARITY)，k 为正整数。"
+        types: [layout, syntax]
+        difficulty: [3]
+        kind: formula
+      - id: symmetric_heap_byom_register
+        claim: "nvshmemx_buffer_register 把已有 cudaMalloc 缓冲登记进对称堆以代替 nvshmem_malloc，未登记的设备指针传给 device put 是非法的。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: symmetric_heap_mc_ptr
+        claim: "Hopper/Blackwell NVSwitch 上 nvshmemx_mc_ptr 返回 NVLink SHARP 组播地址，一次 store 复制到 team 内所有 PE；无组播硬件时该指针不可用。"
+        types: [conceptual, optimization]
+        difficulty: [3, 4]
+        kind: feature
+      - id: symmetric_heap_env_size
+        claim: "NVSHMEM_SYMMETRIC_SIZE 以字节给出动态对称堆容量；malloc 累计超过该值返回 NULL，且该环境变量必须在 nvshmem_init 之前设置。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: api
+      - id: symmetric_heap_free_collective
+        claim: "nvshmem_free 与 malloc 一样是集合操作，全体 PE 必须对同一对称指针同时 free；只在 pe0 上 free 会破坏堆对称性。"
+        types: [debug, counterfactual]
+        difficulty: [2, 3]
+        kind: failure
+      - id: symmetric_heap_align
+        claim: "nvshmem_align(alignment, size) 要求 alignment 为 2 的幂且全体 PE 参数相同；返回指针满足 offset(pe)=ptr-heap_base 在所有 PE 上相等。"
+        types: [layout, syntax]
+        difficulty: [2, 3]
+        kind: formula
+      - id: symmetric_heap_disable_vmm
+        claim: "NVSHMEM_DISABLE_CUDA_VMM=1 时动态堆改用 cudaMalloc 而非 VMM；此时 granularity 与 cuMemMap 固定偏移假设不再成立。"
+        types: [conceptual, compare]
+        difficulty: [3]
+        kind: api
+  - id: nvshmem_teams
+    name: NVSHMEM 团队与 PE 映射
+    leaves:
+      - id: nvshmem_teams_world
+        claim: "NVSHMEM_TEAM_WORLD 包含 init 后全部 PE，nvshmem_team_n_pes(NVSHMEM_TEAM_WORLD)=nvshmem_n_pes()。"
+        types: [conceptual, syntax]
+        difficulty: [2]
+        kind: formula
+      - id: nvshmem_teams_split_strided
+        claim: "nvshmem_team_split_strided(parent, start, stride, size, config, config_mask, &newteam) 按算术序列抽取 PE；size 个成员的 pe = start + i*stride。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: nvshmem_teams_translate_pe
+        claim: "nvshmem_team_translate_pe(src_team, src_pe, dest_team) 把 src_team 内编号映射到 dest_team；若该 PE 不在 dest_team 则返回 -1。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: api
+      - id: nvshmem_teams_my_pe
+        claim: "nvshmem_team_my_pe(team) 返回调用 PE 在该 team 内的编号，范围 [0, team_n_pes)；它不等于全局 nvshmem_my_pe()，除非 team 是 WORLD。"
+        types: [compare, conceptual]
+        difficulty: [2, 3]
+        kind: api
+      - id: nvshmem_teams_destroy
+        claim: "nvshmem_team_destroy 是集合操作，team 内所有 PE 必须同时调用；销毁后仍对该 team 做 barrier/put 是未定义行为。"
+        types: [debug, conceptual]
+        difficulty: [2, 3]
+        kind: failure
+      - id: nvshmem_teams_sync
+        claim: "nvshmem_team_sync(team) 只同步控制流，不完成 outstanding RMA；要对 team 可见 put 结果必须先 quiet 再 team_sync，或直接 nvshmem_barrier。"
+        types: [compare, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: nvshmem_teams_invalid
+        claim: "split 失败或非成员 PE 上 newteam 为 NVSHMEM_TEAM_INVALID；对该句柄调用 n_pes/my_pe 不能当 0 号 team 用。"
+        types: [debug, syntax]
+        difficulty: [2, 3]
+        kind: failure
+      - id: nvshmem_teams_ctx
+        claim: "nvshmem_team_create_ctx(team, options, &ctx) 把后续 ctx_put/ctx_quiet 限定在该 team 的 PE 集合上，quiet 默认 ctx 不会排空该 team ctx。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+  - id: nvshmem_collectives
+    name: 设备侧集合通信
+    leaves:
+      - id: nvshmem_collectives_barrier_all
+        claim: "nvshmem_barrier_all 隐含 quiet：返回后本 PE 此前 put/AMO 对所有 PE 完成，且所有 PE 都到达该屏障。"
+        types: [conceptual, compare]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: nvshmem_collectives_sync_all
+        claim: "nvshmem_sync_all 只会合控制流，不保证 outstanding nbi put 完成；用 sync_all 代替 barrier_all 会使对端仍看到部分写入。"
+        types: [compare, counterfactual]
+        difficulty: [2, 3]
+        kind: failure
+      - id: nvshmem_collectives_broadcastmem
+        claim: "nvshmem_broadcastmem(team, dest, source, nelems, pe_root) 的 dest/nelems 在全体成员上必须相同，source 仅 root 需要有效对称缓冲。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: api
+      - id: nvshmem_collectives_alltoall
+        claim: "nvshmem_alltoallmem 中每个 PE 发送 nelems 字节给其余每个 PE，dest 容量 dest_bytes = npes×nelems；nelems 在全体 PE 上必须相等。"
+        types: [layout, conceptual]
+        difficulty: [3]
+        kind: formula
+      - id: nvshmem_collectives_reduce
+        claim: "nvshmem_float_sum_reduce(team, dest, source, nreduce) 把 nreduce 个 float 按元素求和到 dest；nreduce 与 dest/source 对齐要求在所有 PE 一致。"
+        types: [syntax, conceptual]
+        difficulty: [2, 3]
+        kind: api
+      - id: nvshmem_collectives_team_match
+        claim: "集合通信的 team 句柄必须是同一 split 结果；WORLD 与某个 strided team 混在同一次 broadcast 调用中是未定义行为。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: failure
+      - id: nvshmem_collectives_in_place
+        claim: "当 dest==source 时部分 reduce/fcollect 允许 in-place，但 alltoallmem 的 dest 与 source 区间不得重叠，否则远端数据损坏。"
+        types: [debug, layout]
+        difficulty: [3]
+        kind: failure
+      - id: nvshmem_collectives_barrier_team
+        claim: "nvshmem_barrier(team) 只会合该 team 的 PE 并完成发往这些 PE 的 RMA；WORLD 中不在该 team 的 PE 既不等待也不被 quiet。"
+        types: [compare, conceptual]
+        difficulty: [3]
+        kind: mechanism
+  - id: nvshmemx_api
+    name: nvshmemx 扩展入口
+    leaves:
+      - id: nvshmemx_api_init_attr
+        claim: "nvshmemx_init_attr(NVSHMEMX_INIT_WITH_MPI_COMM, &attr) 用 attr.mpi_comm 作为 PE 世界；未先 MPI_Init 就调用会失败。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: api
+      - id: nvshmemx_api_uniqueid
+        claim: "nvshmemx_get_uniqueid + nvshmemx_init_attr(NVSHMEMX_INIT_WITH_UNIQUEID) 允许无 MPI 的 bootstrap；uid 必须由 rank0 广播给其余 PE。"
+        types: [syntax, code_complete]
+        difficulty: [3]
+        kind: api
+      - id: nvshmemx_api_cumodule
+        claim: "通过 cuModuleLoad 加载的 kernel 必须先 nvshmemx_cumodule_init(module) 才能在设备代码里调用 nvshmem_*，否则设备侧通信入口未绑定。"
+        types: [debug, syntax]
+        difficulty: [3]
+        kind: failure
+      - id: nvshmemx_api_buffer_register
+        claim: "nvshmemx_buffer_register_cuda 把 cudaMalloc 指针登记为对称可 RMA 缓冲；登记长度必须覆盖后续 put 的 dest+nelems 区间。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: nvshmemx_api_mc_ptr
+        claim: "Hopper/Blackwell 上 nvshmemx_mc_ptr(team, ptr) 对已注册对称对象返回组播 VA；team 外 PE 或非 NVSwitch 拓扑得到 NULL。"
+        types: [conceptual, optimization]
+        difficulty: [3, 4]
+        kind: feature
+      - id: nvshmemx_api_put_on_stream
+        claim: "nvshmemx_putmem_on_stream(dest, source, nelems, pe, stream) 把 RMA 提交到 CUDA stream，完成以该 stream 上后续 quiet_on_stream 或 event 为准。"
+        types: [syntax, conceptual]
+        difficulty: [2, 3]
+        kind: api
+      - id: nvshmemx_api_barrier_on_stream
+        claim: "nvshmemx_barrier_all_on_stream(stream) 在 host 侧按 stream 顺序会合所有 PE；它不能从 __device__ 代码调用。"
+        types: [syntax, compare]
+        difficulty: [2, 3]
+        kind: api
+      - id: nvshmemx_api_hostlib
+        claim: "设备核里用的 nvshmem 符号由 libnvshmem_device 提供，host init/finalize 在 libnvshmem_host；只链 host 库而不 init 设备状态会导致核内 RMA 非法。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: failure
+  - id: quiet_nbi
+    name: quiet 与非阻塞完成
+    leaves:
+      - id: quiet_nbi_quiet_all_pes
+        claim: "nvshmem_quiet 等待调用 PE 发出的全部 outstanding put/get/AMO 在所有目标 PE 上完成，返回后本地 nbi source 缓冲可复用。"
+        types: [conceptual, debug]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: quiet_nbi_fence_same_pe
+        claim: "nvshmem_fence 只保证发往同一 pe 的操作按程序序交付，不等待完成；source 在 fence 后仍可能被 DMA 占用。"
+        types: [compare, conceptual]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: quiet_nbi_put_nbi_source
+        claim: "nvshmem_putmem_nbi 返回后立即改写 source[0] 是数据竞争：远端可能读到新旧混合字节，必须 quiet 之后才能复用 source。"
+        types: [debug, counterfactual]
+        difficulty: [2, 3]
+        kind: failure
+      - id: quiet_nbi_pe_quiet
+        claim: "nvshmem_pe_quiet(pe) 只排空发往该 pe 的 outstanding 操作；发往其他 pe 的 nbi put 仍未完成。"
+        types: [syntax, compare]
+        difficulty: [3]
+        kind: api
+      - id: quiet_nbi_ctx_quiet
+        claim: "nvshmem_ctx_quiet(ctx) 只完成该 context 发出的 RMA；默认 ctx 上的 quiet 不会排空 nvshmem_ctx_putmem 提交的队列。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: quiet_nbi_get_nbi
+        claim: "nvshmem_getmem_nbi 返回后本地 dest 在 quiet 前不可读；提前读 dest 会看到部分写入或旧值。"
+        types: [debug, conceptual]
+        difficulty: [2, 3]
+        kind: failure
+      - id: quiet_nbi_not_barrier
+        claim: "quiet 不与其他 PE 会合：对端可能尚未到达对应 wait；跨 PE 控制流同步必须 barrier/signal_wait，不能单靠 quiet。"
+        types: [compare, conceptual]
+        difficulty: [2, 3]
+        kind: mechanism
+      - id: quiet_nbi_blocking_put
+        claim: "阻塞 nvshmem_putmem 返回 ⇒ 本地 source 已可复用（完成语义已包含），但远端 dest 对第三方 PE 的可见性仍可能需要 fence/quiet 序列。"
+        types: [compare, conceptual]
+        difficulty: [3]
+        kind: mechanism
+  - id: signal_wait_ops
+    name: signal 与 wait_until
+    leaves:
+      - id: signal_wait_ops_wait_until
+        claim: "nvshmem_signal_wait_until(sig_addr, cmp, cmp_val) 在设备上自旋直到对称 8 字节 signal 满足比较，cmp 取 NVSHMEM_CMP_EQ/GE 等。"
+        types: [syntax, conceptual]
+        difficulty: [2, 3]
+        kind: api
+      - id: signal_wait_ops_putmem_signal
+        claim: "nvshmem_putmem_signal_nbi 保证 dest 数据对 pe 可见之后才对 sig_addr 执行 sig_op；等待方看到 signal 后即可安全读 dest。"
+        types: [conceptual, code_complete]
+        difficulty: [3]
+        kind: mechanism
+      - id: signal_wait_ops_set_vs_add
+        claim: "NVSHMEM_SIGNAL_SET 把 signal 写成给定 64-bit 值；NVSHMEM_SIGNAL_ADD 做原子加。多生产者必须用 ADD，否则 SET 会丢失计数。"
+        types: [compare, debug]
+        difficulty: [2, 3]
+        kind: api
+      - id: signal_wait_ops_uint64
+        claim: "signal 对象必须是对称堆上对齐的 8 字节字；对 4 字节 int 取地址当 sig_addr 传入 putmem_signal 是未定义行为。"
+        types: [layout, debug]
+        difficulty: [2, 3]
+        kind: failure
+      - id: signal_wait_ops_cmp_ge
+        claim: "多 put 完成计数用 SIGNAL_ADD 1 且等待 NVSHMEM_CMP_GE：收到 k 次后 wait_until(..., GE, k) 在 signal≥k 时返回；用 EQ 且 signal=k+1 会永久自旋。"
+        types: [debug, counterfactual]
+        difficulty: [3]
+        kind: formula
+      - id: signal_wait_ops_stream_signal
+        claim: "nvshmemx_signal_op_on_stream(sig_addr, signal, sig_op, pe, stream) 按 CUDA stream 序更新远端 signal，设备 wait_until 看到该值前必须该 stream 已执行到该 op。"
+        types: [syntax, conceptual]
+        difficulty: [3]
+        kind: api
+      - id: signal_wait_ops_host_wait
+        claim: "nvshmem_signal_wait_until 是设备/OpenSHMEM 侧 API；host 线程应使用 nvshmemx_signal_wait_until_on_stream 或轮询已注册 host 可见对称字，而不是在 CPU 上调设备 wait。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: signal_wait_ops_no_replace_quiet
+        claim: "wait_until 只保证该 signal 操作及其绑定的 putmem_signal 数据可见，不排空其他未绑 signal 的 nbi put。"
+        types: [compare, conceptual]
+        difficulty: [3]
+        kind: mechanism
+  - id: nvshmem_get
+    name: get/iget 对称读
+    leaves:
+      - id: nvshmem_get_blocking
+        claim: "nvshmem_getmem(dest, source, n, pe) 返回后本地 dest 的 n 字节已是远端 source 的副本，不必再 quiet 才能读 dest。"
+        types: [conceptual, compare]
+        difficulty: [2]
+        kind: mechanism
+      - id: nvshmem_get_nbi
+        claim: "nvshmem_getmem_nbi 发起后 dest 在 nvshmem_quiet 前不可读；把阻塞 get 的用法套到 nbi 上会读到未完成缓冲。"
+        types: [debug, counterfactual]
+        difficulty: [2, 3]
+        kind: failure
+      - id: nvshmem_get_g_scalar
+        claim: "nvshmem_g 从远端对称元素返回一个标量值，调用本身完成该读；它不是 nbi，也不更新本地对称堆上的镜像。"
+        types: [syntax, conceptual]
+        difficulty: [2]
+        kind: api
+      - id: nvshmem_get_source_symmetric
+        claim: "get 的 source 必须是远端 PE 上的对称对象地址，dest 可以是本地任意设备缓冲；对 cudaMalloc 未登记指针当 source 非法。"
+        types: [debug, syntax]
+        difficulty: [2, 3]
+        kind: failure
+      - id: nvshmem_get_iget_stride
+        claim: "nvshmem_iget 按 tst/sst 步长从远端 gather 到本地；nelems 是元素个数，传输字节 byte_len = nelems×sizeof(T)，步长以元素计。"
+        types: [syntax, layout]
+        difficulty: [3]
+        kind: formula
+      - id: nvshmem_get_warp
+        claim: "nvshmemx_getmem_nbi_warp 要求 32 线程相同 dest/source/nelems/pe，协同一次大 get；32 个不同 source 的线程级 get 不会自动合并。"
+        types: [optimization, compare]
+        difficulty: [3]
+        kind: mechanism
+      - id: nvshmem_get_ctx
+        claim: "nvshmem_ctx_getmem_nbi 的完成由对应 nvshmem_ctx_quiet 决定，默认 quiet 看不到该 ctx 的 get。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: api
+      - id: nvshmem_get_size_bytes
+        claim: "nvshmem_getmem 的 n 是字节数；nvshmem_get32 的字节数 = nelems×4，get64 的字节数 = nelems×8，把 n 当 nelems 传入会使长度差 4 或 8 倍。"
+        types: [syntax, debug]
+        difficulty: [2, 3]
+        kind: formula
+  - id: nvshmem_host_stream
+    name: Host 与 stream 侧 RMA
+    leaves:
+      - id: nvshmem_host_stream_put
+        claim: "nvshmemx_putmem_on_stream 从 host 提交设备缓冲之间的 RMA，依赖给定 cudaStream_t 的完成；与设备核内 nbi put 不共享同一 outstanding 队列。"
+        types: [compare, conceptual]
+        difficulty: [3]
+        kind: api
+      - id: nvshmem_host_stream_quiet
+        claim: "nvshmemx_quiet_on_stream(stream) 把 quiet 排进该 stream，只有该 stream 上此前 on_stream RMA 被等待，设备线程发出的 nbi 不受影响。"
+        types: [debug, compare]
+        difficulty: [3]
+        kind: mechanism
+      - id: nvshmem_host_stream_order
+        claim: "同一 stream 上 putmem_on_stream 后跟 kernel，kernel 可见远端写入当且仅当中间有 quiet_on_stream 或等价 event 依赖。"
+        types: [debug, conceptual]
+        difficulty: [3]
+        kind: mechanism
+      - id: nvshmem_host_stream_init
+        claim: "nvshmem_init 必须在任何 host/device NVSHMEM 调用之前由每个 PE 调用一次；重复 init 或只在 rank0 init 会使其他 PE 的堆未就绪。"
+        types: [debug, conceptual]
+        difficulty: [2]
+        kind: failure
+      - id: nvshmem_host_stream_finalize
+        claim: "nvshmem_finalize 是集合操作，返回后对称堆与 QP 已释放；其后 cudaFree 对称指针或再 put 是 use-after-finalize。"
+        types: [debug, conceptual]
+        difficulty: [2, 3]
+        kind: failure
+      - id: nvshmem_host_stream_ptr
+        claim: "host 上 nvshmem_ptr(sym, pe) 同样仅在 P2P 可映射时非空；跨节点必须走 nvshmem_putmem 而非 cudaMemcpyPeer。"
+        types: [compare, syntax]
+        difficulty: [2, 3]
+        kind: api
+      - id: nvshmem_host_stream_my_pe
+        claim: "nvshmem_my_pe()/nvshmem_n_pes() 在 init 之后才有效；init 前读取返回值未定义，不能用来决定是否调用 init。"
+        types: [syntax, debug]
+        difficulty: [2]
+        kind: api
+      - id: nvshmem_host_stream_signal
+        claim: "nvshmemx_putmem_signal_on_stream 在 stream 上把数据 put 与 signal 绑成一次提交，设备侧 wait_until 与该 stream 完成构成配对。"
+        types: [syntax, code_complete]
+        difficulty: [3]
+        kind: api
+  - id: warp_remote_amo
+    name: warp 级远端原子
+    leaves:
+      - id: warp_remote_amo_add_warp
+        claim: "nvshmemx_int_atomic_add_warp 必须由 32 线程以相同 dest/value/pe 调用，协同一次远端 RMW；缺 lane 则行为未定义。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: api
+      - id: warp_remote_amo_vs_thread
+        claim: "线程级 nvshmem_int_atomic_add 由单 lane 提交 1 次 AMO；同一 warp 32 个不同 dest 的线程 AMO = 32 次 NIC/NVLink 原子，不会自动合成 warp API。"
+        types: [optimization, compare, counterfactual]
+        difficulty: [3]
+        kind: mechanism
+      - id: warp_remote_amo_fetch_block
+        claim: "nvshmemx_int_atomic_fetch_add_block 在 CTA 全员相同参数下返回同一旧值语义由实现定义给每线程，但远端只应发生一次加；放进 tid==0 分支会失去 block 协同。"
+        types: [debug, conceptual]
+        difficulty: [3, 4]
+        kind: mechanism
+      - id: warp_remote_amo_ibgda
+        claim: "IBGDA 路径上 warp 级 AMO 可把 32 个连续地址的原子合并进更少 WQE；地址不连续时仍是 32 次 doorbell。"
+        types: [optimization, profiling]
+        difficulty: [3]
+        kind: mechanism
+      - id: warp_remote_amo_cswap
+        claim: "nvshmemx_uint64_atomic_compare_swap_warp 的 cond/val/dest/pe 在 32 线程上必须相同；用每 lane 不同 cond 调用 warp CAS 是未定义行为。"
+        types: [syntax, debug]
+        difficulty: [3]
+        kind: failure
+      - id: warp_remote_amo_nvlink
+        claim: "当 nvshmem_ptr 非空时 warp 远端原子仍应走 NVSHMEM AMO API 才能在 IB 回退路径保持可移植；直接 atomicAdd(*ptr) 在 ptr==NULL 的节点上非法。"
+        types: [compare, debug]
+        difficulty: [3]
+        kind: failure
+      - id: warp_remote_amo_quiet
+        claim: "warp AMO 对其自身 RMW 有完成语义，但不替本 warp 此前发出的 nbi put 做 quiet；put 后紧接 warp atomic 读同一地址仍可能看到旧数据。"
+        types: [conceptual, debug]
+        difficulty: [3]
+        kind: mechanism
+      - id: warp_remote_amo_signal_warp
+        claim: "nvshmemx_signal_op 可与 warp put 搭配，但没有把 32 个不同 signal 地址合成一次 op 的隐式合并；每地址仍需独立 signal 对象。"
+        types: [conceptual, optimization]
+        difficulty: [3]
+        kind: mechanism

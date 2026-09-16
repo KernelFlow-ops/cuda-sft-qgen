@@ -1,10 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
 import yaml
+
+LEAF_KINDS = (
+    "mechanism",
+    "api",
+    "formula",
+    "feature",
+    "failure",
+    "numeric",
+)
 
 
 @dataclass(frozen=True)
@@ -18,6 +27,7 @@ class Leaf:
     types: tuple[str, ...]
     difficulty: tuple[int, ...]
     hints: tuple[str, ...] = ()
+    kind: str = ""
 
     @property
     def path(self) -> list[str]:
@@ -34,6 +44,8 @@ class Taxonomy:
     name: str
     leaves: list[Leaf]
     domains: list[dict[str, Any]]
+    index_path: Path | None = None
+    domain_files: dict[str, Path] = field(default_factory=dict)
 
     def leaf_by_key(self, key: str) -> Leaf | None:
         for leaf in self.leaves:
@@ -57,48 +69,158 @@ class Taxonomy:
                 yield d["id"], d["name"], c
 
 
-def load_taxonomy(path: Path) -> Taxonomy:
-    with path.open("r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f)
+def _leaf_from_item(
+    *,
+    domain_id: str,
+    domain_name: str,
+    l2_id: str,
+    l2_name: str,
+    item: dict[str, Any],
+) -> Leaf:
+    kind = str(item.get("kind") or "").strip()
+    if kind and kind not in LEAF_KINDS:
+        kind = ""
+    return Leaf(
+        domain_id=domain_id,
+        domain_name=domain_name,
+        l2_id=l2_id,
+        l2_name=l2_name,
+        l3_id=str(item["id"]),
+        claim=str(item["claim"]),
+        types=tuple(item.get("types") or ["conceptual"]),
+        difficulty=tuple(item.get("difficulty") or [2]),
+        hints=tuple(item.get("hints") or []),
+        kind=kind,
+    )
+
+
+def _leaves_from_domains(domains: list[dict[str, Any]]) -> list[Leaf]:
     leaves: list[Leaf] = []
-    for domain in raw.get("domains", []):
+    for domain in domains:
         for child in domain.get("children", []):
             for item in child.get("leaves", []):
                 leaves.append(
-                    Leaf(
-                        domain_id=domain["id"],
-                        domain_name=domain["name"],
-                        l2_id=child["id"],
-                        l2_name=child["name"],
-                        l3_id=item["id"],
-                        claim=item["claim"],
-                        types=tuple(item.get("types") or ["conceptual"]),
-                        difficulty=tuple(item.get("difficulty") or [2]),
-                        hints=tuple(item.get("hints") or []),
+                    _leaf_from_item(
+                        domain_id=str(domain["id"]),
+                        domain_name=str(domain.get("name", domain["id"])),
+                        l2_id=str(child["id"]),
+                        l2_name=str(child.get("name", child["id"])),
+                        item=item,
                     )
                 )
+    return leaves
+
+
+def _load_yaml(path: Path) -> dict[str, Any]:
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"YAML root must be a mapping: {path}")
+    return raw
+
+
+def load_taxonomy(path: Path) -> Taxonomy:
+    raw = _load_yaml(path)
+    domain_files: dict[str, Path] = {}
+    includes = raw.get("include")
+    if includes:
+        domains: list[dict[str, Any]] = []
+        for rel in includes:
+            dpath = (path.parent / str(rel)).resolve()
+            if not dpath.exists():
+                continue
+            domain = _load_yaml(dpath)
+            if "id" not in domain:
+                raise ValueError(f"domain file missing id: {dpath}")
+            domains.append(domain)
+            domain_files[str(domain["id"])] = dpath
+    else:
+        domains = list(raw.get("domains") or [])
+    leaves = _leaves_from_domains(domains)
     if not leaves:
         raise ValueError(f"taxonomy has no leaves: {path}")
     return Taxonomy(
         version=int(raw.get("version", 1)),
         name=str(raw.get("name", "cuda")),
         leaves=leaves,
-        domains=list(raw.get("domains", [])),
+        domains=domains,
+        index_path=path,
+        domain_files=domain_files,
     )
 
 
-def dump_taxonomy(taxonomy: Taxonomy, path: Path) -> None:
-    payload = {
-        "version": taxonomy.version,
-        "name": taxonomy.name,
-        "domains": taxonomy.domains,
-    }
+def _dump_yaml(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(payload, f, allow_unicode=True, sort_keys=False)
+        yaml.safe_dump(
+            payload,
+            f,
+            allow_unicode=True,
+            sort_keys=False,
+            width=100,
+        )
 
 
-def merge_leaves(taxonomy: Taxonomy, new_leaves: list[dict[str, Any]]) -> int:
+def dump_taxonomy(taxonomy: Taxonomy, path: Path | None = None) -> None:
+    path = path or taxonomy.index_path
+    if path is None:
+        raise ValueError("dump_taxonomy requires a path")
+    if taxonomy.domain_files:
+        include: list[str] = []
+        root = path.parent
+        for domain in taxonomy.domains:
+            did = str(domain["id"])
+            dpath = taxonomy.domain_files.get(did)
+            if dpath is None:
+                dpath = root / "domains" / f"{did}.yaml"
+                taxonomy.domain_files[did] = dpath
+            payload = {
+                "id": domain["id"],
+                "name": domain.get("name", did),
+                "children": domain.get("children") or [],
+            }
+            _dump_yaml(dpath, payload)
+            include.append(str(dpath.relative_to(root)))
+        _dump_yaml(
+            path,
+            {
+                "version": taxonomy.version,
+                "name": taxonomy.name,
+                "include": include,
+            },
+        )
+        return
+    _dump_yaml(
+        path,
+        {
+            "version": taxonomy.version,
+            "name": taxonomy.name,
+            "domains": taxonomy.domains,
+        },
+    )
+
+
+def _leaf_record(item: dict[str, Any], l3_id: str, claim: str) -> dict[str, Any]:
+    rec: dict[str, Any] = {
+        "id": l3_id,
+        "claim": claim,
+        "types": item.get("types") or ["conceptual"],
+        "difficulty": item.get("difficulty") or [2],
+    }
+    kind = str(item.get("kind") or "").strip()
+    if kind:
+        rec["kind"] = kind
+    hints = item.get("hints") or []
+    if hints:
+        rec["hints"] = list(hints)
+    return rec
+
+
+def merge_leaves(
+    taxonomy: Taxonomy,
+    new_leaves: list[dict[str, Any]],
+    *,
+    allow_new_domains: bool = False,
+) -> int:
     """Merge architect-produced leaves into the in-memory taxonomy. Returns added count."""
     existing = {leaf.l3_id for leaf in taxonomy.leaves}
     added = 0
@@ -114,7 +236,15 @@ def merge_leaves(taxonomy: Taxonomy, new_leaves: list[dict[str, Any]]) -> int:
             continue
         domain = domain_index.get(domain_id)
         if domain is None:
-            continue
+            if not allow_new_domains:
+                continue
+            domain = {
+                "id": domain_id,
+                "name": item.get("domain_name") or domain_id,
+                "children": [],
+            }
+            taxonomy.domains.append(domain)
+            domain_index[domain_id] = domain
         child = None
         for c in domain.get("children", []):
             if c["id"] == l2_id:
@@ -123,26 +253,17 @@ def merge_leaves(taxonomy: Taxonomy, new_leaves: list[dict[str, Any]]) -> int:
         if child is None:
             child = {"id": l2_id, "name": item.get("l2_name", l2_id), "leaves": []}
             domain.setdefault("children", []).append(child)
-        child.setdefault("leaves", []).append(
-            {
-                "id": l3_id,
-                "claim": claim,
-                "types": item.get("types") or ["conceptual"],
-                "difficulty": item.get("difficulty") or [2],
-            }
-        )
+        rec = _leaf_record(item, str(l3_id), str(claim))
+        child.setdefault("leaves", []).append(rec)
         taxonomy.leaves.append(
-            Leaf(
-                domain_id=domain_id,
-                domain_name=domain.get("name", domain_id),
-                l2_id=l2_id,
-                l2_name=child.get("name", l2_id),
-                l3_id=l3_id,
-                claim=claim,
-                types=tuple(item.get("types") or ["conceptual"]),
-                difficulty=tuple(item.get("difficulty") or [2]),
+            _leaf_from_item(
+                domain_id=str(domain_id),
+                domain_name=str(domain.get("name", domain_id)),
+                l2_id=str(l2_id),
+                l2_name=str(child.get("name", l2_id)),
+                item=rec,
             )
         )
-        existing.add(l3_id)
+        existing.add(str(l3_id))
         added += 1
     return added

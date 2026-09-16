@@ -1,0 +1,963 @@
+id: T15
+name: 数值、数学与随机
+children:
+- id: math
+  name: 数学函数
+  leaves:
+  - id: fast_math
+    claim: "--use_fast_math 把 __sinf 等换成近似硬件指令的误差与加速"
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 1
+    - 2
+    kind: numeric
+  - id: fma_assoc
+    claim: FMA 与浮点结合律在并行归约中导致的非确定性
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+  - id: math_sinf_ulp
+    claim: "--use_fast_math 把 __sinf 换成 SFU 近似，最大误差以 ULP 计远大于 IEEE 库函数，不是“稍微快一点的同一实现”"
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 1
+    - 2
+    kind: numeric
+  - id: math_fma_contract
+    claim: nvcc 默认可能把 a*b+c 收成 fma；并行归约中关闭 --fmad=false 前后的 bitwise 结果可以不同但仍都合法
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: math_cosf_sfu
+    claim: "--use_fast_math 把 __cosf/__expf 等打到 SFU 近似；最大误差以 ULP 计远大于 libdevice 精确版"
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 1
+    - 2
+    kind: numeric
+  - id: math_rsqrt
+    claim: rsqrtf 是硬件近似，误差大于 1/sqrtf；当精确倒数平方根用会在归一化向量上偏几个 ULP
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 2
+    kind: numeric
+  - id: math_div_approx
+    claim: fast-math 下单精度除法可变成近似倒数乘；分母近 0 时与 IEEE 除法的 Inf/NaN 行为不同
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: math_libdevice
+    claim: 精确 sin 走 libdevice 软件路径，吞吐低于 SFU；合同测试若开 fast-math 不能与主机 libm bitwise 对拍
+    types:
+    - compare
+    - profiling
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: math_fmaf_vs_sep
+    claim: fmaf(a,b,c) 只舍入一次；a*b+c 在未收缩时舍入两次，结果可差 1 ULP
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    kind: formula
+- id: rng
+  name: 随机数
+  leaves:
+  - id: curand_philox
+    claim: Philox 计数器模式按 thread 拆分 vs 状态拷贝导致的相关样本
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+  - id: rng_philox_counter
+    claim: Philox 应按 (seed, subsequence=tid, offset) 拆计数器；把 curandState 拷到所有线程会输出高度相关样本
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: rng_philox_skip
+    claim: skipahead(n) 前进 n 个 128-bit 计数，不是 n 个 32-bit 输出；按输出个数 skip 会重叠或留洞
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+  - id: rng_xorwow_state
+    claim: XORWOW 状态约 48 字节且需跳转表；把同一 state 拷到所有线程会高度相关，不像 Philox 那样按计数器拆
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: rng_philox_rounds
+    claim: Philox-4x32-10 表示 4 个 32-bit 计数、10 轮；少轮的变体与 cuRAND Philox 输出不兼容
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 3
+    kind: formula
+  - id: rng_curand_host
+    claim: cuRAND host API 与 device Philox 即使同 seed 也不保证逐值相同；混用对拍会失败
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: rng_uniform_open
+    claim: curand_uniform 生成 (0,1] 或 [0,1) 取决于版本/API；取 log(u) 时 u=0 会 Inf，必须避开闭端 0
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: rng_sobol_dim
+    claim: Sobol 准随机的维度必须按坐标轴分配；所有线程用 dim=0 会塌缩到同一 1D 序列
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: rng_mtgp
+    claim: MTGP32 按 block 共享状态；一线程独占 generator 而 CTA 内其他线程也抽，会破坏递推
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+- id: numeric_tc
+  name: Tensor Core 数值
+  leaves:
+  - id: acc_loss
+    claim: FP16 累加器在大 K GEMM 中的溢出/精度丢失与分块补偿
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: numeric_tc_chunk_acc
+    claim: FP16 累加器在 K=8192 的 GEMM 上容易溢出；按 K-chunk 阶段升到 FP32 再写回是数值补偿而不是性能装饰
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: numeric_tc_tf32_error
+    claim: TF32 GEMM 相对 FP32 的误差上界由 10-bit 尾数决定，不能用 ulp(FP32) 去估
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: formula
+  - id: numeric_tc_fp16_max
+    claim: FP16 最大有限值是 65504；K=8192 且部分和较大时 FP16 acc 溢到 Inf，升 FP32 acc 是数值补偿
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: numeric_tc_tf32_mant
+    claim: TF32 尾数 10 bit、指数 8 bit；相对 FP32 的 23-bit 尾数，同指数 ulp 大约差 2^13 倍
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: formula
+  - id: numeric_tc_bf16
+    claim: BF16 指数 8 bit 尾数 7 bit，动态范围近 FP32 但精度低于 FP16；大 K 累加仍建议 FP32 acc
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: numeric_tc_mixed
+    claim: 输入 FP16、compute FP32、输出 FP16 的路径在写回时再次舍入；中间 acc 再好，D 仍只有 FP16 精度
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: numeric_tc_chunk
+    claim: 按 K-chunk 把部分和升到 FP32 再加，是补偿 FP16 acc 溢出；不切块只改 MMA 指令不能扩大 FP16 动态范围
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 3
+    kind: formula
+  - id: numeric_tc_order
+    claim: TC 累加顺序按 warp/点积树，与标量 FMA 链不同；同 dtype 也不能逐 bit 对拍 CPU
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    kind: numeric
+- id: ulp_bound
+  name: ULP 与误差界
+  leaves:
+  - id: ulp_bound_fma
+    claim: 一个 fma 的舍入误差 ≤ 0.5 ulp（round-to-nearest）；把 n 次 fma 当 n*0.5 ulp 线性加是上界高估，但并行归约顺序会改变 bit
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: ulp_bound_fastmath
+    claim: fast-math sin 的 ULP 误差远大于 libdevice 精确版，合同测试不能用 bitwise equal
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 2
+    kind: numeric
+  - id: ulp_bound_tf32
+    claim: TF32 尾数 10 bit，相对 FP32 的 ulp 间隔大约 2^(13) 倍于 FP32 ulp（同指数时）
+    types:
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: ulp_bound_reduction
+    claim: 树形归约与线性累加的误差分布不同；需要确定性应固定树形并禁用并发原子浮点加
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: ulp_bound_sqrt
+    claim: IEEE rsqrt 近似指令误差常 >1 ULP，而 sqrtf 库函数目标 ~1 ULP；用 rsqrt*x 代替 sqrt 改变误差界
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: ulp_bound_add_n
+    claim: n 次 RN 加法的最坏误差不是简单 n*0.5 ulp 可加，但 n=1e6 的线性累加能丢掉低位有效数字
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+  - id: ulp_bound_f32_f16
+    claim: FP32 转到 FP16 的舍入误差可达 0.5 ulp(FP16)，远大于 ulp(FP32)；先转再累加会放大
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: ulp_bound_contract
+    claim: 允许 FMA 收缩后误差界按 FMA 计；用分离乘加的 ulp 证明去套收缩后的代码不成立
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: ulp_bound_fast_exp
+    claim: fast-math expf 的 ULP 误差随区间变大；x>80 一类输入与精确 exp 的溢出边界也可能不同
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+- id: philox_split
+  name: Philox 计数器拆分
+  leaves:
+  - id: philox_split_tid
+    claim: subsequence = tid、offset = 循环迭代，保证线程间流不重叠；只用同一 state++ 会相关
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: philox_split_batch
+    claim: batch 维应占用 counter 的高位字段，避免与序列 offset 冲突
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: philox_split_curand
+    claim: curand_init(seed, subsequence, offset, &state) 三元组缺一不可；offset=0 且 subsequence=0 给所有线程会崩溃式相关
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: failure
+  - id: philox_split_skip_formula
+    claim: 要跳过 k 个 128-bit 输出，counter += k；按 32-bit 输出个数 /4 才是正确 k
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 3
+    kind: formula
+  - id: philox_split_offset_step
+    claim: 每线程第 i 次抽取应 offset+i（或按 128-bit 输出步进）；所有线程共用 offset=0 且 subsequence 相同则重叠
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: philox_split_seed_const
+    claim: seed 全局常数、subsequence=tid 才独立；seed=tid 且 subsequence=0 也能拆，但不能再和第一种混用
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: philox_split_host_dev
+    claim: host 上用同一 (seed,sub,off) 应复现 device Philox；换 XORWOW host API 则对不上
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    kind: numeric
+  - id: philox_split_vec4
+    claim: Philox 一次产生 4 个 32-bit；按 1 个输出 skipahead(1) 会跳过 4 个 32-bit 值
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+  - id: philox_split_grid_stride
+    claim: grid-stride 循环的 subsequence 应用全局 tid 而不是 block 内 tid，否则不同块序列重叠
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+- id: assoc_error
+  name: 结合律与非确定
+  leaves:
+  - id: assoc_error_atomicadd
+    claim: 多线程 atomicAdd(float) 的完成顺序不定，bitwise 结果跨 run 可变，数学和在舍入意义下近似
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: assoc_error_block_tree
+    claim: 块内树归约顺序固定则 block 内确定，但跨 block 再原子加仍非确定
+    types:
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: assoc_error_fma_contract
+    claim: 编译器收缩 a*b+c 为 fma 改变舍入点，-fmad=false 可关，性能下降
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: assoc_error_tc_acc
+    claim: Tensor Core 累加顺序与标量 FMA 链不同，即使 dtype 同为 FP32 也不能逐 bit 对拍
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: assoc_error_tree_depth
+    claim: 二叉树归约深度 = ceil(log2(n))，误差增长慢于线性链的 O(n ulp)；n=1e8 时两者末位可差很多
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+  - id: assoc_error_warp_then_atomic
+    claim: warp 内树归约确定，随后 atomicAdd(float) 仍使 grid 级结果跨 run 变化
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: assoc_error_fast_math_reassoc
+    claim: "--fmad=true 与快速再结合允许编译器重排 a+b+c；关闭后 bitwise 可变但仍都在舍入模型内"
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: assoc_error_kahan
+    claim: Kahan 补偿求和用额外 t、y 捕捉低位；并行块间再普通相加仍失去全局补偿
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: assoc_error_deterministic_ops
+    claim: 需要确定性应固定 CTA 树并禁用并发浮点原子；CUB 默认浮点 reduce 不保证逐 bit
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+- id: fp16_acc
+  name: FP16 累加溢出
+  leaves:
+  - id: fp16_acc_max
+    claim: 65504 是 FP16 最大有限值；部分和超过该值变 Inf，后续 MMA 全被 Inf 污染
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: fp16_acc_k8192
+    claim: K=8192 的全 1 FP16 GEMM 部分和可达 8192，已大于 65504 的 1/8 量级并在更大值时溢出
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    kind: formula
+  - id: fp16_acc_chunk32
+    claim: 每 32 或 64 个 K 把 acc 升到 FP32 再清 FP16 acc，可避免溢出；chunk 大于溢出长度则无效
+    types:
+    - optimization
+    - code_complete
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: fp16_acc_softmax
+    claim: attention 的 exp 在 FP16 上 x>11 左右溢到 Inf；running l 应用 FP32
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: fp16_acc_bias
+    claim: epilogue 在 FP16 上加较大 bias 可能先溢再 RELU；应在 FP32 epilogue 加再写回
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 3
+    kind: failure
+  - id: fp16_acc_scale
+    claim: loss scale=65536 的混合精度反传，梯度在 FP16 上极易溢；未 unscale 就进 FP16 GEMM 会 Inf
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: fp16_acc_nan
+    claim: Inf-Inf 或 0*Inf 产生 NaN 后 TC 路径会传播 NaN；检查输出 NaN 应回溯 acc dtype 而不是先怪布局
+    types:
+    - debug
+    - profiling
+    difficulty:
+    - 3
+    kind: failure
+  - id: fp16_acc_tf32_mix
+    claim: FP32 输入走 TF32 MMA 不会解决 FP16 写回溢出；溢出发生在存储转换而不是 TF32 尾数
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+- id: denorm_ftz
+  name: 非规格化与 FTZ
+  leaves:
+  - id: denorm_ftz_f32
+    claim: sm 上 FTZ/DAZ 把非规格化当 0；逐步下溢的递推在 GPU 上比主机更早变 0
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: denorm_ftz_f16
+    claim: FP16 非规格化区间更宽；FTZ 后小梯度直接变 0，不像 FP32 还能缓一下
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: denorm_ftz_compile
+    claim: nvcc 默认可能对单精度刷新非规格化；要保留 denorm 需架构/编译选项，不是改源码 fmaf 就能留
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 3
+    kind: api
+  - id: denorm_ftz_sfu
+    claim: SFU 近似对极小输入可直接出 0，与 IEEE 库函数保留 denorm 不同
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: denorm_ftz_atomic
+    claim: atomicAdd(float) 对 denorm 的处理仍走 FTZ 管道；用原子做微小累加可能全部被刷掉
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 3
+    kind: failure
+  - id: denorm_ftz_cmp
+    claim: FTZ 后 x==0 为真不代表数学上是 0；用它当“已收敛”会过早退出
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: denorm_ftz_bf16
+    claim: BF16 几乎没有 FP16 那么多 denorm 需求，但右移到 BF16 仍把 FP32 denorm 冲成 0
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: denorm_ftz_ldexp
+    claim: 用 ldexp 人为缩放可避开 denorm 区；缩放因子必须在反变换时除回，否则结果差 2^k
+    types:
+    - code_complete
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+- id: fma_round
+  name: FMA 舍入与收缩
+  leaves:
+  - id: fma_round_once
+    claim: FMA 计算 a*b+c 只舍入一次，误差 ≤0.5 ulp；分离乘加是两次 0.5 ulp
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    kind: formula
+  - id: fma_round_contract_flag
+    claim: "--fmad=false 禁止把 a*b+c 收成 fma；默认可能收缩，导致与主机 -ffp-contract=off 对拍失败"
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: fma_round_std_fma
+    claim: std::fma / fmaf 强制走 FMA；写成 (a*b)+c 是否收缩由编译器决定
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 1
+    - 2
+    kind: api
+  - id: fma_round_tc
+    claim: Tensor Core 的点积累加不是标量 FMA 链的逐次舍入；用 FMA ulp 线性模型估 TC 误差会偏
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: numeric
+  - id: fma_round_assoc
+    claim: 即使每次都是 FMA，(a+b)+c 与 a+(b+c) 仍可不同；并行归约顺序改变 bitwise
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: fma_round_fast_reassoc
+    claim: fast-math 允许再结合与收缩同时开启，误差界失去 IEEE 证明；数值测试必须放宽容差
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: fma_round_subnormal
+    claim: FMA 的中间 a*b 在无限精度下可不溢，分离乘加可能先溢到 Inf 再加
+    types:
+    - counterfactual
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: fma_round_ptx
+    claim: PTX add.f32 与 fma.rn.f32 不同指令；看 SASS 是否 FFMA 才能确认是否收缩
+    types:
+    - profiling
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+- id: curand_api
+  name: cuRAND API
+  leaves:
+  - id: curand_api_init
+    claim: curand_init(seed, subsequence, offset, &state) 三元组缺一不可；只设 seed 而 subsequence=0 给所有线程会相关
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: failure
+  - id: curand_api_skipahead
+    claim: skipahead(n) 前进 n 个内部计数，不是 n 个用户可见 float；Philox 一次 4 个 32-bit，按 float 个数 k 应 skipahead(ceil(k/4))
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+  - id: curand_api_philox4
+    claim: curand4 一次取 4 个 32-bit；与连续 4 次 curand 消耗同一计数器进度
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: curand_api_host_gen
+    claim: curandCreateGenerator 的 host 生成器不能传入 device kernel；device 必须用 curandState 指针
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: curand_api_ordering
+    claim: CURAND_ORDERING_PSEUDO_SEEDED 等改变输出顺序；同 seed 不同 ordering 序列不同
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: curand_api_poisson
+    claim: curand_poisson 内部消耗的 Philox 计数多于一个 uniform；按 1 个输出去 skip 会重叠
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+  - id: curand_api_state_align
+    claim: curandStatePhilox4_32_10_t 有对齐要求；紧凑 packed 数组不对齐时读写状态损坏
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: curand_api_mtgp_block
+    claim: MTGP 需要整 block 协作初始化；单线程 curand_init 一个 MTGP state 不够给整个 CTA 抽
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+- id: kahan_comp
+  name: 补偿求和
+  leaves:
+  - id: kahan_comp_alg
+    claim: Kahan：y=x-c; t=sum+y; c=(t-sum)-y; sum=t。漏更新 c 就退化成普通累加
+    types:
+    - code_complete
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: kahan_comp_fma
+    claim: 编译器把 Kahan 表达式收成 FMA 或再结合会消掉补偿项；需 volatile 或 -fmad=false 保护
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+  - id: kahan_comp_block
+    claim: 块内 Kahan 再跨块普通加，全局仍是分块误差；要全局补偿需把 c 也一起归约
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: kahan_comp_vs_tree
+    claim: 树归约误差 O(log n ulp)，Kahan 线性链近 O(1 ulp)；n=1e8 时两者都优于朴素链但常数不同
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+  - id: kahan_comp_fp16
+    claim: 在 FP16 上跑 Kahan 意义有限，补偿项本身会下溢；应升 FP32 再补偿
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 3
+    kind: numeric
+  - id: kahan_comp_atomic
+    claim: 对全局 sum 做原子 Kahan 不可行，因为 c 与 sum 要原子配对；并发写会拆开补偿
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: kahan_comp_neumaier
+    claim: Neumaier 改进在 |x| 大于 |sum| 时更稳；普通 Kahan 在这种量级翻转下补偿不足
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: kahan_comp_tc
+    claim: Tensor Core 部分和不能用标量 Kahan 插入 MMA 内部；只能在 tile 边界对 FP32 acc 做补偿
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+- id: tf32_mant
+  name: TF32 尾数
+  leaves:
+  - id: tf32_mant_10bit
+    claim: TF32 尾数 10 bit，FP32 是 23 bit，同指数 ulp_TF32 / ulp_FP32 = 2^(13)=8192
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: tf32_mant_exp
+    claim: TF32 指数 8 bit 与 FP32 相同，动态范围相当；溢出行为不像 FP16 那么早
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    kind: numeric
+  - id: tf32_mant_round
+    claim: FP32 输入进 TF32 MMA 先舍入尾数；往返再存 FP32 不能恢复丢掉的 13 bit
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: tf32_mant_cublas
+    claim: CUBLAS_COMPUTE_32F_FAST_TF32 走 TF32；CUBLAS_COMPUTE_32F 保持 FP32 仿真/路径，两者数值不同
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: tf32_mant_error_bound
+    claim: 一次 TF32 乘加的相对误差量级约 2^-10，不能用 2^-23 的 FP32 ulp 去写证明
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+  - id: tf32_mant_mixed
+    claim: A/B 以 TF32 乘、acc 以 FP32 加，acc 精度高但每次注入 TF32 舍入；大 K 仍积累
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: numeric
+  - id: tf32_mant_disable
+    claim: NVIDIA_TF32_OVERRIDE=0 可关库的 TF32；只改源码 math mode 而不改环境仍可能被库打开
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: tf32_mant_ptx
+    claim: mma.sync 的 .tf32 变体与 .f32 输入转换不同；看 SASS 是否 HMMA/MMA TF32 才能确认
+    types:
+    - profiling
+    - syntax
+    difficulty:
+    - 3
+    kind: feature
+- id: reduction_tree
+  name: 归约树顺序
+  leaves:
+  - id: reduction_tree_logn
+    claim: 完全二叉树深度 ceil(log2(n))；n=1024 时深度 10，线性链深度 1023，误差项数量级不同
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    kind: formula
+  - id: reduction_tree_shfl
+    claim: xor 树顺序固定则 warp 内 bitwise 稳定；改成 butterfly 与 sequential shfl_down 可能差 1 ULP
+    types:
+    - compare
+    - code_complete
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: reduction_tree_block
+    claim: block 树先 warp 再 smem；smem 阶段顺序也要固定，按 tid 原子加破坏块内确定
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: reduction_tree_grid
+    claim: grid 级确定性需要把各 CTA 结果按 CTA id 再扫；按完成顺序 atomicAdd 不确定
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 3
+    kind: failure
+  - id: reduction_tree_pair
+    claim: pairwise summation 把数组递归对半加，误差 O(log n)；实现时 n 非 2 幂要处理奇数尾
+    types:
+    - code_complete
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+  - id: reduction_tree_fastmath
+    claim: fast-math 再结合可把树打成别的括号结构；要确定必须关再结合并固定实现
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: reduction_tree_tc
+    claim: TC 内部归约树与 CUDA 核心手写树不同；即使用 FP32 acc 也不能与 CUB reduce 逐 bit 对拍
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: reduction_tree_empty
+    claim: n=0 的确定结果是 identity；未定义的未初始化缓冲会让对拍随机失败
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 1
+    - 2
+    kind: failure

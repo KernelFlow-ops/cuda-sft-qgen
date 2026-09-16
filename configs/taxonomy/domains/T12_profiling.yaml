@@ -1,0 +1,961 @@
+id: T12
+name: 调试、剖析与正确性
+children:
+- id: ncu
+  name: Nsight Compute
+  leaves:
+  - id: ncu_roofline
+    claim: NCU roofline 与 SOL 管道（l1tex、dram、tensor）解读谁是瓶颈
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 2
+    - 3
+  - id: warp_stall
+    claim: stall reason（long scoreboard、barrier、mio throttle）对应的代码改法
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+  - id: ncu_sol_pipe
+    claim: SOL 管道占用 100% 的那条（l1tex/dram/tensor）才是瓶颈；同时看 warp stall 才能决定是加占用还是改访存
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: ncu_l1tex_sector
+    claim: l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum 近似全局 load sector 数；除以理论最小 sector 得到超额倍数
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+  - id: ncu_occupancy_sol
+    claim: Occupancy 高而所有 SOL 管道都低，说明发得出但管道空；应先看 stall，而不是再加 block
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: ncu_ai_flop
+    claim: achieved AI = 近似 FLOP / DRAM 字节；低于该 GPU 的 ridge 点就是 memory-bound，加 TC 形状通常不降 walltime
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: ncu_l2_hit
+    claim: lts__t_sector_hit_rate.pct 低说明工作集超 L2；此时再加占用可能增加 miss，命中率继续掉
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: ncu_waves
+    claim: waves/SM ≈ ceil(grid_blocks / (SM数 * 每SM驻留block))；不足 1 wave 时 occupancy 百分比会偏高误导
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: ncu_replay_side
+    claim: NCU 默认 kernel replay 多次执行同一 kernel；有全局原子副作用的 kernel 必须改 range/application replay
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+- id: nsys
+  name: Nsight Systems
+  leaves:
+  - id: gpu_idle
+    claim: 时间线上 GPU idle 来自同步、小 kernel launch 或 CPU 喂不饱
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    - 3
+  - id: nsys_default_stream
+    claim: 时间线上 GPU idle 紧跟 cudaMalloc/cudaDeviceSynchronize 通常是默认流隐式同步，不是 kernel 太慢
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    kind: failure
+  - id: nsys_small_kernel
+    claim: 大量 <10µs kernel 的 gap 来自 launch 与 CPU 提交，应合图或融合，而不是先调 Occupancy
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: nsys_cuda_api_gap
+    claim: 时间线上 kernel 之间的空隙若对齐 cudaMalloc/cudaFree，瓶颈在同步分配，不是 SM 吞吐
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    kind: failure
+  - id: nsys_graph_launch
+    claim: cudaGraphLaunch 一次提交整图后 GPU 上节点间隙应远小于逐 kernel launch；若仍见 CPU 间隙则图未真正捕获
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: nsys_memcpy_sync
+    claim: cudaMemcpy 默认同步；时间线出现 GPU idle 贴着 H2D 完成，通常是默认方向同步而非 kernel 启动延迟
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 1
+    - 2
+    kind: api
+  - id: nsys_cpu_starve
+    claim: GPU 空闲且 CPU 线程在非 CUDA 工作，是喂不饱；先叠提交或图，而不是先调 Occupancy
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: nsys_stream_serial
+    claim: 两条 stream 在时间线上从不重叠且中间有 WaitEvent，是故意串行；当成意外 idle 去“优化占用”无效
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: nsys_um_fault
+    claim: UVM 缺页在时间线上显示为 CUDA 主机故障处理；memcheck 不报，NCU 的 kernel 时间会含迁移
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+- id: sanitizer
+  name: 正确性工具
+  leaves:
+  - id: compute_sanitizer
+    claim: memcheck/racecheck/synccheck/initcheck 各自能抓的错误类别
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 2
+  - id: silent_error
+    claim: 未对齐向量访问、错误 __restrict__、未同步的 async copy 如何造成静默错误
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    kind: failure
+  - id: sanitizer_synccheck_divergent
+    claim: synccheck 能抓发散 __syncthreads，抓不到缺 cp.async.wait 的静默错；后者要 racecheck 或手工 barrier 审查
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: sanitizer_memcheck_oob
+    claim: memcheck 对 device heap 越界有效，对非法共享内存 bank 映射和 TMA OOB fill 配置不一定报
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: sanitizer_initcheck_smem
+    claim: initcheck 抓未初始化 shared/global 读；对寄存器未初始化不报，对 host pinned 经 DMA 上卡也不报
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: sanitizer_racecheck_warp
+    claim: racecheck 把缺 __syncwarp 的同 CTA 共享写读标成 hazard；合法 warp shuffle 通信不应经过 smem 而无同步
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: sanitizer_memcheck_stack
+    claim: memcheck 对 local 栈溢出有效；对故意用动态索引打到邻线程 local 的错误不一定按 OOB 报
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: sanitizer_tool_one
+    claim: 一次进程只能启用一种 compute-sanitizer 工具；memcheck 与 racecheck 不能同时开
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 1
+    - 2
+    kind: api
+  - id: sanitizer_host_ptr
+    claim: kernel 解引用 host malloc 指针时 memcheck 报非法地址；UVM 托管指针则可能不报而只变慢
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+- id: ncu_metric
+  name: NCU 计数器释义
+  leaves:
+  - id: ncu_metric_sm_throughput
+    claim: sm__throughput.avg.pct_of_peak_sustained_elapsed 高不代表没有访存问题，只说明 SM 流水忙
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: ncu_metric_dram_peak
+    claim: dram__throughput 接近 100% 且 AI 低 ⇒ memory-bound；这时加 TC 形状通常无助于 walltime
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: ncu_metric_tensor
+    claim: pipe tensor 的 SOL 高说明 TC 流水满；若同时大量 FFMA，说明有非 TC 残差路径
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: ncu_metric_lineinfo
+    claim: 没有 -lineinfo 时 Source 页无法把 SASS PC 映回 C++，逐行周期归因会消失
+    types:
+    - profiling
+    - syntax
+    difficulty:
+    - 1
+    - 2
+    kind: api
+  - id: ncu_metric_occupancy
+    claim: sm__warps_active.avg.pct_of_peak_sustained_active 高只说明驻留满；若 long scoreboard 也高，加占用会更堵
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: ncu_metric_l1tex_hit
+    claim: l1tex__t_sector_hit_rate 低且 sector 超额倍数>1，优先改对齐/合并，而不是先加软件预取
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+  - id: ncu_metric_issued_ipc
+    claim: smsp__inst_executed.avg.per_cycle 远低于峰值而 SOL 低，瓶颈在延迟而非功能单元；乱加 FFMA 填不满
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: ncu_metric_dram_bytes
+    claim: dram__bytes_read.sum 应对照理论最小流量；超额比 = 实测/理论，>2 通常是 stride 或未合并
+    types:
+    - profiling
+    - layout
+    difficulty:
+    - 3
+    kind: formula
+  - id: ncu_metric_sass_pc
+    claim: Source 计数依赖 -lineinfo；只有 cubin 无行号时 PC 采样不能映射到 C++ 行
+    types:
+    - profiling
+    - syntax
+    difficulty:
+    - 1
+    - 2
+    kind: api
+- id: stall_math
+  name: Stall 与延迟公式
+  leaves:
+  - id: stall_math_scoreboard
+    claim: long scoreboard 周期 = waiting_on_miss × miss_latency；降它靠合并访存或提高 outstanding 而不是加空算术
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+  - id: stall_math_mio
+    claim: MIO throttle 与 smem/constant/texture 管道拥塞相关，加全局占用可能加重
+    types:
+    - profiling
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: stall_math_barrier
+    claim: barrier stall 比例高说明同步过密或负载不均，应量各 warp 到达时间而不是再加 __syncthreads
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: stall_math_not_issue
+    claim: not selected / issue 类 stall 往往是eligible warp 不足，与 long scoreboard 对策相反
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: stall_math_short_sb
+    claim: short scoreboard 多来自固定延迟管道（如 SFU/MIO 短依赖），对策是拉开依赖距离，不是合并全局 load
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: stall_math_lg_throt
+    claim: lg throttle 表示 load/store 单元满；再提高 outstanding 可能加重，应减向量宽度或打散 bank
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: stall_math_tex
+    claim: tex throttle 与纹理/L1TEX 管道拥塞相关；把 tex 换成 ld.global 会换 stall 种类而不是消失
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: stall_math_wait
+    claim: wait stall 来自显式 WAIT 与固定延迟；编译器插 wait 与源码 __syncthreads 不是同一计数
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: stall_math_membar
+    claim: membar/fence stall 高说明栅栏过密；把 __threadfence 当 CTA 汇合会空转等待可见性
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+- id: sanitizer_scope
+  name: Sanitizer 覆盖边界
+  leaves:
+  - id: sanitizer_scope_initcheck
+    claim: initcheck 抓未初始化 device 读，不抓 host pinned 未初始化经 DMA 上卡
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 2
+    kind: api
+  - id: sanitizer_scope_racecheck
+    claim: racecheck 对 smem/global 竞态有效，对缺 TMA mbarrier 的异步拷贝可能漏报
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: sanitizer_scope_tool_cost
+    claim: compute-sanitizer 显著降速，不能把 sanitizer 下的 NCU 数字当优化基线
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 1
+    - 2
+    kind: numeric
+  - id: sanitizer_scope_um
+    claim: UVM 缺页迁移导致的“延迟”不是 memcheck 错误；memcheck 报的是非法地址而非迁移
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: sanitizer_scope_synccheck_mask
+    claim: synccheck 对 __syncwarp(mask) 的 mask 不一致会报；mask 每线程不同比缺 barrier 更隐蔽
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+  - id: sanitizer_scope_tma
+    claim: TMA 描述符 OOB 配置不一定被 memcheck 抓住；异步副本错误要靠 mbarrier 审查或专用检查
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: sanitizer_scope_peer
+    claim: peer 指针在未 EnablePeerAccess 时 memcheck 报非法；启用后跨 GPU 竞态 racecheck 覆盖不完整
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 3
+    kind: api
+  - id: sanitizer_scope_graph
+    claim: graph 捕获后再 launch，sanitizer 仍检查每次回放；capture 期本身的 host 违规由 Runtime 报而不是 memcheck
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: sanitizer_scope_speed
+    claim: racecheck 常比 memcheck 更慢；不能把 sanitizer 下的 Nsys 间隙当 launch 优化依据
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 1
+    - 2
+    kind: numeric
+- id: ncu_source
+  name: NCU Source 与 SASS
+  leaves:
+  - id: ncu_source_lineinfo
+    claim: nvcc -lineinfo 把 SASS PC 映回 C++；只有 -G 时优化关闭，源行时间不能当发布性能
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 1
+    - 2
+    kind: api
+  - id: ncu_source_sass_mix
+    claim: 一行 C++ 可对应多条 SASS；把整行周期当成单次 load 延迟会高估该语句
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: ncu_source_pc_sample
+    claim: PC sampling 间隔不是每指令；热点行占比低可能只是采样稀疏，应结合执行计数
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 3
+    kind: numeric
+  - id: ncu_source_inlined
+    claim: 强制内联后行号落在调用点或标定函数，取决于调试信息；归因到错误函数会改错文件
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: ncu_source_pred
+    claim: SASS 谓词执行仍计 inst executed；源行“未进入分支”不等于该 PC 没跑
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: ncu_source_reg_liveness
+    claim: Source 页的寄存器压力按活动区间估；内联后区间拉长，占用下降不一定来自你加的局部变量
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: ncu_source_unroll
+    claim: "#pragma unroll 把循环摊开后热点分散到多个 PC；按循环行看会误判为变快"
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: ncu_source_cubin
+    claim: cubin 剥离调试节后 NCU 无法做源映射；cuobjdump -sass 仍可用但与 C++ 行脱钩
+    types:
+    - profiling
+    - syntax
+    difficulty:
+    - 2
+    kind: api
+- id: nsys_api
+  name: Nsys CUDA API 提交
+  leaves:
+  - id: nsys_api_launch_overhead
+    claim: 单次 cudaLaunchKernel 主机开销常在数微秒；<10µs 的 kernel 被 launch 主导，应融合或上图
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: nsys_api_default_legacy
+    claim: 旧默认流与非阻塞流之间有隐式同步；时间线上非默认流被默认流 memcpy 堵住就是这条规则
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: nsys_api_callback
+    claim: cudaLaunchHostFunc 在 GPU 队列到点后回 CPU；把重 CPU 工作放进 host callback 会拉长后续 GPU 空闲
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: nsys_api_graph_upload
+    claim: cudaGraphUpload 与 Launch 分开时，首次 Launch 前的空隙是上传不是执行；反复 Upload 同一 exec 浪费
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    kind: api
+  - id: nsys_api_mps
+    claim: MPS 下时间线交错来自多客户端；单进程 Nsys 看到的 GPU idle 可能是别的上下文在跑
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: nsys_api_nvtx
+    claim: NVTX 范围只标主机区间；用它当 kernel 名字不会改变 NCU 的 kernel 聚合键
+    types:
+    - profiling
+    - syntax
+    difficulty:
+    - 1
+    - 2
+    kind: api
+  - id: nsys_api_concurrent
+    claim: Concurrent Kernel 分析需要足够 SM 余量；满占用 kernel 在时间线上不重叠不代表 stream 没有并发资格
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: nsys_api_trace_buf
+    claim: Nsys 环形缓冲溢出时丢事件；长跑缺 cudaDeviceSynchronize 段会看起来像 GPU 没干活
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    kind: failure
+- id: stall_issue
+  name: Issue 类 stall
+  leaves:
+  - id: stall_issue_not_selected
+    claim: not selected 高说明合格 warp 多于发行槽，是调度拥挤；对策与 long scoreboard 的“缺合格 warp”相反
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: stall_issue_no_inst
+    claim: no instruction 常来自 I-cache miss 或超大内核；摊开过度的 unroll 会加重这类 stall
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: failure
+  - id: stall_issue_dispatch
+    claim: dispatch stall 表示发行管道反压；与 wait 不同，加独立算术不一定缓解
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: stall_issue_eligible
+    claim: eligible warp 数接近 0 且 long scoreboard 高，应提高 outstanding 访存或占用，而不是减同步
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+  - id: stall_issue_barrier_mix
+    claim: barrier 与 not selected 同时高，往往是 CTA 内同步把 warp 聚成一波再争发行
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: stall_issue_imc
+    claim: imc miss stall 与立即数/常量缓存相关；大表放 __constant__ 超 64KB 会改走全局路径并换 stall
+    types:
+    - profiling
+    - layout
+    difficulty:
+    - 3
+    kind: feature
+  - id: stall_issue_mio_vs_lg
+    claim: MIO throttle 走共享/常量/纹理，lg throttle 走全局 LS；两者对策不能互换
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: stall_issue_drain
+    claim: drain stall 出现在 CTA 退出阶段；短 kernel 占比高时 drain 比例被放大，应合核而不是改算法
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+- id: sanitizer_mem
+  name: memcheck 覆盖
+  leaves:
+  - id: sanitizer_mem_oob_global
+    claim: memcheck 对 cudaMalloc 堆越界按字节报；对 cudaMallocPitch 的 padding 区读写可能不报
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: sanitizer_mem_misalign
+    claim: 向量 load 未对齐时 memcheck 可报 misaligned；关掉严格对齐检查会漏掉静默错结果
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: sanitizer_mem_leak
+    claim: "--leak-check full 在进程退出时报未释放 device 堆；图捕获中的 cudaMallocAsync 需按流寿命判断，不是立即泄漏"
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: sanitizer_mem_local
+    claim: local 内存 OOB 能报；把数组开在寄存器被编译器溢出到 local 后，索引越界才进入 memcheck 视野
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: sanitizer_mem_um
+    claim: 托管内存越界仍是非法地址；缺页迁移本身不是 memcheck 错误
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: sanitizer_mem_peer
+    claim: 未映射 peer 访问报 invalid；映射后写越界按对端堆范围检查，不是按本卡堆
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: sanitizer_mem_atomic
+    claim: 越界 atomicAdd 会被 memcheck 抓；合法地址上的数据竞争则要 racecheck，memcheck 不报 race
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 2
+    kind: api
+  - id: sanitizer_mem_report
+    claim: 默认遇错继续；--error-exitcode 才能把 CI 打红，否则日志里的 OOB 会被当成功
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 1
+    - 2
+    kind: failure
+- id: ncu_replay
+  name: NCU replay 与时钟
+  leaves:
+  - id: ncu_replay_kernel
+    claim: kernel replay 把同一 launch 重放多次以填计数器组；非幂等 kernel 会累积副作用
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: ncu_replay_range
+    claim: range replay 重放 NVTX/CUDA 范围，适合前后有依赖的序列；单 kernel replay 无法保持该依赖
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    kind: api
+  - id: ncu_replay_app
+    claim: application replay 重跑整进程；启动开销大但副作用与真实运行一致
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: ncu_replay_clocks
+    claim: 锁定时钟后 SOL 百分比可比；未锁时钟时 boost 波动会让 dram SOL 在两次 run 间跳几个点
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: ncu_replay_pm
+    claim: replay 轮数 = ceil(指标数 / 硬件计数器数)；8 组计数器测 40 个指标大约 replay 5 次
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    kind: formula
+  - id: ncu_replay_skip
+    claim: NCU 的 skip 前若干 launch 用于避开初始化；skip 过多会测到错误的稳态 kernel
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: ncu_replay_cache
+    claim: replay 使缓存预热与真实首发不同；冷 L2 工作负载应用 application replay 或接受偏高命中率
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: ncu_replay_graph
+    claim: 捕获图回放时 NCU 按图节点 kernel 聚合；把整图当一个 kernel 看 SOL 会平均掉真正热点节点
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+- id: nsys_memcpy
+  name: Memcpy 与 GPU idle
+  leaves:
+  - id: nsys_memcpy_pageable
+    claim: pageable H2D 走 bounce 且常同步；时间线出现 CPU cudaMemcpy 长条贴着 GPU idle 就是这条路径
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: nsys_memcpy_pinned
+    claim: pinned+Async 才能与 kernel 重叠；pinned 但仍走默认同步 memcpy 则不会重叠
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    kind: api
+  - id: nsys_memcpy_d2d
+    claim: 同卡 D2D 走 copy engine 或 kernel；P2P D2D 未开 peer 时走 staging，时间线出现额外 H2D/D2H
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: nsys_memcpy_3d
+    claim: cudaMemcpy3D 的 pitched 跨度按 pitch 计；用 width=pitch 当逻辑宽会多拷填充字节
+    types:
+    - layout
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: nsys_memcpy_peer
+    claim: cudaMemcpyPeer 不要求 EnablePeerAccess；kernel 直接解引用才要 mapping，时间线两者开销不同
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: nsys_memcpy_sm_busy
+    claim: copy engine 忙时 SM 仍可算；看见 memcpy 就停 kernel 是人为串行，不是硬件限制
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: nsys_memcpy_sync_flag
+    claim: cudaMemcpyDefault 对 UVM 可能走同步迁移；时间线上的长空隙来自页迁，不是带宽公式里的字节/峰值
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: nsys_memcpy_chunk
+    claim: 把大块拆成多段 Async 才能与计算重叠；单次 1GB 同步拷会制造整段 GPU idle
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+- id: profiler_filter
+  name: 剖析过滤与范围
+  leaves:
+  - id: profiler_filter_kernel_regex
+    claim: NCU --kernel-name regex 过滤后，未匹配 kernel 不计入 SOL；把名字写错会得到空报告当“没瓶颈”
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 1
+    - 2
+    kind: api
+  - id: profiler_filter_nvtx
+    claim: Nsys -p NVTX 域过滤只影响显示；未打 NVTX 的 CUDA API 仍在时间线，不能当“没调用”
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: profiler_filter_ctx
+    claim: 多 GPU 必须按 device 过滤；只剖析 device 0 会漏 device 1 上的真正热点
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    kind: failure
+  - id: profiler_filter_metric_set
+    claim: 精简 metric set 减少 replay；用 full 集在副作用 kernel 上会改变数值，不是更精确
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    kind: numeric
+  - id: profiler_filter_launch_count
+    claim: "--launch-count 1 只测第一次；JIT/warmup 第一次不能代表稳态 SOL"
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    kind: api
+  - id: profiler_filter_graph_node
+    claim: 按图节点名过滤需要调试符号或手动节点名；匿名节点会被聚成一类，掩盖单个慢 kernel
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: profiler_filter_mps_client
+    claim: MPS 客户端过滤不当会把别的 job 的 kernel 算进本进程 SOL
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: profiler_filter_csv
+    claim: 导出 CSV 的单位随指标后缀变化；把 pct_of_peak 当绝对值加总会得到无意义的 >100
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula

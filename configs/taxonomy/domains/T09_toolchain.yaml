@@ -1,0 +1,907 @@
+id: T09
+name: 编译、PTX 与工具链
+children:
+- id: nvcc
+  name: nvcc / ptxas
+  leaves:
+  - id: ptxas_opt
+    claim: -Xptxas -O3/-v 看寄存器与 spill，-lineinfo 对 Nsight 的意义
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: relocatable
+    claim: relocatable device code、device 链接与 __device__ 跨 TU 调用
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: nvcc_ptxas_v
+    claim: -Xptxas -v 打印的 Registers 是每线程静态上限；spill stores 非零说明 local 流量来自寄存器溢出而不是程序员写的 local 数组
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: nvcc_rdc_abi
+    claim: -rdc=true 使 __device__ 跨 TU 走间接调用，通常增加寄存器与调用开销，不改变 clusterDim 的硬件语义
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: nvcc_opt_level
+    claim: nvcc -O 控制 host 与 device 前端，ptxas 另有 -O0..3；只开 nvcc -O3 而 -Xptxas -O0 仍会保留大量 PTX 未优化
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: nvcc_warn_spills
+    claim: -Xptxas --warn-on-spills 在溢出时告警；没有告警不等于没有 local，大数组直接进 local 不叫 spill
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: nvcc_ftz
+    claim: --ftz=true 把 denorm 当 0，常随 --use_fast_math 打开；它改变 f32 数值，不是 Tensor Core 路径开关
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: nvcc_keep
+    claim: --keep 留下 .ptx/.cubin/.fatbin；查是否打到 wgmma 应看 cubin 的 SASS 而不是只看预处理器输出
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+- id: ptx_sass
+  name: PTX 与 SASS
+  leaves:
+  - id: inline_ptx
+    claim: asm volatile PTX 的约束、clobber 与编译器重排导致的错误
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: sass_read
+    claim: 从 SASS 识别 LDG.128、LDSM、HMMA/QGMMA 判断编译器是否打到预期指令
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: ptx_sass_ldg128
+    claim: SASS 出现 LDG.128 说明编译器发出了 16B 向量加载；源码是 float 但地址 16B 对齐且连续时才会打到，否则停在 LDG.32
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: ptx_sass_clobber
+    claim: 内联 PTX 未声明 clobber 的寄存器会被 nvcc 复用，表现为间歇性错误值而不是汇编失败
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: ptx_sass_volatile
+    claim: 无 volatile 的 asm 可被 DCE 或重排越过 wait；TMA/mbarrier 等待序列必须 volatile 且 memory clobber
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+  - id: ptx_sass_ptx_vs_sass
+    claim: PTX 是虚拟 ISA，最终发射以 ptxas 的 SASS 为准；PTX 里有 mma.sync 但 SASS 只有 FFMA 说明被降级
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: ptx_sass_ldgsts
+    claim: Ampere 的 LDGSTS 对应 cp.async；Hopper 上 TMA 不会表现为 LDGSTS，用 LDGSTS 计数去判 TMA 会得出零
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: ptx_sass_bar
+    claim: SASS BAR.SYNC / BAR.WAIT / CCTL 与 PTX bar.sync / mbarrier 的对应要分开看；BAR.SYNC 不是 TMA 完成
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+- id: ptx_cache
+  name: PTX 缓存提示
+  leaves:
+  - id: ptx_cache_ca_cg
+    claim: ld.global.ca 走 L1，ld.global.cg 绕过 L1 只到 L2；流式数据用 .ca 会污染 L1
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: ptx_cache_cs
+    claim: ld.cs/st.cs 表示 streaming，替换优先级低；不是“不缓存”
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: ptx_cache_lu
+    claim: ld.lu（last use）提示该线将不再用，便于逐出；误标热数据会掉命中率
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: ptx_cache_mmio
+    claim: 对 MMIO 或 peer 映射误用缓存 load 可能读到 stale；应使用 volatile 或适当 scope 的 atomic
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 4
+    kind: failure
+  - id: ptx_cache_cv
+    claim: ld.cv 视为 volatile，绕过 L1 且不与后续普通 ld 合并；用来读设备门铃，不是加速开关
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: ptx_cache_dlcm
+    claim: -Xptxas -dlcm=cg 使默认全局加载旁路 L1；与逐条 .cg 等价，不能按函数局部关闭
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: ptx_cache_evict
+    claim: sm_80+ 的 L1::evict_first / L2::cache_hint 是创建策略；sm_70 上这些修饰符会被 ptxas 拒绝或剥掉
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: ptx_cache_nc
+    claim: ld.global.nc / __ldg 走只读路径，要求该地址在 kernel 生命期内不被写入，否则读值未定义
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+- id: abi_regs
+  name: ABI 与寄存器预算
+  leaves:
+  - id: abi_regs_param
+    claim: device 函数参数经 ABI 寄存器/栈传递；-rdc 间接调用会多保存返回地址与调用者寄存器
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: abi_regs_launch_bounds
+    claim: launch_bounds 上限写入 ELF，驱动按此分配 RF；运行时 block 小于 bounds 也不会自动给更多寄存器
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: abi_regs_spill_local
+    claim: ABI 溢出槽在 local memory，地址随 tid 变化，NCU 显示 local 而非 shared
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: abi_regs_maxrregcount
+    claim: -maxrregcount=N 是编译器硬上限，过小导致 spill，过大可能降低占用
+    types:
+    - optimization
+    difficulty:
+    - 2
+    kind: numeric
+  - id: abi_regs_min_blocks
+    claim: __launch_bounds__(maxThreads, minBlocks) 的第二参数迫使每 SM 至少 minBlocks 个 CTA；minBlocks=2 时每线程寄存器预算约减半
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: abi_regs_sm90_rf
+    claim: Hopper 每 SM 寄存器文件仍按 65536×32-bit 一类配额理解；128 线程 wgmma 的每线程寄存器 × CTA 线程数决定占用
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: abi_regs_callee_save
+    claim: 跨调用保存的寄存器在 -rdc 下更明显；把热路径 MMA 放进 __device__ 另 TU 会抬高 spill
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: abi_regs_occupancy
+    claim: 占用 = min(floor(RF/(regs*threads)), smem, warp 槽, maxCTA)；ptxas 报 128 寄存器、block=256 时每 CTA 用 32768 槽
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+- id: sass_mma
+  name: SASS MMA 识别
+  leaves:
+  - id: sass_mma_hmma
+    claim: SASS HMMA 对应 FP16 Tensor Core；若只见 FFMA 说明没打到 TC，应查 dtype/alignment/shape
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: sass_mma_qgmma
+    claim: Hopper 上 QGMMA/WGMMA 类指令对应 warp-group MMA；仍只见 HMMA 可能是编译器降级到旧 MMA
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: sass_mma_ldsm
+    claim: LDSM 从 smem 按 MMA 需要的布局载入寄存器；缺 LDSM 而用大量 LDS 说明 layout 未对齐 atom
+    types:
+    - profiling
+    - layout
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: sass_mma_tmem
+    claim: Blackwell 上应看到与 TMEM 相关的 MMA 数据路径，而不是把累加器当通用 R 寄存器堆
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+  - id: sass_mma_imma
+    claim: IMMA/IMMA.16832 一类对应 s8 Tensor Core；s8 GEMM 若只有 IMAD/DP4A 说明没走 IMMA
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: sass_mma_dmma
+    claim: DMMA 是 f64 Tensor Core（sm_80+）；f64 GEMM 只有 DFMA 时是 CUDA Core 路径
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: sass_mma_stsm
+    claim: STSM 把 fragment 按矩阵布局写回 smem；epilogue 经 smem 转置时应出现 STSM，否则仍是标量 STS
+    types:
+    - profiling
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: sass_mma_utma
+    claim: Hopper/Blackwell 的 UTMA/UTMALDG 一类对应 TMA；看不到而只有 LDGSTS 说明没走 tensor map
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 4
+    kind: feature
+- id: fatbin_arch
+  name: fatbin 与架构
+  leaves:
+  - id: fatbin_arch_gencode
+    claim: -gencode arch=compute_90,code=sm_90 嵌入真实 SASS；只有 compute_90 则 JIT 到运行 GPU，可能与开发机 ISA 不同
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: fatbin_arch_sm90a
+    claim: fp8 wgmma 等指令需要 sm_90a；-arch=sm_90 的 portable 目标可能编不过或丢失这些指令
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: fatbin_arch_family
+    claim: -arch=sm_90 不含 sm_100；在 B200 上跑只有 sm_90 cubin 的 fatbin 会走兼容 JIT 或直接无 kernel
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: fatbin_arch_real_virt
+    claim: compute_XX 是虚拟架构（PTX），sm_XX 是真实 SASS；两者都要才能既 JIT 又免 JIT
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: fatbin_arch_list
+    claim: cuobjdump -lelf 列出 fatbin 里的 sm 变体；缺 sm_80 时在 A100 上只能靠 PTX JIT
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: fatbin_arch_forward
+    claim: 新驱动可 JIT 旧 PTX 到新 GPU，但不能把 sm_90a SASS 当 sm_100a 执行
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: feature
+  - id: fatbin_arch_ptxas_arch
+    claim: ptxas --gpu-name sm_90a 决定 SASS 目标；nvcc -arch 与单独 ptxas 目标不一致会链进错误 cubin
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+  - id: fatbin_arch_lto
+    claim: -dlto / nvlink LTO 在设备链接期再优化，可能改变寄存器与是否内联 MMA 包装函数
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+- id: device_link
+  name: 设备链接 nvlink
+  leaves:
+  - id: device_link_rdc
+    claim: -rdc=true 产生可重定位 device 目标，最终由 nvlink（设备链接器）解析 __device__ 符号，不是主机 ld
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: device_link_undef
+    claim: 跨 TU 调用未定义的 __device__ 在 nvlink 时报 unresolved，而不是 nvcc 单文件阶段
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    kind: failure
+  - id: device_link_static
+    claim: 默认 -rdc=false 要求所有 device 函数在同一 TU 内联/可见；拆文件后必须开 rdc 或放进 header
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: device_link_not_nvlink_bus
+    claim: 设备链接器名叫 nvlink，与 GPU 互连 NVLink 无关；链接失败不是拓扑问题
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 1
+    - 2
+    kind: mechanism
+  - id: device_link_dlink
+    claim: -dlink 把多个 rdc 对象打成一个 host 可链的 fatbin；漏 dlink 时 host 链接器看不懂 device 符号
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: device_link_vis
+    claim: __device__ 默认内部链接；加 __device__ __noinline__ 且跨 TU 需要 extern 声明，否则各 TU 各一份
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: device_link_lto_rdc
+    claim: 设备 LTO 需要 -rdc + -dlto；只开 -O3 不会跨 TU 内联 kernel 调用的 device 函数，也不改变 .target sm_XX
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: device_link_lib
+    claim: 含 device 代码的静态库必须用 nvcc -dlink 或 -relocatable 方式消费；ar 打包的 cubin 不会被主机 ar 解析 MMA 符号
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+- id: cuobjdump
+  name: cuobjdump / nvdisasm
+  leaves:
+  - id: cuobjdump_sass
+    claim: cuobjdump -sass 打印 SASS；确认 HMMA/QGMMA/LDSM 应看这条而不是 cuobjdump -ptx
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cuobjdump_ptx
+    claim: -ptx 只反汇编嵌入的 PTX 文本；经过 ptxas 的 cubin 可能不含 PTX，此时 -ptx 为空不代表没 MMA
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: cuobjdump_arch
+    claim: fatbin 含多 arch 时必须 -arch sm_90 过滤；混看 sm_80 的 HMMA 不能证明 Hopper 路径
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cuobjdump_nvdisasm
+    claim: nvdisasm 读 cubin/elf，可看寄存器与重定位；它不执行 kernel，不能当数值调试器
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    kind: api
+  - id: cuobjdump_line
+    claim: nvcc -lineinfo 给 SASS 源行映射；缺 lineinfo 时 Nsight source 为空，不等于 -arch 或优化关掉
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    kind: feature
+  - id: cuobjdump_symbols
+    claim: cuobjdump -symbols 列出 device 符号；mangling 后的 MMA kernel 名要用 c++filt，不能按源名字符串匹配
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: cuobjdump_resource
+    claim: cubin 头里的寄存器/smem 需求应与 ptxas -v 一致；不一致通常是看错了 fatbin 里的另一 arch
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cuobjdump_reloc
+    claim: rdc cubin 含设备重定位项；未 dlink 的对象里 call 目标是 stub，SASS 看起来“没内联”是正常的
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+- id: inline_regs
+  name: 内联 PTX 约束
+  leaves:
+  - id: inline_regs_r_constraint
+    claim: '"=r" 是 32-bit 寄存器，"=l" 是 64-bit；对指针用 =r 会截断地址'
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: inline_regs_plus
+    claim: '"+r" 表示读写同一寄存器；mma.sync 的累加器必须 +r/+f，用 =r 会丢掉旧 acc'
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: inline_regs_f
+    claim: '"=f" 是 f32 寄存器约束；把 f32 acc 用 =r 再 bitcast 可能触发额外 mov 或错误寄存器类'
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: inline_regs_memory
+    claim: 第三段 clobber 列表要含 "memory" 才能阻止编译器跨 asm 缓存 smem/gmem；漏掉时 wait 后仍用旧 SSA 值
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+  - id: inline_regs_predicate
+    claim: 谓词约束 "=p" 对应 1-bit pred 寄存器；用 "=r" 接 setp 结果再当 @p 会类型错
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: inline_regs_align
+    claim: 内联 ld.global.v4.f32 仍要求 16B 对齐；约束无法在编译期插入对齐断言，未对齐是静默错
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    kind: failure
+  - id: inline_regs_template
+    claim: PTX 模板里的 %0 按约束顺序绑定；写错顺序会把 shape 立即数喂进寄存器槽
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: inline_regs_ncc
+    claim: asm 块默认可被移动；对 mbarrier.wait 序列必须 volatile，否则 ptxas 可把它上移到 TMA 之前
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+- id: fast_math
+  name: fast math 与 FTZ
+  leaves:
+  - id: fast_math_use
+    claim: --use_fast_math 打开 --ftz --prec-div=false --prec-sqrt=false --fmad=true，改变 f32 除法/开方误差
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    kind: numeric
+  - id: fast_math_fmad
+    claim: --fmad=true 把 a*b+c 合成 FMA；非融合的两次舍入与 FMA 在病态值上可差 1 ulp 以上
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: fast_math_not_tc
+    claim: fast math 不影响 Tensor Core 是否启用；TC 由 dtype/shape/intrinsic 决定
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: fast_math_sin
+    claim: __sinf/__expf 是硬件近似；与 std::sin 的误差可到 11 ulp 量级，不能当 IEEE 对照
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    kind: numeric
+  - id: fast_math_div
+    claim: --prec-div=false 用近似倒数；归约循环里反复近似除会积累，与 / 运算符 IEEE 除不同
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: fast_math_tf32
+    claim: sm_80+ 上 --tf32=true 让 f32 MMA/cuBLAS 走 TF32 Tensor Core，截 13-bit 尾数；与 --use_fast_math 是独立开关
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+  - id: fast_math_denorm
+    claim: FTZ 把输入 denorm 刷 0，梯度很小的 f32 核会整段变 0；这不是溢出
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: fast_math_host
+    claim: nvcc --use_fast_math 主要作用于 device 编译；host 侧 GCC -ffast-math 是另一套，对照数值要两边分开关
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 2
+    kind: mechanism
+- id: nvrtc
+  name: NVRTC / JIT
+  leaves:
+  - id: nvrtc_compile
+    claim: nvrtcCompileProgram 产出 PTX 字符串，再 cuModuleLoadData；缺 -arch 时默认目标可能不是当前 GPU
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: nvrtc_include
+    claim: NVRTC 默认头文件搜索不含完整 CUTLASS；JIT 一个 collective kernel 必须自己提供 include path
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: nvrtc_lto
+    claim: nvrtc 可输出 LTO-IR；与预编译 rdc 库做 nvJitLink，才能在运行时内联跨 TU device 函数
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: nvrtc_name_expr
+    claim: nvrtcAddNameExpression + nvrtcGetLoweredName 才能拿到模板 kernel 的 mangled 名；硬猜符号会 cuModuleGetFunction 失败
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: nvrtc_opt
+    claim: NVRTC 的 -O 与 --ptxas-options 同样影响 spill；JIT 默认优化级别不等于 nvcc 命令行习惯
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: nvrtc_arch_a
+    claim: JIT sm_90a 代码要在 options 里写 sm_90a；只写 sm_90 时 fp8 wgmma 可能编不过
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: nvrtc_error_log
+    claim: nvrtcGetProgramLog 才有真正诊断；只看 NVRTC_ERROR_COMPILATION 不知道哪条 MMA 形状非法
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: nvrtc_cache
+    claim: 驱动 PTX JIT 缓存按 PTX 文本与 arch；改一条立即数但缓存键未变会跑到旧 cubin
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+- id: ptx_target
+  name: PTX .version / .target
+  leaves:
+  - id: ptx_target_directive
+    claim: .target sm_90a 限制指令集；在 sm_80 目标文件里写 wgmma.mma_async 会被 ptxas 拒绝
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: ptx_target_version
+    claim: .version 8.0+ 才有完整 Hopper TMA/wgmma 语法；更低 version 解析器不认 cp.async.bulk.tensor
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: ptx_target_mma_isa
+    claim: 指令是否合法由 .target 决定，不是由运行 GPU 事后降级；编进 sm_90 cubin 的 wgmma 不能在 sm_80 上 JIT 掉
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: ptx_target_map
+    claim: .pragma "nounroll" 作用于随后循环；写在函数入口不等于禁止所有展开
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: ptx_target_entry
+    claim: .entry 是 kernel 入口，.func 是 device 函数；对 .func 使用 .reqntid 无意义
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: ptx_target_reqntid
+    claim: .reqntid 把 CTA 线程数写进 cubin，与 launch 不符会失败；它不是占用提示
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: ptx_target_maxnreg
+    claim: PTX .maxnreg 与 nvcc -maxrregcount 同源信息；与运行时 setmaxnreg 指令不是一回事
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: ptx_target_sm100a
+    claim: tcgen05.* 需要 .target sm_100a；写成 sm_100 可能被拒。sm_120 目标没有这些指令
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 4
+    kind: feature
+- id: lineinfo_debug
+  name: 调试符号与 lineinfo
+  leaves:
+  - id: lineinfo_debug_g
+    claim: nvcc -G 关闭多数优化并插入设备调试信息，TC/向量化常消失；性能分析不该用 -G 二元
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 2
+    kind: failure
+  - id: lineinfo_debug_lineinfo
+    claim: -lineinfo 只加源行映射、保持优化；Nsight Compute 的 source 视图依赖它
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 1
+    - 2
+    kind: api
+  - id: lineinfo_debug_device_debug
+    claim: -G 与 -lineinfo 同时开时以 -G 的未优化路径为准；以为“有 lineinfo 就是发布优化”会误判 SASS
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: lineinfo_debug_host
+    claim: -g 是 host 调试符号，不给 device SASS 行号；只开 -g 时 NCU source 仍空
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 1
+    - 2
+    kind: api
+  - id: lineinfo_debug_assert
+    claim: device 侧 assert 需要 -G 或显式开启；发布构建里 assert 被剥掉后越界 MMA 不会 soft-fail
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    kind: failure
+  - id: lineinfo_debug_ncu_replay
+    claim: NCU replay 要求可重建 launch；缺 lineinfo 仍能采硬件计数，只是不能注释到源行
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: lineinfo_debug_strip
+    claim: cuobjdump 看到 .debug_line 被 strip 后 Nsight 无法映射；strip 不影响 HMMA 是否存在
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: lineinfo_debug_opt_keep
+    claim: -O3 -lineinfo 是性能分析的常规组合；用 -O0 去“看清 MMA”会得到完全不同的指令流
+    types:
+    - profiling
+    - counterfactual
+    difficulty:
+    - 2
+    kind: failure

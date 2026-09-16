@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from cuda_sft_qgen.jsonutil import parse_question_payload
+from cuda_sft_qgen.jsonutil import _scan_fields, normalize_language, parse_question_payload
 
 
 SAMPLE_SYNCTHREADS = """{
@@ -100,3 +100,20 @@ def test_think_tag_stripped():
     obj = parse_question_payload(raw)
     assert obj is not None
     assert "coalescing" in obj["question"]
+
+
+def test_language_extra_keys_and_leak():
+    raw = '''{
+  "question": "CUDA coalescing 对齐要求是什么？请给出事务大小。",
+  "tests_claim": "coalescing",
+  "language": "en",
+  "operator": "deepen"
+}'''
+    obj = parse_question_payload(raw)
+    assert obj is not None
+    assert obj["language"] == "en"
+    scanned = _scan_fields(raw)
+    assert scanned is not None
+    assert scanned["language"] == "en"
+    assert normalize_language('en",\n  "operator": "deepen') == "en"
+    assert normalize_language("zh") == "zh"

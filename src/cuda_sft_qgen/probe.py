@@ -62,6 +62,15 @@ def probe_concurrency(data_dir: Path | None = None) -> dict:
         emb_peak = rt.pool.peak["embed"]
         emb_keys = list(rt.pool.acquire_counts["embed"])
 
+        mix_n = min(n_llm, 4) + min(n_emb, 4)
+
+        def mixed_job(i: int):
+            if i % 2 == 0:
+                return llm_job(i)
+            return emb_job(i)
+
+        mix_dt, _ = _run_parallel(max(2, mix_n), mixed_job)
+
         report = {
             "keys": rt.pool.n_keys,
             "llm_per_key": rt.pool.llm_per_key,
@@ -78,12 +87,20 @@ def probe_concurrency(data_dir: Path | None = None) -> dict:
             "embed_ok": sum(1 for x in emb_out if x),
             "llm_overlap": llm_peak >= 2,
             "embed_overlap": emb_peak >= 2,
+            "mixed_parallel_sec": round(mix_dt, 2),
+            "overlap_samples": rt.pool.overlap_samples,
+            "llm_embed_overlap": rt.pool.overlap_samples > 0,
             "used_multiple_keys_llm": sum(1 for c in llm_keys if c > 0) >= min(2, rt.pool.n_keys),
             "stats_before_llm": llm_s,
+            "prompt_cache": None if rt.prompt_cache is None else rt.prompt_cache.stats(),
+            "embedding_cache": None if rt.embedding_cache is None else rt.embedding_cache.stats(),
         }
         return report
     finally:
         reset_runtime(token)
+        closer = getattr(rt, "close", None)
+        if callable(closer):
+            closer()
 
 
 def probe_pipeline(tmp: Path, *, target: int = 6, batch: int = 6) -> dict:
@@ -105,3 +122,6 @@ def probe_pipeline(tmp: Path, *, target: int = 6, batch: int = 6) -> dict:
         }
     finally:
         reset_runtime(token)
+        closer = getattr(rt, "close", None)
+        if callable(closer):
+            closer()

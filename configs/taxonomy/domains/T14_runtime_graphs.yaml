@@ -1,0 +1,1012 @@
+id: T14
+name: Runtime、Driver 与 Graphs
+children:
+- id: stream_event
+  name: Stream 与 Event
+  leaves:
+  - id: stream_order
+    claim: 同一 stream 有序、不同 stream 默认并发；错误 cudaDeviceSynchronize 的危害
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 1
+    - 2
+  - id: event_cross
+    claim: cudaStreamWaitEvent 跨 stream 依赖与 event 的 timing 标志开销
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 2
+  - id: stream_event_null_sync
+    claim: cudaStreamSynchronize(NULL) 同步所有流；在本意只等一条流时会把无关 stream 上的 kernel 也挡住
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 1
+    - 2
+    kind: failure
+  - id: stream_event_timing_flag
+    claim: cudaEventCreateWithFlags 不用 DisableTiming 时 event 记录有额外开销，热路径 WaitEvent 应关 timing
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 2
+    kind: api
+  - id: stream_event_wait_dir
+    claim: cudaStreamWaitEvent(s, e) 让 s 等 e，不是让记录 e 的流去等 s；方向反了会造成死等或不等
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: stream_event_query
+    claim: cudaEventQuery 成功只说明该 event 及之前该流工作完成；不能推断其他流状态
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 1
+    - 2
+    kind: mechanism
+  - id: stream_event_nonblocking
+    claim: cudaStreamNonBlocking 不与默认流隐式同步；仍用默认流 memcpy 会与该流并发，数据竞争
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: stream_event_record_default
+    claim: 在默认流 Record 的 event 会等所有旧默认流工作；用来当轻量互斥会意外全局串行
+    types:
+    - debug
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: stream_event_elapsed
+    claim: cudaEventElapsedTime 要求两端都是 timing event 且均已完成；DisableTiming 的 event 会报错
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 1
+    - 2
+    kind: api
+  - id: stream_event_prio
+    claim: 高优先级流在同 GPU 上只影响调度偏好，不保证抢占正在跑的 CTA；不能当实时截止保证
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: feature
+- id: graphs
+  name: CUDA Graphs
+  leaves:
+  - id: graph_capture
+    claim: stream capture 的禁止操作、thread-local 捕获与 update 参数的限制
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: graph_update
+    claim: exec graph 可更新的 kernel 参数 vs 必须重建的拓扑变化
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+  - id: graphs_forbidden_capture
+    claim: stream capture 禁止 cudaMalloc（非 async）、host 函数节点之外的隐式同步；违例使 capture 失败而不是延后执行
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: graphs_update_topo
+    claim: cudaGraphExecUpdate 不能加边/换 kernel 函数指针；只能改 launch 维、smem、kernel 参数指针值
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: graphs_instantiate
+    claim: cudaGraphInstantiate 才生成 exec；对未实例化的 Graph 调 Launch 非法
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: graphs_upload
+    claim: cudaGraphUpload 把 exec 传到设备；首次 Launch 隐式 upload，反复跨设备 Launch 未 upload 会失败或重建
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 3
+    kind: api
+  - id: graphs_fork_join
+    claim: 捕获时在同一 stream 上的 WaitEvent 变成图边；漏记 event 会让本应汇合的节点并发，数据竞争
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: graphs_param_update
+    claim: cudaGraphExecKernelNodeSetParams 可改核参与网格；改函数指针或 smem 超限组合可能仍要重建
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: graphs_capture_global
+    claim: cudaStreamCaptureModeGlobal 禁止本线程其他未捕获流上的非法调用；Relaxed 更松也更易漏同步
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: graphs_empty
+    claim: 空图可以实例化但 Launch 几乎无设备工作；用来测 launch 开销可以，不能当计算图
+    types:
+    - conceptual
+    - profiling
+    difficulty:
+    - 1
+    - 2
+    kind: numeric
+- id: memory_api
+  name: 内存与驱动 API
+  leaves:
+  - id: mempool
+    claim: 异步分配 cudaMallocAsync 与 mempool 在流序中的复用
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 2
+    - 3
+  - id: driver_vs_runtime
+    claim: Driver API 上下文管理 vs Runtime 隐式上下文，混用时的注意点
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+  - id: memory_api_async_free_order
+    claim: cudaFreeAsync 相对 stream 有序，在该 stream 上后续 kernel 才保证内存已回收；另一 stream 无 WaitEvent 就复用指针是 UAF
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: memory_api_driver_ctx
+    claim: Driver API 的 cuCtxSetCurrent 与 Runtime 隐式上下文不是同一个；混用未 push 的 context 会看到 cudaErrorInvalidDevice
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: memory_api_pool_reuse
+    claim: cudaMallocAsync 从 mempool 按流序复用；在未同步的另一流上立刻 malloc 到同一地址是合法复用前的 UAF 窗口
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 3
+    kind: failure
+  - id: memory_api_trim
+    claim: cudaMemPoolTrimTo 只释放空闲块到指定水位；不能 trim 仍被流持有的块
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: memory_api_cu_mem
+    claim: Driver cuMemAlloc 的设备指针与 Runtime cudaMalloc 同一地址空间，但释放 API 必须配对，混用 free 未定义
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: memory_api_async_copy
+    claim: cudaMemcpyAsync 到 pageable host 可能同步；要真正异步两端都需 pinned 或 device
+    types:
+    - debug
+    - profiling
+    difficulty:
+    - 2
+    kind: api
+  - id: memory_api_attr_reuse
+    claim: mempool 的 reuse follow event 依赖属性；关掉 reuse 后 Async free 不再把块提前给后续 malloc
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: memory_api_primary
+    claim: Runtime 隐式 primary context 与 cuDevicePrimaryCtxRetain 是同一 ctx；cuCtxCreate 出的是另一个，混用会 InvalidContext
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+- id: graph_cond
+  name: 条件图与子图
+  leaves:
+  - id: graph_cond_node
+    claim: conditional graph node 在 CUDA 12+ 按条件走不同子图；条件变量必须是图捕获允许的类型，不能在 device 上随便写 host bool
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: graph_cond_child
+    claim: child graph 节点嵌入已实例化的图，更新 child 拓扑通常要重建父 exec graph
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: graph_cond_capture
+    claim: 捕获期间创建 child/cond 有 API 限制，违规会让 capture 失败
+    types:
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: graph_cond_perf
+    claim: 条件节点有额外调度开销，高频微小条件不如把分支做成 kernel 内 predication
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: graph_cond_handle
+    claim: 条件节点的 cudaGraphConditionalHandle 必须在图捕获允许的方式创建；host bool 指针当 handle 非法
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: graph_cond_while
+    claim: WHILE 条件图在每次迭代重跑子图；迭代次数无上界会把 exec 跑成死循环，不像 host for 那样展开节点
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: graph_cond_if_body
+    claim: IF 节点的 then/else 子图在实例化时都存在；未走的分支仍占图内存，不是运行时才编译
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: graph_cond_set
+    claim: device 上设置条件要走规定的内核或 API；普通 store 到 host pinned bool 不构成条件变量发布
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 3
+    kind: failure
+  - id: graph_cond_update
+    claim: 改条件子图拓扑通常使 exec update 失败；只能改已有节点参数
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: graph_cond_nest
+    claim: 条件里再嵌套 child graph 加深调度；高频微分支应下沉到 kernel predication
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: numeric
+- id: green_ctx
+  name: Green context
+  leaves:
+  - id: green_ctx_sm_mask
+    claim: Green context 把 kernel 限制在 SM mask 子集上，占用计算应按可用 SM 数而不是整卡
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: green_ctx_stream
+    claim: green context 上创建的 stream 不能假设与默认上下文的 stream 无序并发而不加同步
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: green_ctx_mig_diff
+    claim: Green context 是软件 SM 分区，MIG 是硬件实例；前者共享内存容量，后者内存物理切开
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: green_ctx_launch
+    claim: 在错误 context 上 launch 会落到未绑定 SM 集或 InvalidContext，不是静默在全卡跑
+    types:
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: green_ctx_create
+    claim: cuGreenCtxCreate 的 SM 资源描述决定可用 SM 集；创建后再改 mask 不会改变已有 ctx
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: green_ctx_devres
+    claim: green context 与默认 ctx 共享显存容量；OOM 按整卡堆算，不是按 SM 比例切内存
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: green_ctx_occupancy
+    claim: 占用计算的 SM 数应取 green ctx 的 SM 数；mask 只含 16 个 SM 时仍用整卡 108 估 block 会过度订阅
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: green_ctx_peer
+    claim: green ctx 上的 P2P 能力不自动等于默认 ctx；未在该 ctx 启用 peer 时解引用仍非法
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: green_ctx_mig
+    claim: MIG 实例里再开 green ctx 是在实例 SM 子集上再切；不能用 green ctx 模拟 MIG 的内存隔离
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: green_ctx_stream_dev
+    claim: 在 green ctx 当前时 cudaStreamCreate 绑到该 ctx；切回默认 ctx 后在该流 launch 可能 InvalidContext
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    - 4
+    kind: api
+- id: capture_ban
+  name: Capture 禁令清单
+  leaves:
+  - id: capture_ban_malloc
+    claim: 捕获中 cudaMalloc（同步分配）非法；应 cudaMallocAsync 到捕获所用 stream
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: capture_ban_host_sync
+    claim: cudaMemcpy 默认同步以及 cudaDeviceSynchronize 会打断 capture
+    types:
+    - debug
+    difficulty:
+    - 2
+    kind: failure
+  - id: capture_ban_threadlocal
+    claim: capture 是 per-stream 的，另一线程在同一 stream 上乱入 API 会破坏捕获图
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: capture_ban_update
+    claim: 捕获得到的图更新规则与手工搭建的图相同：改拓扑要重建，改参数可 update
+    types:
+    - compare
+    difficulty:
+    - 3
+    kind: api
+  - id: capture_ban_legacy_default
+    claim: 捕获期间对遗留默认流的同步 API 非法；应使用 per-thread 默认流或明确非默认流
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: capture_ban_event_query
+    claim: 捕获中 cudaEventQuery/StreamQuery 会破坏捕获或失败；查询类 API 不是可捕获节点
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: capture_ban_alloc_sync
+    claim: cudaMalloc 同步分配在捕获中非法；cudaMallocAsync 到正在捕获的流才合法
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: capture_ban_peer
+    claim: 部分 P2P 使能/禁止 API 在捕获中非法；应在捕获外配置拓扑
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: capture_ban_mode_thread
+    claim: ThreadLocal 模式允许同线程其他流不捕获；另一线程向捕获流插 API 仍破坏图
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: capture_ban_host_node
+    claim: cudaLaunchHostFunc 可成为 host 节点；普通 C++ 函数在捕获线程直接调用不会进图，只是立刻在 CPU 跑
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+- id: stream_cb
+  name: Stream 回调与等待
+  leaves:
+  - id: stream_cb_hostfunc
+    claim: cudaLaunchHostFunc 在流到达时于主机执行；在回调里再调 cudaMalloc 可能死锁或非法
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: stream_cb_legacy_cb
+    claim: cudaStreamAddCallback 与 HostFunc 类似但不推荐；回调期间不允许大多数 CUDA Runtime 调用
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: stream_cb_wait_value
+    claim: cuStreamWaitValue32 等设备内存地址到指定值；地址必须 device 可访问且对齐 4B
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: stream_cb_flush
+    claim: cuStreamWriteValue 在流序写门闩；与 WaitValue 配对可做跨流门，而不经过 event
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: stream_cb_timeout
+    claim: cudaStreamSynchronize 无超时；要限时只能循环 Query，Query 失败不代表后续会成功
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: stream_cb_priority
+    claim: 同优先级流之间不保证公平；一条长 kernel 可挡住同优先级的短 kernel
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: stream_cb_begin_capture
+    claim: 正在捕获的流上再 BeginCapture 失败；嵌套捕获不是合法栈
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: stream_cb_attach_mem
+    claim: cudaStreamAttachMemAsync 影响 UVM 可访问性；捕获中错误 attach 会使捕获失败
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+- id: graph_inst
+  name: Graph 实例化与更新
+  leaves:
+  - id: graph_inst_flags
+    claim: Instantiate 的 auto-free 等标志决定 exec 销毁时是否释放图内分配；漏 flag 会泄漏 mempool 块
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: graph_inst_error_node
+    claim: 实例化失败可返回出错节点；capture 期通过、instantiate 失败常见于禁止的节点组合
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: graph_inst_update_result
+    claim: cudaGraphExecUpdate 返回 Success/TopologyChanged 等；TopologyChanged 必须重建，不能忽略继续 Launch
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 3
+    kind: api
+  - id: graph_inst_set_params
+    claim: 对 exec 改 kernel 参数后不必 update 整图；改边或加节点则必须重建 exec
+    types:
+    - compare
+    - syntax
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: graph_inst_device
+    claim: exec 绑定实例化时的设备；在另一 device 上 Launch 失败，不是静默迁移
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: graph_inst_clone
+    claim: cudaGraphClone 复制节点与边，不复制 exec；对 clone 再 instantiate 得到独立 exec
+    types:
+    - syntax
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: graph_inst_debug_dot
+    claim: cudaGraphDebugDotPrint 打印拓扑；更新失败时用它核对边，而不是反复 Launch
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    kind: api
+  - id: graph_inst_launch_stream
+    claim: cudaGraphLaunch(exec, stream) 把整图插入该流；图内节点并发由图边决定，不由该流再拆
+    types:
+    - conceptual
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+- id: mempool_attr
+  name: Mempool 属性
+  leaves:
+  - id: mempool_attr_reuse_event
+    claim: cudaMemPoolAttrReuseFollowEventDependencies 允许跨流按 event 复用；关掉后必须同流序才复用
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: mempool_attr_release_th
+    claim: ReleaseThreshold 控制空闲字节何时还给驱动；阈值 0 更频繁回收，分配延迟升高
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: mempool_attr_used
+    claim: ReservedMemCurrent 是池向驱动要过的量；Used 是应用占用，两者差不是泄漏而是缓存
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: mempool_attr_alloc_stream
+    claim: MallocAsync 的流与池的访问位置要匹配；在 device 0 池上对 device 1 的流分配失败
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: mempool_attr_export
+    claim: 导出 mempool 句柄给别的进程不自动导出其中指针；指针仍要按 IPC/VMM 规则分享
+    types:
+    - conceptual
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: mempool_attr_trim_to
+    claim: TrimTo(bytes) 试图把保留降到 bytes；正在使用 1GB 时 TrimTo(0) 实际保留仍 ≥ 1GB
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 2
+    kind: formula
+  - id: mempool_attr_default
+    claim: cudaDeviceSetMemPool 改变该设备默认池；未设时 Async 走设备默认池而不是 NULL 失败
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: mempool_attr_graph
+    claim: 图捕获中的 MallocAsync 从池取块并变成图节点；图销毁前 trim 不能回收这些块
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+- id: driver_ctx
+  name: Driver 上下文
+  leaves:
+  - id: driver_ctx_push_pop
+    claim: cuCtxPushCurrent/PopCurrent 维护线程 ctx 栈；只 SetCurrent 不 Pop 会把栈深度搞乱
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: driver_ctx_primary
+    claim: cuDevicePrimaryCtxRetain 与 Runtime 共用 primary；cuCtxCreate 是独立 ctx，两边各 malloc 互不可见
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: driver_ctx_flags
+    claim: primary ctx 的 SCHED_AUTO/SPIN 等标志必须在首次 Retain/Runtime 初始化前设；之后再设失败
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: driver_ctx_api_mix
+    claim: Runtime API 在当前 ctx 上操作；Driver 已切到另一 ctx 时 cudaMalloc 进的是新 ctx，旧指针失效
+    types:
+    - debug
+    - counterfactual
+    difficulty:
+    - 3
+    kind: failure
+  - id: driver_ctx_module
+    claim: cuModuleLoad 的模块属于加载时 ctx；在另一 ctx 启动其函数非法
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: driver_ctx_device
+    claim: cuCtxGetDevice 返回 ctx 绑定设备；cudaSetDevice 改 Runtime 侧 current，不一定切到你以为的 Driver ctx
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: driver_ctx_green
+    claim: green context 不是 primary ctx 的别名；需要专用 API 转成可用于 Runtime 的句柄
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: api
+  - id: driver_ctx_destroy
+    claim: cuCtxDestroy 使该 ctx 上的流、事件、内存在该线程后续 API 全部失效；Runtime 设备复位是更粗粒度
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 3
+    kind: failure
+- id: graph_node
+  name: Graph 节点类型
+  leaves:
+  - id: graph_node_kernel
+    claim: kernel 节点保存函数指针与参数拷贝；捕获后改 host 参数数组不自动进图，必须 SetParams
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: graph_node_memcpy
+    claim: memcpy 节点的方向与 pitch 在创建时固定；把 1D 节点当 3D pitched 用会裁错形状
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: graph_node_memset
+    claim: memset 节点的 value 宽度 1/2/4 字节；用 4 字节模式填未对齐长度会失败
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: graph_node_host
+    claim: host 节点在 GPU 到达依赖后于 CPU 跑；节点里再 Launch kernel 不会自动成为子节点
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: graph_node_event_record
+    claim: event record 节点在图内记录；用捕获外的 event 做跨图同步要保证寿命长于 exec
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+  - id: graph_node_wait
+    claim: event wait 节点变成来边；手工加边与 wait 节点重复会过度串行
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: graph_node_child
+    claim: child graph 节点嵌入快照；父 instantiate 后改子图原件不传播，除非重建
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 3
+    kind: api
+  - id: graph_node_empty
+    claim: empty 节点只当汇合点；用它代替 event 可以，但不提供 timing
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 2
+    kind: feature
+- id: event_ipc
+  name: Event IPC 与计时
+  leaves:
+  - id: event_ipc_open
+    claim: cudaIpcGetEventHandle 要求 event 以 IPC 标志创建；普通 event 取 handle 失败
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: api
+  - id: event_ipc_peer
+    claim: IPC event 跨进程通知完成，不传递数据；数据仍需 IPC 内存或 P2P
+    types:
+    - conceptual
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: event_ipc_timing
+    claim: DisableTiming 的 IPC event 不能 ElapsedTime；跨进程测时应用 timing event 且两端都完成
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: event_ipc_record_order
+    claim: 进程 A Record、进程 B Wait 必须保证 handle 已 Open；反过来 Wait 未打开 handle 是非法
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: event_ipc_device
+    claim: IPC event 绑定创建设备；在另一 GPU 上 Wait 不会自动变成跨设备依赖
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: event_ipc_destroy
+    claim: 导出方 Destroy event 会使对端 handle 失效；应对端先完成 Wait 再销毁
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: event_ipc_elapsed_ms
+    claim: ElapsedTime 返回毫秒浮点；分辨率受 timing 开销影响，不能当周期计数器
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 1
+    - 2
+    kind: numeric
+  - id: event_ipc_block
+    claim: cudaEventBlockingSync 让 Synchronize 阻塞线程；忙等 event 更占 CPU，时间线看起来像 CPU 空转
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 2
+    kind: feature
+- id: capture_mode
+  name: Capture 模式与线程
+  leaves:
+  - id: capture_mode_global
+    claim: Global 模式在捕获期间禁止本线程发出会隐式同步的未捕获调用；违例使捕获失败
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: api
+  - id: capture_mode_relaxed
+    claim: Relaxed 允许更多并发调用，也更容易漏掉本应进图的依赖边
+    types:
+    - compare
+    - debug
+    difficulty:
+    - 3
+    kind: feature
+  - id: capture_mode_threadlocal
+    claim: ThreadLocal 只捕获本线程对该流的调用；别的线程在同一流上的 kernel 不进图
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: capture_mode_fork
+    claim: 捕获中创建新流并在其上工作，需把新流纳入依赖；否则 EndCapture 得到的图缺边
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 3
+    kind: failure
+  - id: capture_mode_status
+    claim: cudaStreamIsCapturing 查询状态；在未捕获流上当已捕获用会漏节点
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: capture_mode_id
+    claim: 捕获 id 用于关联 fork 的流；id 不匹配时把工作并进错误的图
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: api
+  - id: capture_mode_nested_graph
+    claim: 捕获过程中 instantiate/launch 另一图可能被当成节点或被禁止，取决于版本与模式；失败不是延后执行
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: capture_mode_init
+    claim: 首次 CUDA 调用的惰性初始化不应放在捕获段；否则捕获失败或把初始化副作用编进图
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure

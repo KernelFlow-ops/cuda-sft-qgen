@@ -1,0 +1,904 @@
+id: T05
+name: 性能优化方法论
+children:
+- id: access
+  name: 访存优化
+  leaves:
+  - id: soa_aos
+    claim: AoS vs SoA 对 coalescing 的影响及结构体对齐填充
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: swizzle_smem
+    claim: shared memory swizzle 消除 bank conflict 与 2D tile 转置的实现
+    types:
+    - optimization
+    - layout
+    - code_complete
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: access_txn_count
+    claim: 事务数 ≈ ceil(max_addr - min_addr + elem_size) / sector；32 线程写 stride-32 的 float 至少 32 个 32B sector
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: access_align_float4
+    claim: reinterpret_cast<float4*> 要求 16B 对齐；未对齐时编译器仍发 LDG.128，结果是静默错而非硬件 trap
+    types:
+    - debug
+    - syntax
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: access_soa_float3
+    claim: struct {float x,y,z;} AoS 步长 12B，warp 连续取 x 不能合成 1 条 128B 事务；拆成三个 SoA float* 后 32×4B 可 1 事务
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 2
+    kind: formula
+  - id: access_pad_align
+    claim: 结构体尾部 padding 让 sizeof 从 12 变成 16 仍可能改善对齐，但不等于 SoA；连续线程仍隔 16B 取同一字段
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: access_column_major
+    claim: 列主序矩阵用 threadIdx.x 沿行扫是 stride=ld 访问；应让相邻 lane 走相邻列或先转置到 smem tile
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: access_vector_load
+    claim: 每线程读 float4 把 warp 覆盖从 128B 提到 512B，对齐好时仍可合并，但寄存器压力 ×4
+    types:
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: access_restrict
+    claim: 输出指针加 __restrict__ 才能让编译器证明不别名并向量化 store；缺了可能保持标量 st.global
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 2
+    kind: api
+- id: fusion
+  name: 融合与持久化
+  leaves:
+  - id: kernel_fusion
+    claim: elementwise fusion 减少 global 往返，但会升高寄存器压力压低 occupancy
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: persistent_kernel
+    claim: persistent kernel + work queue 摊销 launch 与在图调度下的适用边界
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: fusion_reg_delta
+    claim: 把 bias+gelu 融进 epilogue 若每线程 +8 寄存器，block=256 时每 CTA 寄存器从 32*256 升到 40*256，可能少驻留 1 个 CTA
+    types:
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: fusion_launch_amortize
+    claim: persistent kernel 只在 launch 开销占运行时间可观（微秒级 kernel、图调度）时划算；计算 10ms+ 的 GEMM 几乎无收益
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: fusion_bandwidth
+    claim: 两个 elementwise 各读 1 次写 1 次，融合后读 1 写 1，DRAM 字节从 4N 降到 2N（输入输出同等大小时）
+    types:
+    - optimization
+    difficulty:
+    - 2
+    kind: formula
+  - id: fusion_cache
+    claim: 融合后工作集变大可能挤出 L2；两个小核分别命中 L2 的组合有时快于一个巨大融合核
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: fusion_epilogue
+    claim: GEMM epilogue 融合 bias/activation 避免再写再读 C 矩阵；拆成第二次 kernel 会把 C 再走一遍 HBM
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: fusion_grid_sync
+    claim: 需要全局依赖的融合不能只靠 CTA 内 smem；要么拆 kernel，要么 cooperative/persistent 队列
+    types:
+    - conceptual
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: fusion_graph
+    claim: CUDA Graph 摊销多次短 kernel launch，但不减少它们之间的全局内存往返；要减流量仍需真正融合
+    types:
+    - compare
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+- id: roofline
+  name: Roofline 与瓶颈
+  leaves:
+  - id: arithmetic_intensity
+    claim: 算术强度 AI = FLOP/byte 判断 compute-bound vs memory-bound；错误用 FLOP/s 优化访存核
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: unroll_prefetch
+    claim: '#pragma unroll 与软件预取在指令缓存/寄存器之间的权衡'
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: roofline_ai
+    claim: 算术强度 AI = FLOP / byte；AI < peakFLOP/peakBW 则 memory-bound，此时加 FLOP 优化几乎不降 walltime
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: roofline_wrong_metric
+    claim: 用 GFLOP/s 去优化纯 stencil 访存核会把时间浪费在 FMA 上；应看 DRAM throughput 与 l1tex sector
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: roofline_ridge
+    claim: ridge point = peakFLOP / peakBW；A100 FP32 ≈ 19.5 TFLOP/s、HBM ≈ 1.5 TB/s 时 ridge ≈ 13 FLOP/B
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: roofline_bytes
+    claim: AI = FLOP / 实际 DRAM 事务字节（含 sector 浪费），不是算法有效载荷；stride 访问会把 AI 算高
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 3
+    kind: formula
+  - id: roofline_l2
+    claim: 工作集拟合 L2 时有效带宽是 L2 不是 HBM，roofline 的 peakBW 应换成 L2 带宽否则误判 compute-bound
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: roofline_tensor
+    claim: Tensor Core 峰值与 CUDA Core 不同；用 FP32 roofline 去套 MMA 核会低估 compute roof
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: roofline_achieved
+    claim: achieved FLOP/s = 总 FLOP / walltime；低于 roof 的缺口应对照 NCU 的 pipe utilization 与 DRAM 吞吐哪边先满
+    types:
+    - profiling
+    difficulty:
+    - 2
+    kind: formula
+- id: txn_count
+  name: 合并事务计数
+  leaves:
+  - id: txn_count_32b
+    claim: 32 个线程各读 4B 且 128B 对齐连续 ⇒ 1×128B 事务；同样 32×4B 但基址偏 64B ⇒ 2 个事务
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: txn_count_stride_n
+    claim: stride = N 个 element 时事务数近似 min(32, ceil(32*N*elemSize/sector))
+    types:
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+  - id: txn_count_store_sector
+    claim: store 合并规则与 load 类似，但部分写 sector 仍可能 RMW 整 sector，NCU store sector 会高于“有效字节/32”
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: txn_count_misalign
+    claim: float4 误在 8B 对齐地址上发出，硬件拆成多次，超额事务 ≈ 2×
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: txn_count_sector_32
+    claim: sector=32B 时，对齐连续 32×4B=128B 覆盖 4 个 sector、常合成 1 次 128B 传输；随机 32 地址最坏 32 个 sector
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+  - id: txn_count_double
+    claim: 32 线程连续 double（8B）覆盖 256B，对齐时约 2 条 128B 事务，不是 1 条
+    types:
+    - optimization
+    difficulty:
+    - 2
+    kind: numeric
+  - id: txn_count_broadcast
+    claim: 全 warp 读同一 4B 地址通常 1 个 sector 广播；不要按 32 次事务去估带宽
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: txn_count_ncu
+    claim: NCU l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum 计的是 sector 不是请求次数；用它反推合并效率 = 理想 sector / 实测
+    types:
+    - profiling
+    difficulty:
+    - 3
+    kind: formula
+- id: vectorize
+  name: 向量化失败诊断
+  leaves:
+  - id: vectorize_alias
+    claim: 缺少 __restrict__ 时编译器不能证明别名，可能拒绝 LDG.128，即使运行时指针并不重叠
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: vectorize_loop_bound
+    claim: '循环上界不是编译期常量且无 #pragma unroll 时，向量化常失败，SASS 停在 32-bit ld'
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: vectorize_align_assume
+    claim: __builtin_assume_aligned(ptr,16) 或 __align__ 才能让编译器发 128-bit；仅运行时碰巧对齐不够
+    types:
+    - syntax
+    - optimization
+    difficulty:
+    - 3
+    kind: api
+  - id: vectorize_struct_padding
+    claim: AoS 结构体有 padding 时连续线程取相邻结构体字段会变成 stride 访问，向量化无意义
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: vectorize_char_ptr
+    claim: 通过 char* 做字节偏移再转回 float* 常破坏对齐信息，SASS 退回 ld.global.u32
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 3
+    kind: failure
+  - id: vectorize_volatile
+    claim: volatile 全局指针阻止合并与向量化，因为每次访问必须按标量可见；不应用 volatile 当内存序
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: vectorize_odd_tail
+    claim: n 不是 4 的倍数时 float4 主循环后要标量尾循环；忽略尾元素会少写 n%4 个值
+    types:
+    - debug
+    - code_complete
+    difficulty:
+    - 2
+    kind: failure
+  - id: vectorize_sass
+    claim: 成功向量化的 SASS 可见 LDG.128 / STG.128；仍是 LDG.32 就说明别名、对齐或循环结构失败
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+- id: unroll_cost
+  name: 展开与指令缓存
+  leaves:
+  - id: unroll_cost_icache
+    claim: 完全展开大循环会涨指令缓存 miss；NCU 的 ipc 掉而不是涨时应检查展开因子
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: unroll_cost_pragma
+    claim: '#pragma unroll 1 禁止展开；#pragma unroll 无数字是编译器全展开，可能把寄存器打爆'
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: unroll_cost_prefetch
+    claim: 软件预取距离应覆盖 DRAM 延迟（约 200–400 cycle），预取过近等于没预取，过远会污染 cache
+    types:
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: unroll_cost_bound
+    claim: 展开因子应整除 trip count（trip % factor = 0），否则 residual 循环仍在，收益被高估
+    types:
+    - optimization
+    difficulty:
+    - 2
+    kind: formula
+  - id: unroll_cost_reg
+    claim: 展开 8 次把 8 个循环变量同时活着，寄存器约 +8；可能把占用从 4 CTA 降到 2
+    types:
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: unroll_cost_pragma_n
+    claim: '#pragma unroll 4 只展开 4 次，不是 4 的倍数任意；内层 trip=5 时仍留 1 次 residual'
+    types:
+    - syntax
+    - conceptual
+    difficulty:
+    - 2
+    kind: api
+  - id: unroll_cost_lmem
+    claim: 过度展开导致 spill 后 local 流量上升，展开的 ILP 被 DRAM 延迟吃掉
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: unroll_cost_dynamic
+    claim: trip count 仅为运行时变量时，无 unroll pragma 编译器常保持循环；要 ILP 必须显式 unroll 或手工展开
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 2
+    kind: mechanism
+- id: cache_blocking
+  name: Cache blocking 与 tiling
+  leaves:
+  - id: cache_blocking_l2_tile
+    claim: tile 工作集应 ≤ 有效 L2；A100 40MB L2 上每 SM 公平份额远小于此，超大 tile 仍 miss
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cache_blocking_smem_tile
+    claim: smem tile BM×BN×sizeof(elem) 必须拟合动态 smem；64×64 float = 16KB，再加 double buffer ×2 = 32KB
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 2
+    kind: formula
+  - id: cache_blocking_reuse
+    claim: 算术强度随 tile 边长上升：K 维 64 的 64×64 GEMM tile AI 高于 8×8，更易 compute-bound
+    types:
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+  - id: cache_blocking_boundary
+    claim: 非对齐尾块需要 residual kernel 或谓词；强行用满 tile 会越界或额外 sector
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: cache_blocking_3d
+    claim: 3D stencil 的 blocking 要让 halo 与内点一起拟合 smem；只 tile XY 而 Z 全扫会反复踢 L2
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: cache_blocking_transpose
+    claim: 全局列访问先以 coalesced 行读进 smem 再转置，bank-conflict-free 的 smem 读换掉 stride global
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: cache_blocking_double_buf
+    claim: 双缓冲 smem 让 cp.async 与计算重叠，容量 ×2；单缓冲 wait_group 0 后计算，重叠为 0
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: numeric
+  - id: cache_blocking_occupancy
+    claim: 更大 tile 提高 AI 但增加 smem/regs，占用下降；AI 收益必须超过 TLP 损失才划算
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+- id: instruction_mix
+  name: 指令混合与管道
+  leaves:
+  - id: instruction_mix_fma
+    claim: a*b+c 应写成 fmaf 以单条 FMA；拆成 mul+add 占两条指令且可能不同舍入
+    types:
+    - optimization
+    - syntax
+    difficulty:
+    - 2
+    kind: api
+  - id: instruction_mix_sfu
+    claim: __sinf/__expf 走 SFU，吞吐低于 FMA；在 FMA 为主的核里插入密集特殊函数会变成 SFU bound
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: instruction_mix_div
+    claim: 整数/浮点除法与余数远慢于 mul；循环里 / blockDim.x 应变成编译期常量或互逆乘法
+    types:
+    - optimization
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: instruction_mix_type
+    claim: 隐式 double（字面量 1.0）在 sm_80 消费卡上按 1/64 FP32 吞吐罚；应写 1.0f
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 2
+    kind: failure
+  - id: instruction_mix_convert
+    claim: 频繁 half↔float 转换占额外管道；能在 Tensor Core 上算的不要每元素绕 CUDA Core 转
+    types:
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: instruction_mix_ipc
+    claim: 访存核 IPC 低是预期；看到 ALU pipe busy 低且 DRAM 满说明不该再塞 FMA
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: instruction_mix_pred
+    claim: 高比例谓词关闭指令仍占发射槽；把稀有分支提出 warp 特化可提高有效 IPC
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: instruction_mix_bit
+    claim: 位操作与 popc/funnel shift 走整数管道；与 FMA 可双发，但纯整数核不要用 FLOP/s 衡量
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+- id: kernel_split
+  name: 拆核与融合边界
+  leaves:
+  - id: kernel_split_reg
+    claim: 单核寄存器 >128 时拆成两个核可各用 64 regs、占用翻倍，若中间数据拟合 L2 则可能更快
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: numeric
+  - id: kernel_split_dep
+    claim: 有全局数据依赖的阶段必须拆核或 grid.sync；在同一 kernel 无同步地写后读其他 CTA 的输出是竞争
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: kernel_split_launch
+    claim: 拆成 10 个 5µs kernel 会让 launch 开销占主导；应融合或 CUDA Graph，而不是继续拆
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: kernel_split_occupancy
+    claim: 不同阶段最优 blockSize 不同时，拆核可比一个折中 CTA 配置更好
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: kernel_split_temp
+    claim: 拆核引入的临时全局缓冲若大于 L2，融合省掉的不只是 launch 还有这次 HBM 往返
+    types:
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+  - id: kernel_split_stream
+    claim: 无依赖的两个核可不同 stream 重叠；误放同一默认流会串行，看起来像拆核变慢
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: kernel_split_persistent
+    claim: persistent kernel 内部用队列模拟拆阶段，避免 launch，但仍要小心 CTA 间可见性与抢占
+    types:
+    - conceptual
+    - optimization
+    difficulty:
+    - 4
+    kind: mechanism
+  - id: kernel_split_graph
+    claim: Graph 固定拓扑适合拆核后的稳定流水；每轮重建图的开销可超过原 launch
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+- id: occupancy_trade
+  name: 占用与延迟隐藏权衡
+  leaves:
+  - id: occupancy_trade_latency
+    claim: 隐藏 ~400 cycle DRAM 延迟，若每 warp 每 20 cycle 发 1 条独立 ld，约需 20 个 warp/SM，不是 64
+    types:
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+  - id: occupancy_trade_cache
+    claim: 占用从 50% 到 100% 把每 CTA 的 L1/smem 份额减半，cache-sensitive 核可能变慢
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: occupancy_trade_ilp
+    claim: 每线程 8 个 outstanding ld 的低占用核可匹敌每线程 1 个 ld 的高占用核，寄存器预算决定选哪边
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: numeric
+  - id: occupancy_trade_block
+    claim: block=32 提高 CTA 数但每 CTA 只有 1 warp，barrier 失去意义且调度分区可能不均
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: occupancy_trade_1024
+    claim: block=1024 每 CTA 32 warp，sm_80 每 SM 只能 2 CTA；smem 稍大就掉到 1 CTA，占用悬崖
+    types:
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: occupancy_trade_ncu
+    claim: NCU achieved occupancy 低但 DRAM 已满则不必提占用；应先降 sector 数
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: occupancy_trade_spill
+    claim: 为提占用强行 -maxrregcount 导致 spill，local 流量把延迟隐藏需求再抬高，净亏损
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: occupancy_trade_wave
+    claim: 尾波浪费当 grid % (SM数×驻留CTA) ≠ 0；小 grid 的尾波浪费可超过占用公式误差
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+- id: prefetch_sw
+  name: 软件预取与异步搬移
+  leaves:
+  - id: prefetch_sw_distance
+    claim: 预取距离应用 cycle 估算：距离 ≈ DRAM_latency / 每迭代 cycle；写死 prefetch i+1 常常过近
+    types:
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+  - id: prefetch_sw_cp_async
+    claim: Ampere 上用 cp.async 把下一 tile 搬进 smem 比 L2 prefetch 更接近“软件预取到寄存器邻域”
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: prefetch_sw_pollute
+    claim: 把不会复用的流式数据 prefetch 进 L1/L2 会驱逐热数据；对此应用 .cs/.cg 而不是 ca
+    types:
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: prefetch_sw_uniform
+    claim: 只让 lane0 prefetch 统一地址，避免 32 条重复预取；分叉地址则每 lane 自己 prefetch 且难以合并
+    types:
+    - optimization
+    - code_complete
+    difficulty:
+    - 3
+    kind: formula
+  - id: prefetch_sw_builtin
+    claim: host 风格 __builtin_prefetch 在 device 上不保证生成 prefetch.global；要查 SASS 或改用 PTX
+    types:
+    - syntax
+    - debug
+    difficulty:
+    - 3
+    kind: api
+  - id: prefetch_sw_pipeline
+    claim: stages=3 的 pipeline 允许 2 个预取 tile 在飞；stage 与 smem 块数不一致会覆盖正在计算的缓冲
+    types:
+    - debug
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric
+  - id: prefetch_sw_tma
+    claim: Hopper TMA 是硬件预取到 smem，完成靠 mbarrier；再用软件 prefetch.global 同一地址通常多余
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: prefetch_sw_too_far
+    claim: 预取超前超过 cache 容量时数据在使用前被驱逐，等于没预取还多了指令
+    types:
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+- id: epilogue_opt
+  name: Epilogue 与写回
+  leaves:
+  - id: epilogue_opt_fuse_bias
+    claim: 在寄存器里的 GEMM 累加结果上加 bias 再写回，HBM 字节从读C+写C ≈ 2*|C| 降到 1 次 store
+    types:
+    - optimization
+    difficulty:
+    - 2
+    kind: formula
+  - id: epilogue_opt_store_vec
+    claim: epilogue store 用 float4/stg.128 对齐写；标量 st 会把本已 compute-bound 的核拖回 store sector 瓶颈
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: epilogue_opt_pred_tail
+    claim: tile 尾部谓词关闭的 lane 仍可能发出部分 sector 写；单独 residual kernel 有时更干净
+    types:
+    - optimization
+    - debug
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: epilogue_opt_act
+    claim: ReLU/GELU 在 epilogue 用 CUDA Core，MMA 管道此时空闲；过重的 epilogue 会变成 CUDA Core bound
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: epilogue_opt_beta
+    claim: C = alpha*Acc + beta*C 需要读旧 C；beta=0 时应跳过该 load，否则白白 1 倍 C 的流量
+    types:
+    - optimization
+    - counterfactual
+    difficulty:
+    - 2
+    kind: formula
+  - id: epilogue_opt_smem
+    claim: 先把寄存器 tile 重排进 smem 再 coalesced 写 global，避免直接从寄存器按列 store 的 stride
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: epilogue_opt_atomic
+    claim: 输出重叠 tile 用 atomicAdd 写 C 会串行化热点；无重叠时应向量 store，有重叠应改划分
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: failure
+  - id: epilogue_opt_source
+    claim: CUTLASS epilogue visitor 把逐元素算子接到 MMA 结果；拆成单独 elementwise kernel 重复读 D
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+- id: stride_layout
+  name: 步长布局与合并失败
+  leaves:
+  - id: stride_layout_ld
+    claim: 逻辑二维 index (i,j) 映射 addr = i*ld + j，ld 不是 32 的倍数时沿 i 的 warp 访问 stride 变差
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 2
+    kind: formula
+  - id: stride_layout_transpose_read
+    claim: 以 threadIdx.x = row 读列主序是 stride-ld；应 threadIdx.x = col 或 smem 转置
+    types:
+    - layout
+    - code_complete
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: stride_layout_aos_field
+    claim: 取 AoS 数组的单一字段等价 stride=sizeof(struct)；sizeof=32 时 32 线程覆盖 1024B，远超 128B 合并窗
+    types:
+    - layout
+    - optimization
+    difficulty:
+    - 2
+    kind: formula
+  - id: stride_layout_pitch
+    claim: cudaMallocPitch 的 pitch 可能 > width，kernel 用 width 当 ld 会错行也会错估合并
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 2
+    kind: failure
+  - id: stride_layout_swizzle_global
+    claim: 全局 swizzle 地址打散 cache set 冲突，但可能破坏 coalescing；只在 smem 侧 swizzle 更常见
+    types:
+    - layout
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: stride_layout_bank
+    claim: smem 上 stride=32 的 32-bit 访问 32-way bank conflict；global 上同样 stride 是 32 个 sector，问题不同
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 2
+    kind: formula
+  - id: stride_layout_vector_stride
+    claim: 向量类型不能修复 stride 访问；float4 步进 sizeof(struct) 仍不合并，只是每线程寄存器更多
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: stride_layout_ncu
+    claim: NCU 合并效率 ≈ 理想 sector / 实测 sector；<100% 先查 stride 与对齐，再查编译器是否向量化
+    types:
+    - profiling
+    difficulty:
+    - 2
+    - 3
+    kind: formula

@@ -77,6 +77,7 @@ def build_diversity_report(
     pool = list(accepted) + list(pending)
     l1 = _hist(q.topic_path[0] for q in pool if q.topic_path)
     types = _hist(q.question_type for q in pool)
+    kinds = _hist(q.kind or "mechanism" for q in pool)
     diffs = _hist(str(q.difficulty) for q in pool)
     hw = _hist(q.hardware for q in pool)
     gran = _hist(q.granularity for q in pool)
@@ -105,8 +106,9 @@ def build_diversity_report(
     total = max(len(pool), 1)
     under: list[str] = []
     over: list[str] = []
-    l1_min = float(quotas.get("l1_share", {}).get("min", 0.04))
-    l1_max = float(quotas.get("l1_share", {}).get("max", 0.12))
+    n_l1 = max(len(l1_ids), 1)
+    l1_min = float(quotas.get("l1_share", {}).get("min", 0.5 / n_l1))
+    l1_max = float(quotas.get("l1_share", {}).get("max", 2.5 / n_l1))
     for did in l1_ids:
         share = l1.get(did, 0) / total
         if l1.get(did, 0) == 0 or share < l1_min * 0.5:
@@ -139,6 +141,7 @@ def build_diversity_report(
         hardware_hist=hw,
         granularity_hist=gran,
         leaf_coverage=coverage,
+        kind_hist=kinds,
         kl_l1=kl_l1,
         kl_type=kl_type,
         kl_difficulty=kl_diff,
@@ -154,6 +157,8 @@ def steering_from_report(
     report: DiversityReport,
     quotas: dict[str, Any],
     forbidden_templates: Sequence[str] | None = None,
+    *,
+    anti_cap: int = 15,
 ) -> SteeringBrief:
     type_target = quotas.get("question_types") or {}
     total_types = sum(report.type_hist.values()) or 1
@@ -174,7 +179,7 @@ def steering_from_report(
     return SteeringBrief(
         underrepresented=report.underrepresented[:12],
         overrepresented=report.overrepresented[:12],
-        forbidden_templates=list(forbidden_templates or [])[:8],
+        forbidden_templates=list(forbidden_templates or [])[: max(1, int(anti_cap))],
         preferred_types=preferred[:6],
         difficulty_nudge=nudge,  # type: ignore[arg-type]
         style_notes=notes,
