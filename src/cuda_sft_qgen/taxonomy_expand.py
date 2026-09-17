@@ -1,3 +1,5 @@
+"""LLM-driven L3 leaf expansion with id/claim validation and embed dedup."""
+
 from __future__ import annotations
 
 import json
@@ -46,6 +48,7 @@ def validate_leaf(
     existing_ids: set[str],
     existing_claims: list[str],
 ) -> str | None:
+    """Return a reject code (``bad_id``, ``dup_id``, ...) or None if the leaf is usable."""
     l3 = str(item.get("l3_id") or item.get("id") or "")
     claim = str(item.get("claim") or "").strip()
     kind = str(item.get("kind") or "").strip()
@@ -57,6 +60,15 @@ def validate_leaf(
         return "dup_id"
     if len(claim) < 20:
         return "short_claim"
+    difficulty = item.get("difficulty", [2])
+    if not isinstance(difficulty, (list, tuple)) or not difficulty or any(type(value) is not int or not 1 <= value <= 4 for value in difficulty):
+        return "bad_difficulty"
+    for field in ("hints", "sources"):
+        values = item.get(field, [])
+        if not isinstance(values, (list, tuple)) or any(not isinstance(value, str) for value in values):
+            return f"bad_{field}"
+    if not isinstance(item.get("applicability", {}), dict):
+        return "bad_applicability"
     if _PROMO.search(claim) and not _ARCH.search(claim):
         return "promo"
     if kind and kind not in LEAF_KINDS:
@@ -87,6 +99,7 @@ def _existing_leaf_sort_key(item: dict[str, Any]) -> tuple[int, int]:
 
 
 def existing_leaves_payload(child: dict[str, Any], *, cap: int = 40) -> list[dict[str, Any]]:
+    """Compact active-leaf list for expand prompts, poorest claims first."""
     existing = sorted(
         [item for item in (child.get("leaves") or []) if not item.get("retired")],
         key=_existing_leaf_sort_key,
@@ -113,6 +126,7 @@ def render_expand_user(
     near_dup_warnings: str,
     template: str,
 ) -> str:
+    """Fill the expand.md user template for one L2 + facet."""
     payload = existing_leaves_payload(child)
     mapping = {
         "domain_id": str(domain.get("id") or ""),
@@ -128,6 +142,7 @@ def render_expand_user(
         "existing_leaves_json": json.dumps(payload, ensure_ascii=False),
         "existing_leaves": json.dumps(payload, ensure_ascii=False),
         "near_dup_warnings": near_dup_warnings or "",
+        "gap_prompts": str(facet.get("gap_prompts") or ""),
     }
     return _render(template, mapping)
 
@@ -144,6 +159,7 @@ def expand_one_l2(
     embed_index: TaxonomyEmbedIndex | None = None,
     cosine_filter: bool = True,
 ) -> int:
+    """Expand one L2 toward ``target`` leaves; returns the number added this call."""
     added_total = 0
     while len(child.get("leaves") or []) < target:
         existing = list(child.get("leaves") or [])
@@ -230,6 +246,7 @@ def expand_taxonomy(
     system: str,
     apply: bool = False,
 ) -> dict[str, Any]:
+    """Expand all (or selected) L2 nodes; dump taxonomy when ``apply`` is True."""
     added = 0
     for domain in taxonomy.domains:
         if domain_ids and domain["id"] not in domain_ids:

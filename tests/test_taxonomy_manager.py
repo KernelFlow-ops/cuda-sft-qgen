@@ -1,3 +1,5 @@
+"""Tests for TaxonomyManager health analysis, expansion, and ticks."""
+
 from __future__ import annotations
 
 import random

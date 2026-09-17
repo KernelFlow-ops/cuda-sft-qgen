@@ -16,5 +16,8 @@ data/*.db
 data/*.index
 data/*.log
 !data/.gitkeep
+.agents/
 .coverage
 htmlcov/
+data/
+logs/

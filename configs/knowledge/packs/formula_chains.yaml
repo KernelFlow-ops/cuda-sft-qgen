@@ -1,0 +1,84 @@
+id: formula_chains
+title: 公式与推导链
+priority: 3
+domains: [T25, T02, T13, T03]
+l2_targets:
+  - {domain: T02, l2: global_mem, target_leaves: 16}
+  - {domain: T13, l2: attn_arith, target_leaves: 16}
+facets: [formula, derivation, numeric]
+official_sources:
+  - https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html
+seed_claims:
+  - l3_id: formula_sector_32b
+    domain_id: T02
+    l2_id: global_mem
+    l2_name: 全局内存
+    claim: 现代 GPU DRAM 事务粒度为 32B sector；即使只要 4B，未合并访问仍按 sector 计费。
+    types: [optimization, profiling]
+    difficulty: [2, 3]
+    kind: formula
+  - l3_id: formula_aligned_128
+    domain_id: T02
+    l2_id: global_mem
+    l2_name: 全局内存
+    claim: sm_70+ 上对齐 128B 的 warp 连续 32×4B 合并为 1 个 128B 事务。
+    types: [optimization, profiling]
+    difficulty: [2, 3]
+    kind: formula
+  - l3_id: formula_stride2_two
+    domain_id: T02
+    l2_id: global_mem
+    l2_name: 全局内存
+    claim: stride=2 的 32×4B 变成 2 个 128B 事务，有效带宽约为对齐连续访问的 1/2。
+    types: [optimization, profiling]
+    difficulty: [2, 3]
+    kind: formula
+  - l3_id: formula_bank
+    domain_id: T02
+    l2_id: global_mem
+    l2_name: 全局内存
+    claim: 32-bit bank index = (byte_offset/4) % 32；同拍不同 offset 落到同一 bank 即冲突，broadcast 同一地址不算冲突。
+    types: [optimization, conceptual]
+    difficulty: [2, 3]
+    kind: formula
+  - l3_id: formula_occupancy
+    domain_id: T03
+    l2_id: occupancy_math
+    l2_name: 占用闭式计算
+    claim: resident_warps = min(64, floor(65536/(regs_per_thread*32)), 2048/block_threads, smem_limit, 32)。
+    types: [optimization, conceptual]
+    difficulty: [2, 3]
+    kind: formula
+  - l3_id: formula_gemm_a_bytes
+    domain_id: T13
+    l2_id: gemm
+    l2_name: GEMM
+    claim: A tile 字节 = BM*BK*sizeof(elem)；双缓冲则 ×2；BM=128 BK=32 FP16 双缓冲仅 A 就 16KB。
+    types: [optimization, layout]
+    difficulty: [3]
+    kind: formula
+  - l3_id: formula_attn_smem
+    domain_id: T13
+    l2_id: attn_arith
+    l2_name: Attention tiling 算术
+    claim: FA 不物化 S 时 smem ≈ (Br+Bc)*d*sizeof；d=128 FP16 Br=Bc=64 约 32KB 量级。
+    types: [optimization, layout]
+    difficulty: [3, 4]
+    kind: formula
+  - l3_id: formula_waves
+    domain_id: T25
+    l2_id: wave_quant
+    l2_name: Wave 量化
+    claim: waves/SM ≈ ceil(grid_blocks / (SM数 * 每SM驻留block))；不足 1 wave 时 occupancy 百分比会偏高误导。
+    types: [profiling, conceptual]
+    difficulty: [2, 3]
+    kind: formula
+relations:
+  - {source: formula_aligned_128, target: formula_sector_32b, kind: derives, reason: 128B is four 32B sectors}
+  - {source: formula_stride2_two, target: formula_aligned_128, kind: derives, reason: stride splits the 128B line}
+  - {source: formula_attn_smem, target: formula_gemm_a_bytes, kind: related, reason: tile byte budgets}
+  - {source: formula_occupancy, target: formula_waves, kind: requires, reason: waves need resident CTAs}
+gap_prompts:
+  - 32B sector → 对齐 128B 一笔事务 → stride-2 两笔
+  - FA smem 与 GEMM tile 字节
+  - waves/SM 公式

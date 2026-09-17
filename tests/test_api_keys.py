@@ -1,3 +1,5 @@
+"""Tests for NVIDIA API key env parsing (NVIDIA_API_KEY / _2 / KEYS)."""
+
 from __future__ import annotations
 
 from cuda_sft_qgen.keys import parse_api_keys

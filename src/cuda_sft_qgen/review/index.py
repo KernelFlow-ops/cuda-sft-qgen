@@ -1,6 +1,10 @@
+"""In-memory L2-normalized cosine index persisted as compressed npz."""
+
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import tempfile
 
 import numpy as np
 
@@ -11,6 +15,7 @@ class VectorIndex:
     """In-memory cosine index with numpy. Fine up to ~1e5 rows."""
 
     def __init__(self, dim: int | None = None) -> None:
+        """Create an empty index; ``dim`` is filled on the first :meth:`add`."""
         self.ids: list[str] = []
         self._mat: np.ndarray | None = None
         self.dim = dim
@@ -19,6 +24,7 @@ class VectorIndex:
         return len(self.ids)
 
     def add(self, ids: list[str], vectors: np.ndarray) -> None:
+        """Append L2-normalized rows; ids and vectors must have the same length."""
         if len(ids) == 0:
             return
         vecs = l2_normalize(np.asarray(vectors, dtype=np.float32))
@@ -35,6 +41,7 @@ class VectorIndex:
         self.ids.extend(ids)
 
     def vector_for(self, qid: str) -> np.ndarray | None:
+        """Return the stored vector for ``qid``, or None if missing."""
         if self._mat is None:
             return None
         try:
@@ -70,15 +77,25 @@ class VectorIndex:
         return idx, scores
 
     def save(self, path: Path) -> None:
+        """Atomically write ids + matrix via temp file + os.replace."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(
-            path,
-            ids=np.array(self.ids, dtype=object),
-            mat=self._mat if self._mat is not None else np.zeros((0, self.dim or 0)),
-        )
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                np.savez_compressed(
+                    stream, ids=np.array(self.ids, dtype=object),
+                    mat=self._mat if self._mat is not None else np.zeros((0, self.dim or 0)),
+                )
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
     @classmethod
     def load(cls, path: Path) -> "VectorIndex":
+        """Load an index; missing files yield an empty index."""
         idx = cls()
         if not path.exists():
             return idx

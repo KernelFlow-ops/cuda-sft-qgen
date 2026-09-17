@@ -1,3 +1,5 @@
+"""Tests for review-flush routing when pending is nearly a full batch."""
+
 from __future__ import annotations
 
 from langgraph.graph import END
@@ -5,6 +7,40 @@ from langgraph.graph import END
 from cuda_sft_qgen.config import load_settings
 from cuda_sft_qgen.graph.app import run_pipeline
 from cuda_sft_qgen.graph.routing import route_after_generate, should_review
+
+
+def test_should_review_when_remaining_below_min_batch(fake_runtime):
+    from cuda_sft_qgen.runtime import set_runtime
+
+    set_runtime(fake_runtime)
+    fake_runtime.settings.writer_concurrency = 6
+    state = {
+        "pending": [{}] * 2,
+        "accepted_count": 0,
+        "target": 4,
+        "review_batch_size": 20,
+        "iteration": 1,
+        "max_iterations": 200,
+    }
+    assert should_review(state) is True
+    assert route_after_generate(state) == "review_score"
+
+
+def test_should_review_nearly_full_pending_with_runtime(fake_runtime):
+    from cuda_sft_qgen.runtime import set_runtime
+
+    set_runtime(fake_runtime)
+    fake_runtime.settings.writer_concurrency = 6
+    state = {
+        "pending": [{}] * 16,
+        "accepted_count": 0,
+        "target": 1000,
+        "review_batch_size": 20,
+        "iteration": 4,
+        "max_iterations": 200,
+    }
+    assert should_review(state) is True
+    assert route_after_generate(state) == "review_score"
 
 
 def test_should_not_review_below_batch_size():

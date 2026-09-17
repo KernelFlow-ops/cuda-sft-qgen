@@ -1,3 +1,9 @@
+"""Rule checks for hardware/leaf consistency. Mismatches warn; the chair decides.
+
+These heuristics never auto-accept. Hardware mismatches and off-leaf stems
+are attached as warnings on the writer path and as diagnostics for the chair.
+"""
+
 from __future__ import annotations
 
 import re
@@ -32,7 +38,7 @@ _API = re.compile(
     r"\b(?:cuda[A-Z][A-Za-z0-9_]+|cu[A-Z][A-Za-z0-9_]+|NCCL_[A-Z0-9_]+|"
     r"nccl[A-Z][A-Za-z0-9_]+|CUB_[A-Z0-9_]+|cutlass[A-Za-z0-9_:]*)"
 )
-_INTRIN = re.compile(r"__[A-Za-z][A-Za-z0-9_]*__")
+_INTRIN = re.compile(r"__[A-Za-z][A-Za-z0-9_]*(?:__)?")
 _PTX = re.compile(r"\b[a-z]{2,}\.[a-z]{2,}(?:\.[a-z0-9_]+)*")
 _PTX_SKIP = {"e.g", "i.e", "vs.", "ex."}
 _ID_PART_STOP = {
@@ -60,6 +66,7 @@ _CHAIR_CONS = re.compile(
 
 
 def _cc_arch(token: str) -> str | None:
+    """Map a compute-capability / SM number token onto ampere|hopper|blackwell."""
     t = token.strip().lstrip("0") or "0"
     if t.startswith("10") or t.startswith("11"):
         return "blackwell"
@@ -71,15 +78,33 @@ def _cc_arch(token: str) -> str | None:
 
 
 def _canon_arch(word: str) -> str | None:
+    """Canonical GPU generation for a product or arch word."""
     return _ARCH_WORD.get(word.strip().lower())
 
 
+_ARCH_FOLLOW = re.compile(
+    r"\s*(?:/|与|和|or|and|,)\s*(?:a(?:n)?\s+)?"
+    r"(ampere|hopper|blackwell|a100|h100|b200|gh100|gb200)",
+    re.IGNORECASE,
+)
+
+
 def scene_arches(text: str) -> set[str]:
+    """Architectures named in scene-setting phrases (``在 Hopper``, ``On an A100``)."""
     found: set[str] = set()
     for m in _SCENE_ARCH.finditer(text or ""):
         arch = _canon_arch(m.group(1))
         if arch:
             found.add(arch)
+        rest = text[m.end() :]
+        while True:
+            extra = _ARCH_FOLLOW.match(rest)
+            if not extra:
+                break
+            more = _canon_arch(extra.group(1))
+            if more:
+                found.add(more)
+            rest = rest[extra.end() :]
     for m in _PAREN_SM.finditer(text or ""):
         arch = _canon_arch(m.group(1))
         if arch:
@@ -118,11 +143,9 @@ def _implicit_arch_requirements(text: str) -> set[str] | None:
 
 
 def hardware_mismatch(question: Question) -> str | None:
+    """Return ``sieve_hw_mismatch`` if the stem's scene disagrees with labeled hardware."""
     text = question.question or ""
     labeled = (question.hardware or "agnostic").strip().lower()
-    conflicts = sm_name_conflicts(text)
-    if conflicts:
-        return "sieve_hw_mismatch"
     if labeled not in {"ampere", "hopper", "blackwell"}:
         return None
     scenes = scene_arches(text)
@@ -142,6 +165,7 @@ def hardware_mismatch(question: Question) -> str | None:
 
 
 def _strong_tokens(*texts: str) -> list[str]:
+    """API / intrinsic / PTX tokens used as leaf-alignment evidence."""
     out: list[str] = []
     seen: set[str] = set()
     blob = "\n".join(t for t in texts if t)
@@ -160,6 +184,7 @@ def _strong_tokens(*texts: str) -> list[str]:
 
 
 def _id_parts(l3_id: str) -> list[str]:
+    """Contentful fragments of an L3 id (skip generic stop words)."""
     parts = []
     for p in re.split(r"[_\-.]+", l3_id or ""):
         pl = p.lower()
@@ -170,6 +195,7 @@ def _id_parts(l3_id: str) -> list[str]:
 
 
 def _leaf_claim(question: Question) -> str:
+    """Claim text from the question, falling back to the live taxonomy leaf."""
     claim = (getattr(question, "l3_claim", None) or "").strip()
     if claim:
         return claim
@@ -186,6 +212,7 @@ def _leaf_claim(question: Question) -> str:
 
 
 def _contains_token(haystack: str, token: str) -> bool:
+    """Case-insensitive containment, also matching underscore-stripped forms."""
     h = haystack.lower()
     t = token.lower()
     if t in h:
@@ -195,10 +222,12 @@ def _contains_token(haystack: str, token: str) -> bool:
 
 
 def leaf_mismatch(question: Question) -> str | None:
+    """Return ``sieve_off_leaf`` when claim APIs/id fragments never appear in the stem."""
     claim = _leaf_claim(question)
     qtext = question.question or ""
     tests = question.tests_claim or ""
-    hay = f"{qtext}\n{tests}"
+    # The writer's self-description is not evidence that the stem tests the claim.
+    hay = qtext
 
     strong = _strong_tokens(claim, question.l3_id.replace("_", " "))
     if strong:
@@ -220,24 +249,23 @@ def leaf_mismatch(question: Question) -> str | None:
     if not parts:
         return None
 
-    # Require at least 2 parts to match (stronger than current "any")
+    # One id fragment is enough: Chinese stems rarely repeat English l3_id parts.
     matches = sum(1 for p in parts if p in hay.lower())
-    if matches >= 2:
+    if matches >= 1:
         return None
-    if matches == 1 and len(parts) <= 2:
-        # For short IDs like "tma_align", 1 match is acceptable
-        return None
-
     return "sieve_off_leaf"
 
 
 def consistency_reason(question: Question) -> str | None:
+    """First hard consistency code, or None if rules do not fire."""
     return hardware_mismatch(question) or leaf_mismatch(question)
 
 
 def leaf_soft_suspect(question: Question) -> bool:
     """True when the stem may mash topics: claim APIs missing from tests_claim."""
     if consistency_reason(question):
+        return True
+    if sm_name_conflicts(question.question or ""):
         return True
     claim = _leaf_claim(question)
     strong = _strong_tokens(claim, (question.l3_id or "").replace("_", " "))
@@ -248,6 +276,7 @@ def leaf_soft_suspect(question: Question) -> bool:
 
 
 def chair_may_reject_unique(reason: str | None) -> bool:
+    """True if ``reason`` is a hw/leaf mismatch the chair is allowed to reject on."""
     if not reason:
         return False
     return bool(_CHAIR_CONS.search(reason))
@@ -283,12 +312,13 @@ def validate_tests_claim_alignment(question: Question) -> dict[str, Any]:
 
 
 def consistency_payload(question: Question) -> dict[str, Any]:
+    """Compact diagnostics block attached to the chair user payload."""
     return {
         "id": question.id,
         "l3_id": question.l3_id,
-        "l3_claim": (getattr(question, "l3_claim", None) or "")[:240],
+        "l3_claim": (getattr(question, "l3_claim", None) or ""),
         "hardware": question.hardware,
-        "tests_claim": (question.tests_claim or "")[:240],
-        "question": (question.question or "")[:500],
+        "tests_claim": (question.tests_claim or ""),
+        "question": (question.question or ""),
         "rule_reason": consistency_reason(question),
     }

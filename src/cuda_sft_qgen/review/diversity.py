@@ -1,3 +1,5 @@
+"""Quota histograms, KL/entropy alerts, and steering briefs for the planner."""
+
 from __future__ import annotations
 
 import math
@@ -9,10 +11,12 @@ from cuda_sft_qgen.taxonomy import Taxonomy
 
 
 def _hist(items: Iterable[str]) -> dict[str, int]:
+    """Count occurrences of each label."""
     return dict(Counter(items))
 
 
 def _kl(current: Mapping[str, int], target: Mapping[str, float]) -> float:
+    """KL(current || target) with a small floor on target mass."""
     total = sum(current.values())
     if total <= 0:
         return 0.0
@@ -29,6 +33,7 @@ def _kl(current: Mapping[str, int], target: Mapping[str, float]) -> float:
 
 
 def _entropy_ratio(current: Mapping[str, int], n_bins: int) -> float:
+    """Shannon entropy of ``current`` divided by log(n_bins) (1.0 = uniform)."""
     total = sum(current.values())
     if total <= 0 or n_bins <= 1:
         return 1.0
@@ -49,6 +54,7 @@ def residual_weights(
     floor: float = 0.02,
     overrep_factor: float = 2.0,
 ) -> dict[str, float]:
+    """Positive residual toward target fractions; overrepresented keys get 0."""
     total = max(sum(current.values()), 1)
     weights: dict[str, float] = {}
     for key, frac in target_fracs.items():
@@ -74,6 +80,7 @@ def build_diversity_report(
     entropy_alert: float = 0.85,
     overrep_factor: float = 2.0,
 ) -> DiversityReport:
+    """Build L1/type/difficulty histograms and under/over lists for steering."""
     pool = list(accepted) + list(pending)
     l1 = _hist(q.topic_path[0] for q in pool if q.topic_path)
     types = _hist(q.question_type for q in pool)
@@ -160,6 +167,7 @@ def steering_from_report(
     *,
     anti_cap: int = 15,
 ) -> SteeringBrief:
+    """Turn a diversity report into planner steering (types, difficulty, templates)."""
     type_target = quotas.get("question_types") or {}
     total_types = sum(report.type_hist.values()) or 1
     preferred = []

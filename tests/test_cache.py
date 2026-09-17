@@ -1,3 +1,5 @@
+"""Tests for PromptCache and EmbeddingCache hit/miss and npz round-trip."""
+
 from __future__ import annotations
 
 import numpy as np

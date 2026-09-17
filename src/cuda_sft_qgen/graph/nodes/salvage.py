@@ -1,8 +1,11 @@
+"""Salvage broken writer JSON and drain due retry-queue briefs."""
+
 from __future__ import annotations
 
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from typing import Any
 
 from cuda_sft_qgen.graph.nodes.generate import (
@@ -22,6 +25,7 @@ _local_or_llm_salvage = salvage_item
 
 
 def salvage_node(state: PipelineState) -> dict:
+    """Repair ``salvage_items`` in parallel; unrepaired briefs go to the retry queue."""
     rt = get_runtime()
     items = list(state.get("salvage_items") or [])
     pending = list(state.get("pending") or [])
@@ -59,9 +63,16 @@ def salvage_node(state: PipelineState) -> dict:
         apply_outcome(outcome, pending=pending, salvage_items=leftover, lock=lock)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = [pool.submit(_one, it) for it in items]
+        futs = [pool.submit(copy_context().run, _one, it) for it in items]
         for fut in as_completed(futs):
             fut.result()
+    logger.info(
+        "salvage recovered=%s of %s pending=%s leftover=%s",
+        ok,
+        len(items),
+        len(pending),
+        len(leftover),
+    )
     return {
         "pending": pending,
         "salvage_items": [],
@@ -71,6 +82,7 @@ def salvage_node(state: PipelineState) -> dict:
 
 
 def retry_drain_node(state: PipelineState) -> dict:
+    """Re-run due retry-queue briefs into pending without starving review capacity."""
     rt = get_runtime()
     pending = list(state.get("pending") or [])
     if not rt.settings.retry_drain_enabled:
@@ -101,13 +113,15 @@ def retry_drain_node(state: PipelineState) -> dict:
         kind = apply_outcome(
             outcome, pending=pending, salvage_items=salvage_items, lock=lock
         )
+        if item.get("task_id"):
+            rt.store.complete_retry(item["task_id"])
         if kind == "ok" and outcome.question is not None:
             prefetch = getattr(rt, "prefetch_embed", None)
             if callable(prefetch):
                 prefetch(outcome.question.question)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = [pool.submit(_one, it) for it in items]
+        futs = [pool.submit(copy_context().run, _one, it) for it in items]
         for fut in as_completed(futs):
             fut.result()
     return {

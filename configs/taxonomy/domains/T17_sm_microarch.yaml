@@ -1019,3 +1019,74 @@ children:
     - 3
     - 4
     kind: api
+- id: arch_compare
+  name: 架构对照
+  leaves:
+  - id: arch_compare_async_gen
+    claim: sm_80 异步搬移是 cp.async.ca/cg；sm_90 才有 cp.async.bulk.tensor/TMA；sm_100 累加可驻 TMEM，不能把 tensormap 当 Ampere 路径。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: arch_compare_smem_cap
+    claim: Ampere 每 SM 共享内存上限 164KB，Hopper 可到 227/228KB 量级；把 Hopper tile 的 200KB smem 预算套到 sm_80 会 launch 失败。
+    types:
+    - optimization
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: numeric
+  - id: arch_compare_tc_gen
+    claim: Tensor Core 指令世代为 MMA(sm_80) → WGMMA(sm_90) → UMMA/tcgen05(sm_100)；在 sm_80 上发 wgmma 非法。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: arch_compare_cluster
+    claim: Thread-block cluster 与 DSMEM 从 sm_90 起；sm_80 没有 cluster 维，不能用 cluster.sync 代替 CTA __syncthreads。
+    types:
+    - compare
+    - conceptual
+    difficulty:
+    - 3
+    kind: feature
+  - id: arch_compare_regfile
+    claim: SM70–SM90 寄存器堆为 65536×32-bit/SM；resident_warps = min(64, floor(65536/(regs*32)), 2048/threads, smem_limit, 32 CTA)。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: formula
+  - id: arch_compare_cuda_arch
+    claim: 运行时路径必须用 __CUDA_ARCH__ 或 cudaGetDeviceProperties.major/minor 分支；occupancy API 成功不能证明 TMA/WGMMA 在该 GPU 上存在。
+    types:
+    - debug
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: failure
+  - id: arch_compare_tmem_not_smem
+    claim: Blackwell TMEM 不是 shared memory；把 TMEM 地址当 smem 指针解引用或对 TMEM 做 __syncthreads 可见性推理是错的。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: arch_compare_cp_async_align
+    claim: sm_80 的 cp.async 16B 路径要求 gmem 与 smem 都 16B 对齐；Hopper TMA 全局基址仍要 16B，但不走 cp.async.ca 的 L1 策略。
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    kind: mechanism

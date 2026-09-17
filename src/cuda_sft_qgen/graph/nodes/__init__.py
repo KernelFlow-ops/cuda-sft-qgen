@@ -1,3 +1,5 @@
+"""Graph node implementations for plan, generate, review, salvage, and archive."""
+
 from cuda_sft_qgen.graph.nodes.architect import architect_node
 from cuda_sft_qgen.graph.nodes.bootstrap import bootstrap_node
 from cuda_sft_qgen.graph.nodes.generate import generate_batch_node

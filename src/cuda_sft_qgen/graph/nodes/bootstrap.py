@@ -1,10 +1,19 @@
+"""Bootstrap node: hydrate pipeline state from the on-disk archive."""
+
 from __future__ import annotations
 
+import logging
+
 from cuda_sft_qgen.graph.state import PipelineState
+from cuda_sft_qgen.observability import trace_node
 from cuda_sft_qgen.runtime import get_runtime
 
+logger = logging.getLogger(__name__)
 
+
+@trace_node("bootstrap")
 def bootstrap_node(state: PipelineState) -> dict:
+    """Load accepted/pending/rejected counts, steering, and resume counters."""
     rt = get_runtime()
     accepted = rt.store.load_accepted()
     pending = rt.store.load_pending()
@@ -13,6 +22,14 @@ def bootstrap_node(state: PipelineState) -> dict:
     run = rt.store.load_run_state()
     iteration = int(run.get("iteration") or 0)
     review_rounds = int(run.get("review_rounds") or 0)
+    logger.info(
+        "bootstrap accepted=%s pending=%s rejected=%s target=%s iteration=%s",
+        len(accepted),
+        len(pending),
+        len(rejected),
+        rt.settings.target_question_count,
+        iteration,
+    )
     return {
         "target": rt.settings.target_question_count,
         "review_batch_size": rt.settings.review_batch_size,
@@ -21,7 +38,7 @@ def bootstrap_node(state: PipelineState) -> dict:
         "review_rounds": review_rounds,
         "accepted_count": len(accepted),
         "rejected_count": len(rejected),
-        "pending": [q.to_jsonl() for q in pending],
+        "pending": [q.model_dump() for q in pending],
         "steering_brief": steering.model_dump(),
         "batch_briefs": [],
         "done": len(accepted) >= rt.settings.target_question_count,

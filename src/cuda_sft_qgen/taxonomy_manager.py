@@ -1,3 +1,5 @@
+"""Strategic taxonomy manager: health reports, facet expansion, and merge/refine."""
+
 from __future__ import annotations
 
 import json
@@ -25,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_FACET_IDS = (
     "formula",
+    "derivation",
     "failure",
     "feature",
     "mechanism",
@@ -38,6 +41,7 @@ DEFAULT_FACET_IDS = (
 
 
 def load_facets() -> list[dict]:
+    """Load expansion facet cards from ``prompts/taxonomy/facets.yaml``."""
     try:
         raw = load_prompt_yaml("facets")
     except FileNotFoundError:
@@ -116,9 +120,12 @@ class TaxonomyHealthReport:
 
     # Overall health score (0-100)
     health_score: float
+    question_coverage: float = 0.0
+    knowledge_gap_l2: list[str] | None = None
 
 
 def manager_from_runtime(rt: Any) -> "TaxonomyManager":
+    """Construct a :class:`TaxonomyManager` from the live runtime."""
     tax_cfg = (getattr(rt.settings, "default_yaml", {}) or {}).get("taxonomy") or {}
     return TaxonomyManager(
         rt.taxonomy,
@@ -146,6 +153,7 @@ class TaxonomyManager:
         min_leaves_per_l2: int = 10,
         max_leaves_per_l2: int = 50,
     ):
+        """Bind taxonomy, LLM, leaf-count targets, and manager YAML knobs."""
         self.taxonomy = taxonomy
         self.llm = llm
         self.embedder = embedder
@@ -302,6 +310,8 @@ class TaxonomyManager:
             expansion_priority=priority,
             refinement_needed=refinement[:20],
             health_score=score,
+            question_coverage=(1.0 - len(no_questions) / total_leaves) if accepted_questions is not None and total_leaves else 0.0,
+            knowledge_gap_l2=empty_l2 + [key for key, _ in sparse_l2],
         )
 
     def _find_generic_claims(self) -> list[str]:
@@ -378,7 +388,6 @@ class TaxonomyManager:
         score -= min(len(short_claims) * 0.5, 10.0)
         if kind_imbalance:
             score -= 5.0
-        score -= min(len(no_questions) * 0.3, 15.0)
         return max(0.0, score)
 
     def choose_facet(
@@ -539,6 +548,8 @@ class TaxonomyManager:
             "leaves_with_no_questions": health.leaves_with_no_questions,
             "expansion_priority": health.expansion_priority,
             "l1_imbalance_ratio": health.l1_imbalance_ratio,
+            "question_coverage": health.question_coverage,
+            "knowledge_gap_l2": health.knowledge_gap_l2,
         }
 
     def _validate_and_filter(
@@ -552,7 +563,7 @@ class TaxonomyManager:
         if max_new <= 0:
             return []
         existing_ids = {leaf.l3_id for leaf in self.taxonomy.leaves}
-        claims = [str(x.get("claim") or "") for x in (child.get("leaves") or [])]
+        claims = [leaf.claim for leaf in self.taxonomy.leaves]
         accepted: list[dict[str, Any]] = []
         drop_reasons: list[str] = []
         for raw in raw_leaves:
@@ -676,6 +687,7 @@ class TaxonomyManager:
         accepted: Sequence[Question] | None = None,
         rejected: Sequence[Question] | None = None,
     ) -> dict:
+        """Ask the curator LLM for health notes given a TaxonomyHealthReport."""
         health = health or report
         if health is None:
             return {}
@@ -712,6 +724,7 @@ class TaxonomyManager:
         max_new: int,
         facet: str | dict[str, Any] | None,
     ) -> list[dict]:
+        """Propose leaves that fill a coverage/reject gap on one L2 node."""
         pair = self._lookup_l2(target_l2_key)
         if pair is None:
             return []
@@ -818,6 +831,7 @@ class TaxonomyManager:
         return queries[:10]
 
     def persist_health(self, payload: dict, path: Path) -> None:
+        """Write a JSON health snapshot (typically ``taxonomy_health.json``)."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as f:
@@ -835,6 +849,7 @@ class TaxonomyManager:
         max_llm_calls: int | None = None,
         apply: bool = False,
     ) -> dict[str, Any]:
+        """Expand high-priority L2 nodes using facet prompts; dump when ``apply``."""
         if diversity_report:
             targets = self._prioritize_from_diversity(diversity_report)
         else:
@@ -853,7 +868,7 @@ class TaxonomyManager:
         for i, l2_key in enumerate(targets):
             if added_total >= max_leaves_to_add:
                 break
-            if calls >= max(1, call_cap):
+            if calls >= max(0, call_cap):
                 break
             pair = self._lookup_l2(l2_key)
             if not pair:
@@ -919,6 +934,7 @@ class TaxonomyManager:
         rewrite_claims: bool = True,
         add_hints: bool = True,
     ) -> dict[str, Any]:
+        """Suggest claim/hint rewrites for short or hint-less leaves."""
         suggestions: list[dict[str, Any]] = []
         payload_leaves: list[dict[str, Any]] = []
         for l3_id in leaf_ids:
@@ -984,6 +1000,7 @@ class TaxonomyManager:
         }
 
     def apply_refine(self, result: dict[str, Any], *, apply: bool = True) -> int:
+        """Patch suggested claims/hints; dump taxonomy when ``apply`` and any patched."""
         patched = 0
         for rec in result.get("suggestions") or []:
             if not isinstance(rec, dict):
@@ -1032,13 +1049,16 @@ class TaxonomyManager:
         diversity_report: Any,
     ) -> str | None:
         for key in health.expansion_priority:
-            if self._lookup_l2(key):
+            pair = self._lookup_l2(key)
+            if pair and _active_leaf_count(pair[1]) < self.target_leaves_per_l2:
                 return key
         for key in self._underrep_keys(diversity_report):
-            if key.count(".") == 1 and self._lookup_l2(key):
+            pair = self._lookup_l2(key)
+            if key.count(".") == 1 and pair and _active_leaf_count(pair[1]) < self.target_leaves_per_l2:
                 return key
         for key in self._prioritize_from_diversity(diversity_report):
-            if self._lookup_l2(key):
+            pair = self._lookup_l2(key)
+            if pair and _active_leaf_count(pair[1]) < self.target_leaves_per_l2:
                 return key
         return None
 
@@ -1077,6 +1097,7 @@ class TaxonomyManager:
         fake_llm: bool = False,
         max_leaves: int | None = None,
     ) -> dict:
+        """One manager tick: analyze, pick a mission (expand/gap/analyze), optionally apply."""
         self._in_tick = True
         self._llm_calls = 0
         self._last_gray_pairs = []
@@ -1098,7 +1119,7 @@ class TaxonomyManager:
             if data_dir is not None:
                 self.persist_health(payload, Path(data_dir) / "taxonomy_health.json")
 
-            if fake_llm or not self.enabled:
+            if fake_llm or not self.enabled or health.health_score >= self.health_expand_threshold:
                 return self._tick_result(
                     health=health,
                     total_added=0,
@@ -1150,7 +1171,8 @@ class TaxonomyManager:
             elif mission == "gap_search":
                 l2_key = self._pick_gap_l2(health, diversity_report)
                 if l2_key:
-                    need = min(leaf_cap, 20)
+                    pair = self._lookup_l2(l2_key)
+                    need = min(leaf_cap, 20, self.target_leaves_per_l2 - _active_leaf_count(pair[1])) if pair else 0
                     accepted_leaves = self.gap_search(
                         target_l2_key=l2_key,
                         health=health,

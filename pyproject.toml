@@ -31,9 +31,18 @@ cuda-sft-qgen = "cuda_sft_qgen.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-cuda_sft_qgen = ["prompts/*.md", "prompts/*.yaml", "prompts/layers/*.md"]
+cuda_sft_qgen = ["prompts/*.md", "prompts/*.yaml", "prompts/layers/*.md", "prompts/taxonomy/*.md", "prompts/taxonomy/*.yaml", "viz/*.html"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-v --tb=short"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "e2e: marks tests as end-to-end tests",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]

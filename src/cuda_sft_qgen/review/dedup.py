@@ -1,3 +1,8 @@
+"""Three-layer duplicate detector: exact hash, template SimHash/Jaccard, cosine.
+
+Gray-zone items are left for the chair; only clear L0/L1/L2 hits auto-dup.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,6 +14,8 @@ from cuda_sft_qgen.review.fingerprint import Fingerprint, hamming64, token_jacca
 
 @dataclass
 class IndexedRecord:
+    """Compact accepted-question fingerprint stored in the Deduper index."""
+
     id: str
     exact: str
     skeleton: str
@@ -16,12 +23,16 @@ class IndexedRecord:
 
 
 class Deduper:
+    """In-memory index of accepted fingerprints used during review scoring."""
+
     def __init__(self, settings: Settings) -> None:
+        """Use ``settings`` dup/gray thresholds; start with an empty index."""
         self.settings = settings
         self.by_exact: dict[str, str] = {}
         self.records: list[IndexedRecord] = []
 
     def add_question(self, q: Question) -> None:
+        """Index an accepted (or surviving) question for later comparisons."""
         self.by_exact[q.exact_hash] = q.id
         self.records.append(
             IndexedRecord(
@@ -40,6 +51,14 @@ class Deduper:
         *,
         skip_id: str | None = None,
     ) -> DupDecision:
+        """Classify ``fp`` as dup, gray, or unique against the accepted index.
+
+        Args:
+            fp: Candidate fingerprint.
+            nearest_id: Embedding nearest-neighbor id (L2).
+            nearest_cosine: Cosine to ``nearest_id``.
+            skip_id: Ignore this id (the candidate itself when already indexed).
+        """
         # L0 exact
         hit = self.by_exact.get(fp.exact)
         if hit and hit != skip_id:

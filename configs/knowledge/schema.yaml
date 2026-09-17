@@ -1,0 +1,19 @@
+# Knowledge graph ontology. SQLite remains the source of truth.
+entity_kinds: [arch, metric, api, feature, operator, document, domain, category]
+relation_kinds:
+  requires: {verified_needs_quote: true}
+  applies_to: {target: entity}
+  supported_by: {target: evidence}
+  equivalent_to: {verified_needs_quote: true}
+  contradicts: {verified_needs_quote: true}
+  supersedes: {verified_needs_quote: true}
+  contains: {mechanical: true}
+  derives: {verified_needs_quote: true}
+  measures: {target: entity}
+  uses_feature: {target: entity}
+  implements: {target: entity}
+  precedes: {mechanical: true}
+  related: {never_verified: true}
+writer_hops: 1
+viz_hops: 2
+knowledge_context_max_claims: 6

@@ -1,3 +1,5 @@
+"""Quota-weighted brief sampling with hardware/leaf compatibility and steering."""
+
 from __future__ import annotations
 
 import random
@@ -16,8 +18,41 @@ BLOOMS = ["remember", "understand", "apply", "analyze", "evaluate", "create"]
 GRANULARITY = ["api", "kernel", "pipeline", "system"]
 HARDWARE = ["agnostic", "ampere", "hopper", "blackwell"]
 
+_HW_CLAIM = (
+    ("ampere", re.compile(r"sm_?80|\bampere\b|\ba100\b|ga100", re.I)),
+    ("hopper", re.compile(r"sm_?90|\bhopper\b|\bh100\b|gh100", re.I)),
+    ("blackwell", re.compile(r"sm_?10[0-9]|\bblackwell\b|\bb200\b|gb200|tcgen05|\bumma\b", re.I)),
+)
+_HOPPER_FEAT = re.compile(
+    r"\b(?:tma|wgmma|tmem|mbarrier|cp\.async\.bulk|tensormap)\b",
+    re.I,
+)
+
+
+def leaf_hardware_allowed(leaf: Leaf) -> frozenset[str]:
+    """Architectures this leaf may be labeled with.
+
+    Inferred from claim / l3_id so Planner never assigns Hopper to an Ampere-only
+    persist-window leaf (that pair used to be written then sieve-killed).
+    Agnostic is always allowed. Unknown leaves keep the full quota set.
+    """
+    blob = f"{leaf.claim} {leaf.l3_id} {leaf.l2_id}"
+    found: set[str] = set()
+    for name, rx in _HW_CLAIM:
+        if rx.search(blob):
+            found.add(name)
+    lower = blob.lower()
+    if _HOPPER_FEAT.search(blob) and "ampere" not in lower and not re.search(
+        r"sm_?80", blob, re.I
+    ):
+        found.update({"hopper", "blackwell"})
+    if not found:
+        return frozenset(HARDWARE)
+    return frozenset(found | {"agnostic"})
+
 
 def _as_angle_card(item: Any) -> dict[str, Any]:
+    """Normalize an angles.yaml entry to ``{id, ask, kinds, ...}``."""
     if isinstance(item, dict):
         ask = str(item.get("ask") or item.get("angle") or "")
         card = dict(item)
@@ -28,6 +63,7 @@ def _as_angle_card(item: Any) -> dict[str, Any]:
 
 
 def load_angles(path: Path | None = None) -> dict[str, list[dict[str, Any]]]:
+    """Load per-kind question-angle cards from ``configs/angles.yaml``."""
     if path is None:
         from cuda_sft_qgen.config import find_project_root
 
@@ -40,6 +76,7 @@ def load_angles(path: Path | None = None) -> dict[str, list[dict[str, Any]]]:
 
 
 def _instance_hint(leaf: Leaf, rng: random.Random) -> str:
+    """Pick a concrete fragment of the claim so writers do not stay generic."""
     if leaf.hints:
         return rng.choice(list(leaf.hints))
     # Do not split on `/` — it appears in fractions (3/5) and API paths.
@@ -124,7 +161,16 @@ def plan_briefs(
     rng: random.Random | None = None,
     angles: dict[str, list[Any]] | None = None,
     anti_cap: int = 15,
+    adaptive_config: dict[str, Any] | None = None,
+    rejected: Sequence[Question] | None = None,
+    knowledge: Any | None = None,
 ) -> list[QuestionBrief]:
+    """Sample ``n`` writer/evolver briefs from residual quotas and steering.
+
+    Hardware labels are restricted to architectures compatible with the leaf
+    claim. When adaptive sampling is enabled, L1 weights are boosted by leaf
+    health. Knowledge context is attached when a store is provided.
+    """
     rng = rng or random.Random()
     raw_angles = angles if angles is not None else load_angles()
     angle_table: dict[str, list[dict[str, Any]]] = {
@@ -216,6 +262,28 @@ def plan_briefs(
     if not l1_weights:
         l1_weights = {k: 1.0 for k in usable_l1}
 
+    sampler = None
+    leaf_stats = {}
+    # Apply adaptive sampling if enabled, including taxonomy leaves with no samples.
+    if adaptive_config and adaptive_config.get("enabled", False):
+        from cuda_sft_qgen.planner_v2 import AdaptiveSampler, compute_leaf_stats
+
+        rejected_seq = list(rejected) if rejected else []
+        leaf_stats = compute_leaf_stats(
+            accepted=accepted,
+            rejected=rejected_seq,
+            target_per_leaf=adaptive_config.get("target_per_leaf", 3),
+            taxonomy=taxonomy,
+        )
+
+        sampler = AdaptiveSampler(
+            epsilon=adaptive_config.get("epsilon", 0.15),
+            accept_weight=adaptive_config.get("accept_weight", 0.6),
+            coverage_weight=adaptive_config.get("coverage_weight", 0.4),
+        )
+
+        l1_weights = sampler.adjust_weights(l1_weights, leaf_stats, rng=rng)
+
     n_evolver = 0
     if seed_pool:
         n_evolver = min(int(round(n * evolver_fraction)), n, len(seed_pool))
@@ -228,18 +296,28 @@ def plan_briefs(
     used_l3: set[str] = set()
     used_pair: set[tuple[str, str]] = set()
     all_leaves = [lf for v in leaves_by_l1.values() for lf in v]
+    if not all_leaves:
+        raise ValueError("No active taxonomy claims are available for planning")
+
+    def choose_leaf(candidates: list[Leaf]) -> Leaf:
+        if sampler is None or rng.random() < sampler.epsilon:
+            return rng.choice(candidates)
+        by_id = {leaf.l3_id: leaf for leaf in candidates}
+        weights = {leaf_id: 0.5 + sampler.compute_health_score(leaf_stats[leaf_id])
+                   for leaf_id in by_id}
+        return by_id[_weighted_choice(rng, weights)]
 
     for i in range(n):
         l1 = _weighted_choice(rng, l1_weights)
         candidates = leaves_by_l1[l1]
         unused = [lf for lf in candidates if lf.l3_id not in used_l3]
         if unused:
-            leaf = rng.choice(unused)
+            leaf = choose_leaf(unused)
         elif len(used_l3) < len(all_leaves):
             pool_unused = [lf for lf in all_leaves if lf.l3_id not in used_l3]
-            leaf = rng.choice(pool_unused or candidates)
+            leaf = choose_leaf(pool_unused or candidates)
         else:
-            leaf = rng.choice(candidates)
+            leaf = choose_leaf(candidates)
         # Prefer leaf-native types if they have residual mass.
         native = [t for t in leaf.types if t in type_w]
         if native and rng.random() < 0.7:
@@ -256,7 +334,14 @@ def plan_briefs(
         # Definition-only remember+conceptual is allowed but rare.
         if bloom == "remember" and qtype == "conceptual" and rng.random() < 0.7:
             bloom = "apply"
-        hardware = _weighted_choice(rng, hw_w) if hw_w else "agnostic"
+        allowed_hw = leaf_hardware_allowed(leaf)
+        hw_filtered = {k: v for k, v in (hw_w or {}).items() if k in allowed_hw}
+        if hw_filtered:
+            hardware = _weighted_choice(rng, hw_filtered)
+        elif "agnostic" in allowed_hw:
+            hardware = "agnostic"
+        else:
+            hardware = next(iter(allowed_hw))
         granularity = _weighted_choice(rng, gran_w) if gran_w else "kernel"
         language = _weighted_choice(rng, lang_w) if lang_w else "zh"
         persona = rng.choice(persona_ids)
@@ -264,10 +349,15 @@ def plan_briefs(
         seed_q = None
         seed_id = None
         if i < n_evolver:
-            seed = rng.choice(list(seed_pool))
-            role = "evolver"
-            seed_q = seed.question
-            seed_id = seed.id
+            seed_candidates = [q for q in seed_pool if q.l3_id == leaf.l3_id]
+            if not seed_candidates and knowledge is not None:
+                related = set(knowledge.related_claim_ids(leaf.l3_id))
+                seed_candidates = [q for q in seed_pool if q.l3_id in related]
+            if seed_candidates:
+                seed = rng.choice(seed_candidates)
+                role = "evolver"
+                seed_q = seed.question
+                seed_id = seed.id
         hint = _instance_hint(leaf, rng)
         card = _pick_angle(rng, qtype, angle_table, kind=leaf.kind or None)
         angle = str(card.get("ask") or "")
@@ -334,6 +424,19 @@ def plan_briefs(
                 seed_question=seed_q,
                 seed_id=seed_id,
                 breadth_or_depth=breadth_signal,
+                claim_revision=getattr(leaf, "revision", 1),
+                source_ids=list(getattr(leaf, "sources", ())),
+                knowledge_context=(
+                    knowledge.context_for_generation(
+                        leaf.l3_id, revision=getattr(leaf, "revision", 1), max_claims=6
+                    )
+                    if knowledge is not None and hasattr(knowledge, "context_for_generation")
+                    else (
+                        knowledge.context_for_claim(leaf.l3_id, revision=getattr(leaf, "revision", 1))
+                        if knowledge is not None
+                        else {}
+                    )
+                ),
             )
         )
         # Light recency penalty so a batch does not collapse onto one L1.

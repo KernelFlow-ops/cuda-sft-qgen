@@ -1,3 +1,5 @@
+"""Tests for three-layer Deduper thresholds (exact, template, semantic)."""
+
 from __future__ import annotations
 
 from cuda_sft_qgen.config import load_settings

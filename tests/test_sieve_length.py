@@ -1,3 +1,5 @@
+"""Tests for rule_sieve length, claim, and question-shape rejects."""
+
 from __future__ import annotations
 
 from cuda_sft_qgen.config import load_settings

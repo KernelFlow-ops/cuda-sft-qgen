@@ -1,3 +1,5 @@
+"""Cosine index over taxonomy leaf claims used to drop duplicate expansions."""
+
 from __future__ import annotations
 
 import logging
@@ -14,10 +16,13 @@ logger = logging.getLogger(__name__)
 
 
 def leaf_embed_text(kind: str, l2_id: str, claim: str) -> str:
+    """Canonical embed string so identical claims collide across kinds/L2s."""
     return f"{kind or 'mechanism'} | {l2_id} | {claim.strip()}"
 
 
 class TaxonomyEmbedIndex:
+    """Persistent leaf-claim vector index with dup/gray cosine bands."""
+
     def __init__(
         self,
         path: Path,
@@ -25,6 +30,7 @@ class TaxonomyEmbedIndex:
         cosine_dup: float = 0.92,
         cosine_gray: float = 0.85,
     ) -> None:
+        """Bind the npz path, embedder, and dup/gray cosine thresholds."""
         self.path = Path(path)
         self.embedder = embedder
         self.cosine_dup = float(cosine_dup)
@@ -33,6 +39,7 @@ class TaxonomyEmbedIndex:
         self._loaded = False
 
     def load(self) -> None:
+        """Load the npz index; a missing/corrupt file becomes an empty index."""
         try:
             if self.path.exists():
                 self._index = VectorIndex.load(self.path)
@@ -44,17 +51,20 @@ class TaxonomyEmbedIndex:
         self._loaded = True
 
     def save(self) -> None:
+        """Persist the in-memory index; failures are logged, not raised."""
         try:
             self._index.save(self.path)
         except Exception as exc:  # noqa: BLE001
             logger.warning("taxonomy embed save failed: %s", exc)
 
     def ensure_loaded(self) -> bool:
+        """Load once; return True if the index already has vectors."""
         if not self._loaded:
             self.load()
         return bool(self._index.ids)
 
     def rebuild(self, leaves: Sequence[Leaf], *, save: bool = True) -> int:
+        """Re-embed all active leaves. Returns the number indexed."""
         active = [lf for lf in leaves if not getattr(lf, "retired", False)]
         if self.embedder is None or not active:
             self._index = VectorIndex()
@@ -155,6 +165,7 @@ class TaxonomyEmbedIndex:
         return keep, dropped, gray_pairs
 
     def add_leaves(self, items: list[dict]) -> None:
+        """Embed and append newly accepted leaves that are not yet indexed."""
         if not items or self.embedder is None:
             return
         if not self._loaded:

@@ -1,3 +1,5 @@
+"""Select and format few-shot positives, quality negatives, and anti-templates."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -28,6 +30,7 @@ TYPE_TO_ACT = {
 
 
 def is_quality_reject(reason: str | None) -> bool:
+    """True for sieve/dedup rejects; false for generate errors and 429 exhaust."""
     text = reason or ""
     if not text or text.startswith("generate_error") or text.startswith("retry_exhausted"):
         return False
@@ -59,6 +62,7 @@ def _unique_ok(q: Question) -> bool:
 
 @dataclass
 class FewshotCfg:
+    """Caps and similarity bands for few-shot selection."""
     positives: int = 5
     negatives: int = 2
     anti_max: int = 15
@@ -70,6 +74,7 @@ class FewshotCfg:
 
     @classmethod
     def from_generation(cls, gen: dict[str, Any], *, gray_hamming: int = 8) -> "FewshotCfg":
+        """Build a config from the ``generation`` YAML mapping."""
         return cls(
             positives=int(gen.get("fewshot_positives", 5)),
             negatives=int(gen.get("fewshot_negatives", 2)),
@@ -84,6 +89,7 @@ class FewshotCfg:
 
 @dataclass
 class FewshotPick:
+    """One example plus the slot it occupies (same-leaf, same-L1, ...)."""
     question: Question
     slot: str
     note: str = ""
@@ -91,12 +97,14 @@ class FewshotPick:
 
 @dataclass
 class FewshotCorpus:
+    """Accepted/rejected pools used to pick positives, negatives, and anti-stems."""
     accepted: list[Question] = field(default_factory=list)
     rejected_quality: list[Question] = field(default_factory=list)
     anti_skeletons: list[str] = field(default_factory=list)
 
     @classmethod
     def from_store(cls, store: Any, *, anti_k: int = 15) -> "FewshotCorpus":
+        """Build a corpus from the archive's accepted, quality-rejected, and anti stems."""
         accepted = list(store.load_accepted())
         rejected = []
         if hasattr(store, "iter_quality_rejected"):
@@ -158,6 +166,7 @@ def select_positives(
     *,
     seed_simhash: int | None = None,
 ) -> list[FewshotPick]:
+    """Pick accepted examples near the brief's leaf/L1 without near-duplicates of the seed."""
     accepted = [q for q in corpus.accepted if _unique_ok(q)]
     used: set[str] = set()
     picks: list[FewshotPick] = []
@@ -241,6 +250,7 @@ def select_negatives(
     cfg: FewshotCfg,
     used_ids: set[str] | None = None,
 ) -> list[FewshotPick]:
+    """Pick quality-rejected examples as negatives, preferring the same leaf/type."""
     used = set(used_ids or ())
     quality = [
         q
@@ -259,6 +269,7 @@ def select_anti(
     cfg: FewshotCfg,
     static_patterns: Sequence[str],
 ) -> list[str]:
+    """Merge static anti-patterns, brief stems, and recent rejected skeletons."""
     out: list[str] = []
     seen: set[str] = set()
     for item in list(static_patterns) + list(brief.anti_templates) + list(corpus.anti_skeletons):
@@ -273,6 +284,7 @@ def select_anti(
 
 
 def format_positives(picks: Sequence[FewshotPick], cfg: FewshotCfg) -> str:
+    """Render positive few-shots as a numbered prompt block."""
     if not picks:
         return "(none yet)"
     lines = []
@@ -292,6 +304,7 @@ def format_positives(picks: Sequence[FewshotPick], cfg: FewshotCfg) -> str:
 
 
 def format_negatives(picks: Sequence[FewshotPick], cfg: FewshotCfg) -> str:
+    """Render quality-reject few-shots as a numbered prompt block."""
     if not picks:
         return "(none yet)"
     lines = []
@@ -306,6 +319,7 @@ def format_negatives(picks: Sequence[FewshotPick], cfg: FewshotCfg) -> str:
 
 
 def format_anti(items: Sequence[str]) -> str:
+    """Render forbidden stems as a bullet list."""
     if not items:
         return "(none)"
     return "\n".join(f"- {s[:240]}" for s in items)

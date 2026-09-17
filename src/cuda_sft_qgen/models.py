@@ -1,8 +1,15 @@
+"""Pydantic contracts for questions, reviews, briefs, and diversity reports.
+
+Accepted reviews require every quality check to pass, a private reference
+answer, and independently assessed metadata. Uncertainty never authorizes
+export.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 QuestionType = Literal[
@@ -34,7 +41,71 @@ ReviewStatus = Literal["pending", "accepted", "rejected"]
 DupVerdict = Literal["dup", "unique", "gray"]
 
 
+class AssessedMetadata(BaseModel):
+    """Reviewer-assigned labels; never copied blindly from the writer brief."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    question_type: QuestionType
+    difficulty: int = Field(ge=1, le=4)
+    bloom: Bloom
+    hardware: Hardware
+    granularity: Granularity
+    language: Language
+
+
+CheckResult = Literal["pass", "fail", "uncertain"]
+
+
+class QualityChecks(BaseModel):
+    """Independent pass/fail/uncertain verdicts for a single question."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    correctness: CheckResult
+    answerability: CheckResult
+    claim_alignment: CheckResult
+    hardware_compatibility: CheckResult
+    answer_leakage: CheckResult
+    metadata: CheckResult
+    duplication: CheckResult
+
+
+class QualityReview(BaseModel):
+    """Single-question reviewer contract; uncertainty can never authorize export."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    id: str = Field(min_length=1)
+    action: Literal["accept", "reject", "pending"]
+    reason: str = Field(min_length=1)
+    checks: QualityChecks
+    evidence: list[str] = Field(min_length=1)
+    internal_reference_answer: str | None
+    assessed_metadata: AssessedMetadata | None
+
+    @model_validator(mode="after")
+    def validate_decision(self) -> "QualityReview":
+        """Enforce accept/reject invariants so uncertain items stay pending."""
+        results = self.checks.model_dump().values()
+        if not self.reason.strip() or not all(e.strip() for e in self.evidence):
+            raise ValueError("review reason and evidence must be nonempty")
+        if self.action == "accept":
+            if any(value != "pass" for value in results):
+                raise ValueError("accept requires every quality check to pass")
+            if not (self.internal_reference_answer or "").strip():
+                raise ValueError("accept requires a private reference answer")
+            if self.assessed_metadata is None:
+                raise ValueError("accept requires independently assessed metadata")
+        if self.action == "reject" and "fail" not in results:
+            raise ValueError("reject requires a failed check")
+        return self
+
+
 class QuestionBrief(BaseModel):
+    """Planner task sent to Writer/Evolver; metadata here is a request, not a verdict."""
+
+    task_id: str = ""
     topic_path: list[str]
     l3_id: str
     l3_claim: str
@@ -57,10 +128,20 @@ class QuestionBrief(BaseModel):
     role: Literal["writer", "evolver"] = "writer"
     seed_question: str | None = None
     seed_id: str | None = None
+    claim_revision: int | None = None
+    source_ids: list[str] = Field(default_factory=list)
+    knowledge_context: dict[str, Any] = Field(default_factory=dict)
     breadth_or_depth: str = "BREADTH"  # "BREADTH" | "DEPTH"
 
 
 class Question(BaseModel):
+    """Generated candidate plus review, fingerprint, and knowledge provenance.
+
+    ``internal_reference_answer`` is review-only and is stripped from JSONL
+    export. ``review_status`` stays pending until an independent chair accept
+    or a hard reject.
+    """
+
     id: str
     question: str
     tests_claim: str
@@ -87,10 +168,24 @@ class Question(BaseModel):
     reject_reason: str | None = None
     warnings: list[str] = Field(default_factory=list)
     kind: str = ""
+    requested_metadata: dict[str, Any] = Field(default_factory=dict)
+    assessed_metadata: AssessedMetadata | None = None
+    seed_id: str | None = None
+    operator: str | None = None
+    angle_id: str = ""
+    claim_revision: int | None = None
+    source_ids: list[str] = Field(default_factory=list)
+    knowledge_dependencies: list[dict[str, Any]] = Field(default_factory=list)
+    review_details: dict[str, Any] = Field(default_factory=dict)
+    internal_reference_answer: str | None = None
+    review_attempts: int = 0
+    review_next_at: float = 0.0
+    review_exhausted: bool = False
 
     @field_validator("language", mode="before")
     @classmethod
     def _coerce_language(cls, value: Any) -> str:
+        """Map noisy model tokens (en/zh/cn/english/...) onto the Language literal."""
         text = str(value or "").strip().strip("\"'").lower()
         if text.startswith("en"):
             return "en"
@@ -99,10 +194,18 @@ class Question(BaseModel):
         return "zh"
 
     def to_jsonl(self) -> dict[str, Any]:
-        return self.model_dump()
+        """Serialize for archive export; drop the private reference answer."""
+        record = self.model_dump(exclude={"internal_reference_answer"})
+        record["review_details"] = {
+            key: value for key, value in self.review_details.items()
+            if key in {"action", "checks", "reviewer_model"}
+        }
+        return record
 
 
 class SteeringBrief(BaseModel):
+    """Chair-to-planner distribution correction for the next generate batch."""
+
     underrepresented: list[str] = Field(default_factory=list)
     overrepresented: list[str] = Field(default_factory=list)
     forbidden_templates: list[str] = Field(default_factory=list)
@@ -111,6 +214,11 @@ class SteeringBrief(BaseModel):
     style_notes: str = ""
 
     def to_prompt_block(self, *, anti_cap: int = 15) -> str:
+        """Render a compact steering block for writer prompts.
+
+        Args:
+            anti_cap: Max forbidden-template stems to include.
+        """
         if not any(
             [
                 self.underrepresented,
@@ -135,6 +243,8 @@ class SteeringBrief(BaseModel):
 
 
 class DupDecision(BaseModel):
+    """Three-layer dedup outcome: exact, template, or semantic nearest neighbor."""
+
     verdict: DupVerdict
     reason: str | None = None
     nearest_id: str | None = None
@@ -144,6 +254,8 @@ class DupDecision(BaseModel):
 
 
 class DiversityReport(BaseModel):
+    """Quota coverage and imbalance stats used to build the next SteeringBrief."""
+
     accepted_count: int
     pending_count: int
     l1_hist: dict[str, int] = Field(default_factory=dict)

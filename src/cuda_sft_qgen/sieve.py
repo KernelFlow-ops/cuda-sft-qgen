@@ -1,3 +1,9 @@
+"""Cheap local filters that reject empty, off-topic, or non-question text.
+
+Hardware/leaf mismatches are warnings on the writer path, not hard rejects;
+the chair still decides those cases.
+"""
+
 from __future__ import annotations
 
 import re
@@ -5,14 +11,13 @@ import re
 from cuda_sft_qgen.config import Settings
 from cuda_sft_qgen.llm import LLMClient
 from cuda_sft_qgen.models import Question
-from cuda_sft_qgen.review.consistency import consistency_reason
 
 _CUDA_HINTS = re.compile(
-    r"cuda|kernel|warp|thread|block|grid|shared|global memory|occupancy|"
+    r"cuda|kernel|内核|warp|thread|block|grid|shared|global memory|occupancy|"
     r"nvcc|ptx|sass|tensor core|cutlass|cute|tma|wgmma|umma|tmem|"
     r"nsight|cublas|nccl|hopper|ampere|blackwell|smem|gmem|"
     r"__syncthreads|coalesc|bank conflict|mma|layout|stride|swizzle|"
-    r"cluster|nvlink|cub::|launch_bounds",
+    r"cluster|nvlink|cub::|launch_bounds|__fma|fma|ulp",
     re.IGNORECASE,
 )
 
@@ -47,10 +52,12 @@ def rule_sieve(question: Question, settings: Settings) -> str | None:
         return "sieve_too_vague"
     if text.endswith("。") and "？" not in text and "?" not in text and len(text) < 40:
         return "sieve_not_a_question"
-    return consistency_reason(question)
+    # hw/leaf mismatches are warnings on the Writer path, not hard rejects.
+    return None
 
 
 def llm_sieve(question: Question, llm: LLMClient) -> str | None:
+    """Optional cheap LLM filter; parse/call failures never reject the item."""
     messages = [
         {
             "role": "system",
@@ -87,6 +94,11 @@ def llm_sieve(question: Question, llm: LLMClient) -> str | None:
 def sieve_question(
     question: Question, settings: Settings, llm: LLMClient | None
 ) -> str | None:
+    """Run rule sieve, then optional LLM sieve.
+
+    Returns:
+        Reject reason string, or None if the question may proceed to review.
+    """
     reason = rule_sieve(question, settings)
     if reason:
         return reason

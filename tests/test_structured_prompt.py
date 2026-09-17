@@ -1,3 +1,5 @@
+"""Tests for layered writer/evolver prompt assembly and cache keys."""
+
 from __future__ import annotations
 
 from cuda_sft_qgen.config import load_settings
@@ -29,6 +31,7 @@ def _brief(**kwargs) -> QuestionBrief:
 
 def test_layers_and_json_schema_for_formula():
     settings = load_settings(fake_llm=True)
+    settings.default_yaml.setdefault("generation", {})["prompt_cot"] = True
     sp = StructuredPrompt(settings, FewshotCorpus())
     bundle = sp.build(_brief(), SteeringBrief())
     assert "Hard constraints" in bundle.system or "Python len()" in bundle.system

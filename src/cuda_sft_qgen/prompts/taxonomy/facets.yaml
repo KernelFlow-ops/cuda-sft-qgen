@@ -172,3 +172,19 @@ facets:
       TMA consumer wait is legal only when mbarrier.expect_tx bytes = TMA completed bytes AND the wait uses that same barrier; __syncthreads cannot substitute.
     banned_claim: |
       Kernel performance depends on many factors including occupancy, memory, and synchronization.
+
+  - id: derivation
+    when: |
+      Use this facet when the L2 needs a short closed-form derivation chain (2–4 formula leaves
+      linked by derives), not a single final identity and not an open-ended performance essay.
+    must: |
+      Prefer kind=formula. Emit 2–4 leaves that each contain `=` or `→` or `=>`. Later leaves
+      must be instances or rearrangements of earlier ones (same units). The writer should be
+      able to plug numbers through the chain.
+    must_not: |
+      Do not write "derive a model" with no equation. Do not emit a single isolated formula
+      if the facet is derivation. Do not mix unrelated identities into one chain.
+    example_claim: |
+      Aligned 32×4B at 128B is 1 transaction; stride-2 of the same 32×4B is 2 transactions because each pair of 32B sectors falls in a distinct 128B line.
+    banned_claim: |
+      Derive a roofline model for the kernel.

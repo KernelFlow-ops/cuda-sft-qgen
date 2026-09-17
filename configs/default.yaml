@@ -23,9 +23,29 @@ generation:
   fewshot_max_nn_cosine: 0.50
   fewshot_nn_cosine_fallback: 0.80
   fewshot_simhash_hamming_max: 20
-  prompt_cot: true
+  prompt_cot: false
   sieve_min_chars: 24
   max_parse_retries: 1
+  priority_queue_size: 200
+  backpressure_threshold: 0.20
+  backpressure_sleep: 0.5
+  # Never emit 1-2 brief batches that idle the writer pool.
+  min_generate_batch: null
+  # Stagger writer submits so 6 streams do not hit the gateway in the same 200ms.
+  submit_stagger_sec: 0.8
+  # Salvage JSON in the salvage node, not on the writer thread.
+  salvage_inline: false
+  pending_save_every: 1
+  # Inherit THINKING_LEVEL unless set. Prefer low/none for throughput.
+  writer_thinking_level: null
+
+knowledge:
+  enabled: true
+  audit_interval_seconds: 86400
+  audit_batch_size: 20
+  worker_poll_seconds: 5
+  expansion_cooldown_seconds: 300
+  official_sources: []
 
 taxonomy:
   target_leaves_per_l2: 30
@@ -41,6 +61,7 @@ taxonomy:
     leaf_cosine_gray: 0.85
     facets:
       - formula
+      - derivation
       - failure
       - feature
       - mechanism
@@ -55,6 +76,8 @@ taxonomy:
     allow_new_domains: false
 
 review:
+  thinking_level: medium
+  max_tokens: 8192
   batch_size: 20
   top_k: 8
   semantic_dup_threshold: 0.94      # Was 0.93 - more strict semantic similarity
@@ -71,3 +94,7 @@ review:
   leaf_coverage_target: 0.80
   overrep_factor: 2.0
   llm_every_k_batches: 1
+  # Parallel chair processing (Agent D)
+  parallel_enabled: true            # Enable parallel LLM chair decisions
+  chair_max_workers: 4              # Max parallel workers for chair decisions
+  chair_batch_size: 10              # Batch size for gray items processing

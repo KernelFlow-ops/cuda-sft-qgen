@@ -1,0 +1,454 @@
+{
+  "schema_version": 1,
+  "description": "Frozen question-quality regression cases. Labels are audit annotations, never reviewer input; fake runs cannot establish quality.",
+  "cases": [
+    {
+      "case_id": "run50_line_5",
+      "expected_action": "reject",
+      "source": {
+        "path": "data/run50/accepted.jsonl",
+        "line": 5
+      },
+      "annotation": "Code calls atomicAdd before grid.sync, while the narrative asks about atomicAdd after the barrier. It also requires two independent hardware causes without establishing them.",
+      "question": {
+        "id": "q_b19cb2ed8efc44569780b6633ca162d4",
+        "question": "在 Hopper (sm_90) 上使用 cooperative groups 启动 grid-stride reduction kernel，每个 block 计算部分和并通过 `grid.sync()` 后以 atomicAdd 累加到全局 `float` 缓冲区。\n\n```cpp\n__global__ void reduce_grid(const float* in, float* out, size_t n) {\n    cg::grid_group grid = cg::this_grid();\n    float sum = 0.0f;\n    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += gridDim.x * blockDim.x) {\n        sum += in[i];\n    }\n    __shared__ float smem[256];\n    smem[threadIdx.x] = sum;\n    __syncthreads();\n    for (int s = blockDim.x / 2; s > 0; s >>= 1) {\n        if (threadIdx.x < s) smem[threadIdx.x] += smem[threadIdx.x + s];\n        __syncthreads();\n    }\n    if (threadIdx.x == 0) atomicAdd(out, smem[0]);\n    grid.sync();\n}\n```\n\n观察到：同一输入多次运行，`*out` 结果在最后 1-2 个 ULP 抖动。\n若将 `atomicAdd` 改为 **固定归约树**（block 0 先加，block 1 再加 …），抖动消失。\n**请从硬件执行模型解释：为何 `grid.sync()` 后的 atomicAdd 仍不保证浮点加法顺序？指出导致不确定性的两个独立硬件因素，并说明固定归约树如何在指令层面消除它们。",
+        "tests_claim": "grid.sync 只同步控制流不强制浮点加法顺序，SM 调度差异与原子操作到达顺序导致非确定性累加序列。",
+        "topic_path": [
+          "T28",
+          "fp_nondet",
+          "fp_nondet_grid_sync"
+        ],
+        "l3_id": "fp_nondet_grid_sync",
+        "l3_claim": "cooperative grid.sync 不恢复浮点结合律：各 block 仍可按不同顺序把部分和写入全局缓冲，除非规定固定归约树。",
+        "question_type": "counterfactual",
+        "difficulty": 3,
+        "bloom": "apply",
+        "persona": "ncu_perf_engineer",
+        "hardware": "hopper",
+        "granularity": "pipeline",
+        "language": "zh",
+        "template_fingerprint": "[why][L] 在 {ARCH} ({ARCH}) 上使用 {ID} 启动 {ID}-{ID} ,每个 {ID} 计算部分和并通过 `{ID}.{ID}()` 后以 {API} 累加到全局 `{ID}` 缓冲区。 {CODE} 观察到:同一输入多次运行,`*{ID}` 结果在最后 {N}-{N} 个 {ID} 抖动。 若将 `{API}` 改为 **固定归约树**({ID} {N} 先加,{ID} {N} 再加...),抖动消失。 **请从硬件执行模型解释:为何 `{ID}.{ID}()` 后的 {API} 仍不保证浮点加法顺序?指出导致不确定性的两个独立硬件因素,并说明固定归约树如何在指令层面消除它们。",
+        "simhash": 1104923999616814348,
+        "exact_hash": "106321f7015311536b73b06b097c508067d1f2abdd28563600e7989834466f31",
+        "source": "writer",
+        "nearest_id": "q_6343284fefa34d1680f1cd005ca21b3c",
+        "nearest_cosine": 0.35915499925613403,
+        "template_jaccard": null,
+        "hamming": null,
+        "dup_verdict": "unique",
+        "review_status": "accepted",
+        "reject_reason": null,
+        "warnings": [],
+        "kind": "mechanism"
+      }
+    },
+    {
+      "case_id": "run50_line_11",
+      "expected_action": "reject",
+      "source": {
+        "path": "data/run50/accepted.jsonl",
+        "line": 11
+      },
+      "annotation": "The loop contains sequential conditional statements, not 32 nested branches. The question presupposes unsupported profiler metrics and reconvergence-stack claims for Volta.",
+      "question": {
+        "id": "q_833e4e47a0db4cb3a36418932bcd0835",
+        "question": "在 Volta (sm_70) 及更新架构上，考虑如下 kernel：每个 warp 内部通过 `threadIdx.x % 4` 形成 4 个子群，执行深度为 32 的嵌套 `if-else` 链，每层仅有一个子群进入分支，其余三个子群汇合等待。编译选项 `-arch=sm_70 -maxrregcount=32`，NSight Compute 显示 `smsp__warp_issue_stalled_divergence_pct` 约为 0%，但 `smsp__warp_issue_stalled_reconvergence_pct` 达到 42%，且 `stall_reconvergence` 原因在 warp state 统计中占比最高。\n\n```cpp\n__global__ void deep_diverge_kernel(int *out) {\n    int lane = threadIdx.x % 4;\n    int val = 0;\n    #pragma unroll\n    for (int depth = 0; depth < 32; ++depth) {\n        if (lane == (depth % 4)) {\n            val += depth;\n        }\n    }\n    out[threadIdx.x] = val;\n}\n```\n\n请从 **汇合栈机制** 与 **指令调度** 两个层面解释：\n1. 为何 `stall_reconvergence` 成为主导 stall reason，而非 `stall_divergence`？\n2. 若必须保持 32 层逻辑深度，应如何改写控制流以降低 reconvergence stall，给出具体的代码变换并说明其如何减少汇合栈压力。\n\n要求答案引用 PTX/SASS 层面的 `SSY`/`SYNC`/`BRA` 指令行为、汇合栈条目结构（PC+mask）以及 warp scheduler 的重发机制。",
+        "tests_claim": "Volta+ reconvergence stack records PC and mask per divergent branch; deep nesting overflows the stack causing compile/runtime error, not silent path loss, and manifests as elevated stall_reconvergence in profiler counters.",
+        "topic_path": [
+          "T03",
+          "warp_state",
+          "warp_state_css"
+        ],
+        "l3_id": "warp_state_css",
+        "l3_claim": "Volta+ 汇合栈记录发散分支的 PC 与 mask；栈溢出（过深嵌套发散）是编译/运行错误，不是静默丢路径",
+        "question_type": "profiling",
+        "difficulty": 4,
+        "bloom": "evaluate",
+        "persona": "ptx_compiler",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "zh",
+        "template_fingerprint": "[why][L] 在 {ARCH} ({ARCH}) 及更新架构上,考虑如下 {ID}:每个 {ID} 内部通过 `{ID}.x % {N}` 形成 {N} 个子群,执行深度为 {N} 的嵌套 `if-{ID}` 链,每层仅有一个子群进入分支,其余三个子群汇合等待。编译选项 `-arch={ARCH} -{ID}={N}`,{ID} 显示 `{ID}` 约为 {N}%,但 `{ID}` 达到 {N}%,且 `{ID}` 原因在 {ID} 统计中占比最高。 {CODE} 请从 **汇合栈机制** 与 **指令调度** 两个层面解释: {N}. 为何 `{ID}` 成为主导 {ID} ,而非 `{ID}`? {N}. 若必须保持 {N} 层逻辑深度,应如何改写控制流以降低 {ID} ,给出具体的代码变换并说明其如何减少汇合栈压力。 要求答案引用 {ID}/{ID} 层面的 `{ID}`/`{ID}`/`{ID}` 指令行为、汇合栈条目结构(pc+{ID})以及 {ID} 的重发机制。",
+        "simhash": 3322480458788144264,
+        "exact_hash": "8f5d605477372c1862e3d5e4354da8ee8b6426510d53f03ae6c3a0302e98a5a8",
+        "source": "writer",
+        "nearest_id": "q_d45cc42ca40745b49a13cbf7400b10af",
+        "nearest_cosine": 0.3755502700805664,
+        "template_jaccard": 0.1267605633802817,
+        "hamming": 28,
+        "dup_verdict": "unique",
+        "review_status": "accepted",
+        "reject_reason": null,
+        "warnings": [],
+        "kind": "mechanism"
+      }
+    },
+    {
+      "case_id": "run50_line_18",
+      "expected_action": "reject",
+      "source": {
+        "path": "data/run50/accepted.jsonl",
+        "line": 18
+      },
+      "annotation": "NVTX annotation coverage alone cannot determine a unique scheduler stall metric for unmodified iterations. The required causal conclusion is unsupported.",
+      "question": {
+        "id": "q_d13ba95568144560b8486465092ac033",
+        "question": "在 Hopper (sm_90) 上对一个 GEMM kernel 进行 Nsight Systems 采样分析。kernel 仅在迭代的前 10% 周期标记 NVTX range \"iter_0\"/\"iter_1\"，余下 90% 迭代**完全不插桩**（无 nvtxRangePush）。采集命令为：`nsys profile -p NVTX --cudabacktrace=true ./app`。\n\n生成的 timeline 中：\n- CUDA API 行仍显示所有迭代的 `cudaLaunchKernel` 与 `cudaStreamSynchronize`\n- GPU 采样行（默认 1 ms 采样）在无标记迭代区间仅出现 `Compute (SM) Throughput` 与 `Memory Throughput` 采样点，未出现任何 NVTX 标注的 range\n- NCU log 显示该 kernel 的 **SM Active Cycles** 与 **Eligible Warps Per Scheduler** 均维持高位\n\n问：若开发者误认为 \"NVTX 过滤后 timeline 里不显示的迭代就是没跑\"，进而**只对有标记的 10% 迭代做优化**（例如把 block size 从 256 改为 128 以降低寄存器压力），会导致哪个 **stall reason 计数器**（Nsight Compute metric 名称）在**无标记的 90% 迭代**中显著上升？给出 metric 全名并说明硬件机制；同时指出代码应如何修正以覆盖完整迭代。\n\n（限制：答案必须引用具体 stall reason metric、SM warp scheduler 行为、与 NVTX 过滤仅影响显示不影响采集的因果链；禁止泛泛而谈 \"优化不当\"）",
+        "tests_claim": "验证考生理解 Nsys -p NVTX 域过滤仅控制 timeline 显示、不影响 CUDA API 采集与 GPU 采样，误判会导致针对无标记区间的占用/寄存器优化反而增加 SM Active Warps 不足导致的 warp schedule stall（SM_Warp_Scheduler_Stall_Shortage_Of_Warps）。",
+        "topic_path": [
+          "T12",
+          "profiler_filter",
+          "profiler_filter_nvtx"
+        ],
+        "l3_id": "profiler_filter_nvtx",
+        "l3_claim": "Nsys -p NVTX 域过滤只影响显示；未打 NVTX 的 CUDA API 仍在时间线，不能当“没调用”",
+        "question_type": "profiling",
+        "difficulty": 2,
+        "bloom": "analyze",
+        "persona": "code_reviewer",
+        "hardware": "hopper",
+        "granularity": "pipeline",
+        "language": "zh",
+        "template_fingerprint": "[how][XL] 在 {ARCH} ({ARCH}) 上对一个 {ID} 进行 {ID} 采样分析。{ID} 仅在迭代的前 {N}% 周期标记 {ID} \"{ID}\"/\"{ID}\",余下 {N}% 迭代**完全不插桩**(无 {ID})。采集命令为:`{ID} -p {ID} --{ID}={ID}./{ID}`。 生成的 {ID} 中: - {ID} api 行仍显示所有迭代的 `{API}` 与 `{API}` - {ID} 采样行(默认 {N} ms 采样)在无标记迭代区间仅出现 `{ID} (sm) {ID}` 与 `{ID} ` 采样点,未出现任何 {ID} 标注的 {ID} - {ID} 显示该 {ID} 的 **sm {ID} ** 与 **{ID} ** 均维持高位 问:若开发者误认为 \"{ID} 过滤后 {ID} 里不显示的迭代就是没跑\",进而**只对有标记的 {N}% 迭代做优化**(例如把 {ID} 从 {N} 改为 {N} 以降低寄存器压力),会导致哪个 **{ID} 计数器**({ID} 名称)在**无标记的 {N}% 迭代**中显著上升?给出 {ID} 全名并说明硬件机制;同时指出代码应如何修正以覆盖完整迭代。 (限制:答案必须引用具体 {ID} 、sm {ID} 行为、与 {ID} 过滤仅影响显示不影响采集的因果链;禁止泛泛而谈 \"优化不当\")",
+        "simhash": 15262588863166080334,
+        "exact_hash": "00dbb5a643ef444730946928fa5df5c5727b25ffb7c6b27242d64aef232e587e",
+        "source": "writer",
+        "nearest_id": "q_833e4e47a0db4cb3a36418932bcd0835",
+        "nearest_cosine": 0.4552801251411438,
+        "template_jaccard": 0.07142857142857142,
+        "hamming": 31,
+        "dup_verdict": "unique",
+        "review_status": "accepted",
+        "reject_reason": null,
+        "warnings": [],
+        "kind": "mechanism"
+      }
+    },
+    {
+      "case_id": "run50_line_21",
+      "expected_action": "reject",
+      "source": {
+        "path": "data/run50/accepted.jsonl",
+        "line": 21
+      },
+      "annotation": "The numerical bandwidth model yields sub-microsecond transfer time, contradicting tests_claim that transfer alone dominates tens-of-microseconds to milliseconds first-touch latency.",
+      "question": {
+        "id": "q_ca607c46b2b54b7a80f460471b183eaa",
+        "question": "在 Pascal (sm_60) 及更新架构的 GPU 上，使用 `cudaMallocManaged` 分配一块 4 MiB 的 Unified Memory，且**未**调用 `cudaMemPrefetchAsync` 将数据预取到 GPU。随后启动一个包含 256 个线程的单 Block Kernel，每个线程以 stride-1 方式读取一个 `float` 元素（即连续读取 1 KiB 数据）。首次访问触发 GPU 缺页中断，驱动将对应的 4 KiB 物理页从系统内存迁移到 GPU 内存。\n\n已知：\n- 该架构的页面大小为 4 KiB（4096 字节）\n- PCIe 4.0 x16 理论双向带宽约 32 GB/s\n- 页表更新、TLB 失效、中断上下文切换等固定开销约 5 µs\n\n**问题**：若忽略页表走查开销，仅计算 **数据搬移的纯传输时间**，将这 4 KiB 页面经 PCIe 4.0 x16 从系统内存搬运到 GPU 内存的理论最小耗时是多少微秒（保留两位小数）？这一计算揭示了为什么“首次 touch 延迟可达数十微秒到毫秒，不是 HBM 命中”的硬件约束源自何处？",
+        "tests_claim": "The item tests that the first GPU touch of an unprefetched managed page triggers a page-fault migration whose latency is dominated by PCIe transfer time (tens of µs to ms), not an HBM hit.",
+        "topic_path": [
+          "T02",
+          "uvm",
+          "uvm_first_touch"
+        ],
+        "l3_id": "uvm_first_touch",
+        "l3_claim": "未 prefetch 的 managed 页在 GPU 第一次 touch 时发生 page fault 迁移，延迟可达数十微秒到毫秒，不是 HBM 命中",
+        "question_type": "conceptual",
+        "difficulty": 2,
+        "bloom": "create",
+        "persona": "code_reviewer",
+        "hardware": "agnostic",
+        "granularity": "api",
+        "language": "zh",
+        "template_fingerprint": "[why][L] 在 {ID} ({ARCH}) 及更新架构的 {ID} 上,使用 `{API}` 分配一块 {N} {ID} 的 {ID} ,且**未**调用 `{API}` 将数据预取到 {ID}。随后启动一个包含 {N} 个线程的单 {ID} ,每个线程以 {ID}-{N} 方式读取一个 `{ID}` 元素(即连续读取 {N} {ID} 数据)。首次访问触发 {ID} 缺页中断,驱动将对应的 {N} {ID} 物理页从系统内存迁移到 {ID} 内存。 已知: - 该架构的页面大小为 {N} {ID}({N} 字节) - {ID} {N} {ID} 理论双向带宽约 {N} gb/s - 页表更新、{ID} 失效、中断上下文切换等固定开销约 {N} μs **问题**:若忽略页表走查开销,仅计算 **数据搬移的纯传输时间**,将这 {N} {ID} 页面经 {ID} {N} {ID} 从系统内存搬运到 {ID} 内存的理论最小耗时是多少微秒(保留两位小数)?这一计算揭示了为什么“首次 {ID} 延迟可达数十微秒到毫秒,不是 {ID} 命中”的硬件约束源自何处?",
+        "simhash": 10361017133612305608,
+        "exact_hash": "6f2f3413e51fc4376f1186dc580a691a699814a1523873d76e1df960f1326ef9",
+        "source": "writer",
+        "nearest_id": "q_6343284fefa34d1680f1cd005ca21b3c",
+        "nearest_cosine": 0.4767971634864807,
+        "template_jaccard": 0.13095238095238096,
+        "hamming": 21,
+        "dup_verdict": "unique",
+        "review_status": "accepted",
+        "reject_reason": null,
+        "warnings": [],
+        "kind": "mechanism"
+      }
+    },
+    {
+      "case_id": "run50_line_25",
+      "expected_action": "reject",
+      "source": {
+        "path": "data/run50/accepted.jsonl",
+        "line": 25
+      },
+      "annotation": "The allegedly unique valid option is not unique: when the queried workspace size is positive and allocation succeeds, snippets 1, 2, 3 and 4 perform the same allocation and call.",
+      "question": {
+        "id": "q_1ff93985b5de4d24b79233b253395fc9",
+        "question": "在 cuDNN 8.x 以上版本中，使用 `cudnnConvolutionForward` 且算法显式指定为 `CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM` 时，该算法需要将隐式 GEMM 所需的索引表预存放在 workspace 中。假设在调用 `cudnnGetConvolutionForwardWorkspaceSize` 获得所需 workspace 字节数后，开发者传递 `workSpace = nullptr` 且 `workSpaceSizeInBytes = 0` 直接启动卷积。\n\n下列四个代码片段分别展示了不同的处理方式，其中**仅有一个**片段能在**不触发 `CUDNN_STATUS_NOT_SUPPORTED` 或 `CUDNN_STATUS_ALLOC_FAILED`** 的前提下，正确完成该卷积前向推理；其余三个片段要么因 workspace 不足导致算法内部 fallback 失败，要么因 API 调用顺序错误导致未定义行为。请指出**唯一合法**的片段编号（1~4）。\n\n```cpp\n// 片段 1\nsize_t ws_bytes = 0;\ncudnnGetConvolutionForwardWorkspaceSize(handle, xDesc, wDesc, convDesc, yDesc,\n                                        CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM,\n                                        &ws_bytes);\nvoid *ws = nullptr;\nif (ws_bytes > 0) cudaMalloc(&ws, ws_bytes);\ncudnnConvolutionForward(handle, alpha, xDesc, x, wDesc, w,\n                          convDesc, CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM,\n                          ws, ws_bytes, beta, yDesc, y);\n\n// 片段 2\nsize_t ws_bytes = 0;\ncudnnGetConvolutionForwardWorkspaceSize(handle, xDesc, wDesc, convDesc, yDesc,\n                                        CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM,\n                                        &ws_bytes);\nvoid *ws = nullptr;\ncudaMalloc(&ws, ws_bytes);  // ws_bytes 可能为 0\ncudnnConvolutionForward(handle, alpha, xDesc, x, wDesc, w,\n                          convDesc, CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM,\n                          ws, ws_bytes, beta, yDesc, y);\n\n// 片段 3\nsize_t ws_bytes = 0;\ncudnnGetConvolutionForwardWorkspaceSize(handle, xDesc, wDesc, convDesc, yDesc,\n                                        CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM,\n                                        &ws_bytes);\nvoid *ws = nullptr;\nif (ws_bytes > 0) cudaMalloc(&ws, ws_bytes);\nelse ws = (void*)0x1;  // 伪造非空指针\ncudnnConvolutionForward(handle, alpha, xDesc, x, wDesc, w,\n                          convDesc, CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM,\n                          ws, ws_bytes, beta, yDesc, y);\n\n// 片段 4\nsize_t ws_bytes = 0;\ncudnnGetConvolutionForwardWorkspaceSize(handle, xDesc, wDesc, convDesc, yDesc,\n                                        CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM,\n                                        &ws_bytes);\nvoid *ws = nullptr;\ncudaMalloc(&ws, ws_bytes);\nif (ws_bytes == 0) ws = nullptr;  // 显式置空\ncudnnConvolutionForward(handle, alpha, xDesc, x, wDesc, w,\n                          convDesc, CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM,\n                          ws, ws_bytes, beta, yDesc, y);\n```",
+        "tests_claim": "IMPLICIT_PRECOMP_GEMM 算法要求 workspace 非零且指针有效；ws=0 会导致算法内部 fallback 或直接报错，唯有先查询大小再按需分配非零 workspace 才合法。",
+        "topic_path": [
+          "T13",
+          "conv_im2col",
+          "conv_im2col_ws"
+        ],
+        "l3_id": "conv_im2col_ws",
+        "l3_claim": "cuDNN IMPLICIT_PRECOMP_GEMM 把索引表放 workspace；ws=0 会迫使换 algo 或失败",
+        "question_type": "optimization",
+        "difficulty": 2,
+        "bloom": "analyze",
+        "persona": "hopper_blackwell_tracker",
+        "hardware": "agnostic",
+        "granularity": "api",
+        "language": "zh",
+        "template_fingerprint": "[debug][L] 在 {ID} {N}.x 以上版本中,使用 `{ID}` 且算法显式指定为 `{ID}` 时,该算法需要将隐式 {ID} 所需的索引表预存放在 {ID} 中。假设在调用 `{ID}` 获得所需 {ID} 字节数后,开发者传递 `{ID} = {ID}` 且 `{ID} = {N}` 直接启动卷积。 下列四个代码片段分别展示了不同的处理方式,其中**仅有一个**片段能在**不触发 `{ID}` 或 `{ID}`** 的前提下,正确完成该卷积前向推理;其余三个片段要么因 {ID} 不足导致算法内部 {ID} 失败,要么因 api 调用顺序错误导致未定义行为。请指出**唯一合法**的片段编号({N}~{N})。 {CODE}",
+        "simhash": 11174357615863119949,
+        "exact_hash": "0a13e63e01a2bc5229ab74ea626e6b17d2e532ec6a11ac09b006cf7658827915",
+        "source": "writer",
+        "nearest_id": "q_8705c153bc114d7eb7c2b2b04c67c949",
+        "nearest_cosine": 0.4061332046985626,
+        "template_jaccard": 0.11538461538461539,
+        "hamming": 25,
+        "dup_verdict": "unique",
+        "review_status": "accepted",
+        "reject_reason": null,
+        "warnings": [],
+        "kind": "api"
+      }
+    },
+    {
+      "case_id": "run50_line_32",
+      "expected_action": "reject",
+      "source": {
+        "path": "data/run50/accepted.jsonl",
+        "line": 32
+      },
+      "annotation": "NDEBUG removes assert but does not remove the preceding printf statement; the question explicitly claims neither printing nor trapping occurs.",
+      "question": {
+        "id": "q_22ed4ba00135473d9fb43bb1a4b46ce4",
+        "question": "在设备端代码中开发者编写了如下两个版本的“日志落盘”辅助函数，意图在条件不满足时立即终止当前线程并让后端捕获到异常信息：\n\n```cpp\n// 版本 A\n__device__ void log_and_abort_A(bool cond, const char* msg) {\n    if (!cond) {\n        printf(\"[LOG] %s\\n\", msg);\n        assert(cond);          // 期望触发 trap\n    }\n}\n\n// 版本 B\n__device__ void log_and_abort_B(bool cond, const char* msg) {\n    if (!cond) {\n        printf(\"[LOG] %s\\n\", msg);\n        __trap();              // 显式 trap\n    }\n}\n```\n\n发行版构建时定义了 `NDEBUG` 宏。请从 **指令生成与异常传播的硬件/执行模型** 角度解释：\n1. 为什么版本 A 在 `NDEBUG` 下 **完全失效**（即既不打印也不 trap），而版本 B 依然会执行 `__trap()`？\n2. 即使不定义 `NDEBUG`，为何 `assert(cond)` 产生的 trap 与显式 `__trap()` 在 **异常向量、错误码、可被宿主端 `cudaGetLastError` 捕获的语义** 上仍存在本质差异，导致二者不可互换当日志？\n\n答案需点出：\n- `assert` 宏在 `NDEBUG` 下的预处理器展开行为与 `__trap()` 的内联 PTX 指令本质区别；\n- 设备端 `assert` 失败后经由 `__assertfail` → `trap` 的运行时路径，与 `__trap()` 直接发射 `trap` 指令的指令流差异；\n- 两种路径在硬件异常分类（如 `CUDA_EXCEPTION_*` 类型）、 warp 级同步语义以及宿主端错误捕获机制上的具体差异。",
+        "tests_claim": "This question tests why assert() vanishes under NDEBUG while __trap() remains, and why their trap paths differ in exception vector, error code, and host-side catchability, making them non-interchangeable for logging.",
+        "topic_path": [
+          "T28",
+          "trap_instr",
+          "trap_instr_assert_path"
+        ],
+        "l3_id": "trap_instr_assert_path",
+        "l3_claim": "设备 assert 失败路径最终 trap；发行版定义 NDEBUG 后 assert 消失，但显式 __trap() 仍在，二者不可互换当日志。",
+        "question_type": "compare",
+        "difficulty": 4,
+        "bloom": "understand",
+        "persona": "cuda_interviewer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "zh",
+        "template_fingerprint": "[debug][L] 在设备端代码中开发者编写了如下两个版本的“日志落盘”辅助函数,意图在条件不满足时立即终止当前线程并让后端捕获到异常信息: {CODE} 发行版构建时定义了 `{ID}` 宏。请从 **指令生成与异常传播的硬件/执行模型** 角度解释: {N}. 为什么版本 a 在 `{ID}` 下 **完全失效**(即既不打印也不 {ID}),而版本 b 依然会执行 `{ID}()`? {N}. 即使不定义 `{ID}`,为何 `{ID}({ID})` 产生的 {ID} 与显式 `{ID}()` 在 **异常向量、错误码、可被宿主端 `{ID}` 捕获的语义** 上仍存在本质差异,导致二者不可互换当日志? 答案需点出: - `{ID}` 宏在 `{ID}` 下的预处理器展开行为与 `{ID}()` 的内联 {ID} 指令本质区别; - 设备端 `{ID}` 失败后经由 `{ID}` → `{ID}` 的运行时路径,与 `{ID}()` 直接发射 `{ID}` 指令的指令流差异; - 两种路径在硬件异常分类(如 `{ID}*` 类型)、 {ID} 级同步语义以及宿主端错误捕获机制上的具体差异。",
+        "simhash": 7791685892897918760,
+        "exact_hash": "5b0ea31daea9c3929d7e92c00bd867663e5602aa356a6f933437a95fdfbdc873",
+        "source": "writer",
+        "nearest_id": "q_2a27e916426a4bc294c796e25b1f5da8",
+        "nearest_cosine": 0.41354900598526,
+        "template_jaccard": 0.11842105263157894,
+        "hamming": 34,
+        "dup_verdict": "unique",
+        "review_status": "accepted",
+        "reject_reason": null,
+        "warnings": [],
+        "kind": "mechanism"
+      }
+    },
+    {
+      "case_id": "run50_line_42",
+      "expected_action": "reject",
+      "source": {
+        "path": "data/run50/accepted.jsonl",
+        "line": 42
+      },
+      "annotation": "The shown atomicExch signature and atomicLoad API are not valid CUDA legacy atomics, and a fence alone does not establish the stated cross-device acquire/release protocol.",
+      "question": {
+        "id": "q_5240ae49bc0a44cba22af8b9065b471d",
+        "question": "在一个包含两张 Hopper GPU (GPU-0 与 GPU-1) 的 NVLink 域中，两进程分别绑定一张 GPU 并通过 `cudaIpcOpenMemHandle` 映射同一段物理显存。\n\nGPU-0 进程启动内核 `kernel_A`，内核执行：\n```cpp\n__global__ void kernel_A(int* flag, int* data) {\n  *data = 42;\n  __threadfence();\n  atomicExch(flag, 1, __ATOMIC_RELEASE);\n}\n```\nGPU-1 进程轮询 `while (atomicLoad(flag, __ATOMIC_ACQUIRE) != 1) ;` 并随后读取 `*data`。\n\n实测 GPU-1 读到的 `data` 值为 0（初始值）而非 42。请从 **内存一致性模型的可见性层级** 解释：\n1. 为何 `__threadfence()` + `thread_scope_device` 的 release 原子操作不足以让 GPU-0 的 `data` 写入对 GPU-1 可见？\n2. 必须在何处（指令层面）插入何种 scope 的屏障/原子操作，才能保证跨 GPU 可见性？\n\n答案需点出：\n- `__threadfence()` 仅把 store 推到 **L2 / 设备级** 可见性，不触发系统级一致性动作；\n- `thread_scope_device` 原子操作的 release 语义仅约束 **本 GPU 内部** 的 load/store 重排，不产生跨 GPU 的排序边；\n- 必须改用 `__threadfence_system()` 或 `thread_scope_system` 的 release/acquire 原子操作，使写入穿越 PCIe/NVLink 到达 **系统级内存序点**，被另一 GPU 的 acquire 观测到。",
+        "tests_claim": "The question tests that cross-GPU visibility requires thread_scope_system release/acquire or __threadfence_system, while thread_scope_device only orders within a single GPU.",
+        "topic_path": [
+          "T16",
+          "peer_p2p_vis",
+          "peer_p2p_vis_sys_scope"
+        ],
+        "l3_id": "peer_p2p_vis_sys_scope",
+        "l3_claim": "跨 GPU 同步必须 thread_scope_system 的 release/acquire 或 __threadfence_system；thread_scope_device 只覆盖本 GPU。",
+        "question_type": "conceptual",
+        "difficulty": 3,
+        "bloom": "create",
+        "persona": "cutlass_layout_author",
+        "hardware": "agnostic",
+        "granularity": "pipeline",
+        "language": "zh",
+        "template_fingerprint": "[why][XL] 在一个包含两张 {ARCH} {ID} ({ID}-{N} 与 {ID}-{N}) 的 {ID} 域中,两进程分别绑定一张 {ID} 并通过 `{ID}` 映射同一段物理显存。 {ID}-{N} 进程启动内核 `{ID}`,内核执行: {CODE} {ID}-{N} 进程轮询 `{ID} ({ID}({ID}, {ID})!= {N});` 并随后读取 `*{ID}`。 实测 {ID}-{N} 读到的 `{ID}` 值为 {N}(初始值)而非 {N}。请从 **内存一致性模型的可见性层级** 解释: {N}. 为何 `{ID}()` + `{ID}` 的 {ID} 原子操作不足以让 {ID}-{N} 的 `{ID}` 写入对 {ID}-{N} 可见? {N}. 必须在何处(指令层面)插入何种 {ID} 的屏障/原子操作,才能保证跨 {ID} 可见性? 答案需点出: - `{ID}()` 仅把 {ID} 推到 **l2 / 设备级** 可见性,不触发系统级一致性动作; - `{ID}` 原子操作的 {ID} 语义仅约束 **本 {ID} 内部** 的 {ID}/{ID} 重排,不产生跨 {ID} 的排序边; - 必须改用 `{ID}()` 或 `{ID}` 的 {ID}/{ID} 原子操作,使写入穿越 {ID}/{ID} 到达 **系统级内存序点**,被另一 {ID} 的 {ID} 观测到。",
+        "simhash": 3111417255361414860,
+        "exact_hash": "8049a969e77975a00cf707ce18b09936dc0d79287aa8bd045a39bcc7a5188a50",
+        "source": "writer",
+        "nearest_id": "q_0820c4e30b1f4455860bc118d2a26daf",
+        "nearest_cosine": 0.4997137784957886,
+        "template_jaccard": 0.09473684210526316,
+        "hamming": 25,
+        "dup_verdict": "unique",
+        "review_status": "accepted",
+        "reject_reason": null,
+        "warnings": [],
+        "kind": "mechanism"
+      }
+    },
+    {
+      "case_id": "run50_line_50",
+      "expected_action": "reject",
+      "source": {
+        "path": "data/run50/accepted.jsonl",
+        "line": 50
+      },
+      "annotation": "A full-K tile and partial-K contributions for the same output overlap. The question additionally demands unsupported universal claims about fixup atomic accumulation.",
+      "question": {
+        "id": "q_0dad73b47de44cb78885f2312f009cf0",
+        "question": "在 Blackwell (sm_100) 上运行 Stream-K GEMM 时，当输出 tile 数 (M_tiles * N_tiles) 远小于 SM 数 * 最大 blocks/SM 时，调度器会把 K 维切分成的 partial tile 分发给超过输出 tile 数的 CTA。这导致两类 CTA 并存：\n\n1. **Full-tile CTA** —— 各自完整计算一个 (m, n) 输出 tile，写入全局内存 C。\n2. **Partial-tile CTA** —— 每个仅累加 K 维的一段，产出部分和，随后需经 fixup reduction 合并到同一 (m, n) 位置。\n\n假设同一 (m, n) 由 1 个 full-tile CTA 与 P 个 partial-tile CTA 共同完成，且内核使用 **单个 kernel launch**（无设备端同步原语）。请从 **硬件执行模型** 解释：为何 partial-tile CTA 的部分和**必须**先写入全局内存，再由 fixup reduction 读回并原子累加，而不能直接通过共享内存或寄存器在 CTA 间交换后再由某一 CTA 落笔？\n\n答案需点出：\n- CTA 间**无硬件同步/可见性机制**（cluster 除外，但 Stream-K 不构建 cluster）；\n- 同一 SM 上的并发 CTA 仍属**独立指令流**，寄存器/共享内存**私有不共享**；\n- 全局内存是**唯一跨 CTA 可见且可原子操作**的存储层级；\n- 任何企图绕过全局内存的方案在当前 ISA 下**不可证伪地失效**。",
+        "tests_claim": "Stream-K partial-tile CTA 必须经全局内存 fixup reduction，因为 CTA 间缺乏硬件同步与共享可见性，仅全局内存提供跨 CTA 原子累加语义。",
+        "topic_path": [
+          "T21",
+          "stream_k",
+          "stream_k_split"
+        ],
+        "l3_id": "stream_k_split",
+        "l3_claim": "Stream-K 把 K 维 tile 分给超过输出 tile 数的 CTA：部分 CTA 做完整 (m,n) 输出，其余做部分 K 再经 fixup reduction 写入 C。",
+        "question_type": "conceptual",
+        "difficulty": 1,
+        "bloom": "analyze",
+        "persona": "ncu_perf_engineer",
+        "hardware": "blackwell",
+        "granularity": "kernel",
+        "language": "zh",
+        "template_fingerprint": "[why][XL] 在 {ARCH} ({ARCH}) 上运行 {ID}-k {ID} 时,当输出 {ID} 数 ({ID} * {ID}) 远小于 sm 数 * 最大 {ID}/sm 时,调度器会把 k 维切分成的 {ID} 分发给超过输出 {ID} 数的 {ID}。这导致两类 {ID} 并存: {N}. **{ID}-{ID} ** —— 各自完整计算一个 (m, n) 输出 {ID},写入全局内存 c。 {N}. **{ID}-{ID} ** —— 每个仅累加 k 维的一段,产出部分和,随后需经 {ID} 合并到同一 (m, n) 位置。 假设同一 (m, n) 由 {N} 个 {ID}-{ID} 与 p 个 {ID}-{ID} 共同完成,且内核使用 **单个 {ID} **(无设备端同步原语)。请从 **硬件执行模型** 解释:为何 {ID}-{ID} 的部分和**必须**先写入全局内存,再由 {ID} 读回并原子累加,而不能直接通过共享内存或寄存器在 {ID} 间交换后再由某一 {ID} 落笔? 答案需点出: - {ID} 间**无硬件同步/可见性机制**({ID} 除外,但 {ID}-k 不构建 {ID}); - 同一 sm 上的并发 {ID} 仍属**独立指令流**,寄存器/共享内存**私有不共享**; - 全局内存是**唯一跨 {ID} 可见且可原子操作**的存储层级; - 任何企图绕过全局内存的方案在当前 {ID} 下**不可证伪地失效**。",
+        "simhash": 3421206530280058559,
+        "exact_hash": "5e6423855f9eb42cb02566b022fc9f7cf49b899babe76262a128e68f64555341",
+        "source": "writer",
+        "nearest_id": "q_3415013898f5429896064c469d559175",
+        "nearest_cosine": 0.4931524693965912,
+        "template_jaccard": 0.10743801652892562,
+        "hamming": 28,
+        "dup_verdict": "unique",
+        "review_status": "accepted",
+        "reject_reason": null,
+        "warnings": [],
+        "kind": "mechanism"
+      }
+    },
+    {
+      "case_id": "control_managed_transfer",
+      "annotation": "A fully specified serial latency model distinguishes payload transfer from fixed fault handling.",
+      "question": {
+        "tests_claim": "Under a specified managed-page migration model, bandwidth transfer time and fixed fault-handling latency are distinct additive costs.",
+        "topic_path": [
+          "T02",
+          "uvm",
+          "uvm_first_touch"
+        ],
+        "l3_id": "uvm_first_touch",
+        "l3_claim": "An unprefetched managed page can incur migration and fault-handling costs on first GPU touch.",
+        "question_type": "conceptual",
+        "difficulty": 2,
+        "bloom": "apply",
+        "persona": "cuda_interviewer",
+        "hardware": "agnostic",
+        "granularity": "api",
+        "language": "en",
+        "source": "writer",
+        "review_status": "pending",
+        "kind": "formula",
+        "id": "q_control_managed_transfer",
+        "question": "Use this simplified first-touch model for a managed-memory page: one 4096-byte page moves from host to device at a sustained one-way rate of 32,000,000,000 bytes/s. Fault handling adds a fixed 5 microseconds, serialized with the transfer; ignore all other costs. Calculate the payload-transfer time and the total first-touch time in microseconds, then identify which term dominates."
+      },
+      "expected_action": "accept",
+      "source": {
+        "kind": "authored_control"
+      }
+    },
+    {
+      "case_id": "control_ndebug_printf",
+      "annotation": "The question asks to inspect actual preprocessing behavior rather than asserting that printf disappears.",
+      "question": {
+        "tests_claim": "Defining NDEBUG disables the assert macro but does not remove a separate preceding printf expression.",
+        "topic_path": [
+          "T28",
+          "trap_instr",
+          "trap_instr_assert_path"
+        ],
+        "l3_id": "trap_instr_assert_path",
+        "l3_claim": "The assert macro is disabled by NDEBUG; separate device statements are unaffected by that macro.",
+        "question_type": "debug",
+        "difficulty": 2,
+        "bloom": "apply",
+        "persona": "cuda_interviewer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "en",
+        "source": "writer",
+        "review_status": "pending",
+        "kind": "mechanism",
+        "id": "q_control_ndebug_printf",
+        "question": "Assume a CUDA device compilation unit includes <assert.h> after NDEBUG has been defined, and contains this function:\n```cpp\n__device__ void check(bool cond) {\n    if (!cond) {\n        printf(\"failed\\n\");\n        assert(cond);\n    }\n}\n```\nFor cond == false, which statements remain after preprocessing? Does defining NDEBUG by itself remove the printf call? Base your answer on the assert macro and the shown source, without assuming anything about when device printf output becomes visible on the host."
+      },
+      "expected_action": "accept",
+      "source": {
+        "kind": "authored_control"
+      }
+    },
+    {
+      "case_id": "control_linear_index",
+      "annotation": "The indexing expression and launch coordinates give one unambiguous integer result.",
+      "question": {
+        "tests_claim": "A linear index in a one-dimensional CUDA launch combines the block offset with the thread index.",
+        "topic_path": [
+          "T01",
+          "indexing",
+          "linear_index"
+        ],
+        "l3_id": "linear_index",
+        "l3_claim": "For a one-dimensional launch, the linear thread index is blockIdx.x * blockDim.x + threadIdx.x.",
+        "question_type": "syntax",
+        "difficulty": 1,
+        "bloom": "apply",
+        "persona": "cuda_interviewer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "en",
+        "source": "writer",
+        "review_status": "pending",
+        "kind": "formula",
+        "id": "q_control_linear_index",
+        "question": "A CUDA kernel uses a one-dimensional grid and one-dimensional blocks. For a particular thread, blockIdx.x is 3, blockDim.x is 128, and threadIdx.x is 7. The kernel computes `unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;` and accesses `out[i]`, where out has 1024 elements. Compute i and determine whether this specific access is within bounds. Assume the allocation and pointer are valid."
+      },
+      "expected_action": "accept",
+      "source": {
+        "kind": "authored_control"
+      }
+    },
+    {
+      "case_id": "control_split_k_ordering",
+      "annotation": "Explicit disjoint K partitions and successive launches on one stream avoid overlapping contributions and unsupported cross-CTA assumptions.",
+      "question": {
+        "tests_claim": "Successive kernels in the same CUDA stream are ordered, so a following reduction can consume completed partial sums from disjoint split-K partitions.",
+        "topic_path": [
+          "T14",
+          "stream_event",
+          "stream_kernel_order"
+        ],
+        "l3_id": "stream_kernel_order",
+        "l3_claim": "Kernel operations submitted to the same CUDA stream execute in order.",
+        "question_type": "conceptual",
+        "difficulty": 2,
+        "bloom": "apply",
+        "persona": "cuda_interviewer",
+        "hardware": "agnostic",
+        "granularity": "pipeline",
+        "language": "en",
+        "source": "writer",
+        "review_status": "pending",
+        "kind": "mechanism",
+        "id": "q_control_split_k_ordering",
+        "question": "A split-K implementation computes one scalar dot product over K=1024 terms. Four CTAs each write one partial sum into distinct global-memory locations, covering the disjoint K intervals [0,256), [256,512), [512,768), and [768,1024). A second kernel sums the four partials. The host launches both kernels consecutively into the same CUDA stream, all launches succeed, and no other work touches these buffers. Is an additional host cudaDeviceSynchronize call between the launches required for the second kernel to read completed partials? Explain using stream ordering and the stated partitioning."
+      },
+      "expected_action": "accept",
+      "source": {
+        "kind": "authored_control"
+      }
+    }
+  ]
+}

@@ -1,3 +1,5 @@
+"""In-process prompt prefix cache and embedding vector cache (optional npz)."""
+
 from __future__ import annotations
 
 import logging
@@ -16,6 +18,7 @@ class PromptCache:
     """Stable system-prefix assembly. Hits are local; API TTFT needs byte-identical prefix."""
 
     def __init__(self) -> None:
+        """Create empty static/semi-static maps and hit counters."""
         self._static: dict[str, str] = {}
         self._semi: dict[tuple[str, ...], str] = {}
         self._lock = threading.Lock()
@@ -25,6 +28,7 @@ class PromptCache:
         self.semi_misses = 0
 
     def get_static(self, role: str, builder: Callable[[], str]) -> str:
+        """Return a role-level system prefix, building it once per process."""
         with self._lock:
             cached = self._static.get(role)
             if cached is not None:
@@ -37,6 +41,7 @@ class PromptCache:
         return text
 
     def get_semi(self, key: tuple[str, ...], builder: Callable[[], str]) -> str:
+        """Return a semi-static prefix keyed by taxonomy/persona tuple."""
         with self._lock:
             cached = self._semi.get(key)
             if cached is not None:
@@ -50,9 +55,11 @@ class PromptCache:
 
     @staticmethod
     def compose(*parts: str) -> str:
+        """Join nonempty prompt parts with blank lines (byte-stable for cache)."""
         return "\n\n".join(p.strip() for p in parts if p and p.strip())
 
     def stats(self) -> dict[str, int]:
+        """Hit/miss counters for static and semi-static prefixes."""
         with self._lock:
             return {
                 "static_hits": self.static_hits,
@@ -66,6 +73,7 @@ class EmbeddingCache:
     """In-process + optional npz cache keyed by embedding_model + exact_hash."""
 
     def __init__(self, model: str, path: Path | None = None) -> None:
+        """Load an optional npz cache scoped to ``model``."""
         self.model = model
         self.path = path
         self._mem: dict[str, np.ndarray] = {}
@@ -77,12 +85,15 @@ class EmbeddingCache:
             self._load(path)
 
     def _key(self, digest: str) -> str:
+        """Namespace a text digest by embedding model so caches do not mix."""
         return f"{self.model}:{digest}"
 
     def hash_text(self, text: str) -> str:
+        """SHA-256 of NFKC-normalized text; same key as exact-hash dedup."""
         return exact_hash(text)
 
     def get(self, digest: str) -> np.ndarray | None:
+        """Return a copy of a cached vector, or None on miss."""
         key = self._key(digest)
         with self._lock:
             vec = self._mem.get(key)
@@ -93,9 +104,11 @@ class EmbeddingCache:
             return vec.copy()
 
     def get_text(self, text: str) -> np.ndarray | None:
+        """Look up by raw text rather than a precomputed digest."""
         return self.get(self.hash_text(text))
 
     def put(self, digest: str, vec: np.ndarray) -> None:
+        """Store a float32 row vector; marks the cache dirty if the key is new."""
         key = self._key(digest)
         arr = np.asarray(vec, dtype=np.float32).reshape(-1)
         with self._lock:
@@ -104,9 +117,11 @@ class EmbeddingCache:
             self._mem[key] = arr
 
     def put_text(self, text: str, vec: np.ndarray) -> None:
+        """Store a vector under the exact-hash of ``text``."""
         self.put(self.hash_text(text), vec)
 
     def put_many(self, digests: Sequence[str], mat: np.ndarray) -> None:
+        """Bulk-insert rows aligned with ``digests``."""
         rows = np.asarray(mat, dtype=np.float32)
         if rows.ndim == 1:
             rows = rows.reshape(1, -1)
@@ -114,6 +129,7 @@ class EmbeddingCache:
             self.put(digest, row)
 
     def lookup_texts(self, texts: Sequence[str]) -> tuple[list[np.ndarray | None], list[int]]:
+        """Return per-text hits and the indexes that still need an API call."""
         out: list[np.ndarray | None] = []
         misses: list[int] = []
         for i, text in enumerate(texts):
@@ -124,9 +140,11 @@ class EmbeddingCache:
         return out, misses
 
     def warm(self, digest: str, vec: np.ndarray) -> None:
+        """Seed the cache from an already-indexed accepted question."""
         self.put(digest, vec)
 
     def stats(self) -> dict[str, int]:
+        """Size and hit/miss counters."""
         with self._lock:
             return {
                 "size": len(self._mem),
@@ -135,6 +153,7 @@ class EmbeddingCache:
             }
 
     def save(self, path: Path | None = None) -> None:
+        """Persist the in-memory map to compressed npz (no-op if empty/unpathed)."""
         dest = path or self.path
         if dest is None:
             return
@@ -150,6 +169,7 @@ class EmbeddingCache:
         logger.debug("embedding cache saved %s entries dirty=%s -> %s", len(keys), dirty, dest)
 
     def _load(self, path: Path) -> None:
+        """Load npz entries that belong to this embedding model; skip corrupt files."""
         try:
             data = np.load(path, allow_pickle=True)
         except Exception as exc:  # noqa: BLE001

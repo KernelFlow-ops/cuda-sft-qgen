@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>/*__KG_TITLE__*/</title>
+  <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+  <style>
+    html, body { margin: 0; height: 100%; font-family: sans-serif; }
+    #bar { padding: 8px 12px; background: #111; color: #eee; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    #bar input, #bar select { font-size: 14px; }
+    #cy { height: calc(100% - 96px); }
+    #detail { height: 48px; overflow: auto; padding: 6px 12px; background: #f6f6f6; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div id="bar">
+    <strong>/*__KG_TITLE__*/</strong>
+    <label>kind <select id="kind"><option value="">all</option></select></label>
+    <label>status <select id="status"><option value="">all</option></select></label>
+    <label>hide related <input type="checkbox" id="hideRelated" checked /></label>
+    <input id="q" placeholder="filter id / claim" size="32" />
+  </div>
+  <div id="cy"></div>
+  <div id="detail">click a node</div>
+  <script>
+    const DATA = /*__KG_DATA__*/;
+    const claims = DATA.claims || [];
+    const entities = DATA.entities || [];
+    const relations = DATA.relations || DATA.edges || [];
+    const colors = {mechanism:"#2563eb", api:"#7c3aed", formula:"#dc2626", feature:"#059669",
+                    failure:"#ea580c", numeric:"#ca8a04", arch:"#0891b2", metric:"#4f46e5",
+                    category:"#64748b", domain:"#334155"};
+    function elements() {
+      const nodes = [];
+      for (const c of claims) {
+        nodes.push({ data: { id: c.id, label: c.id, kind: c.kind || "claim", status: c.status || "",
+          claim: c.claim || "", type: "claim" }});
+      }
+      for (const e of entities) {
+        nodes.push({ data: { id: e.id, label: e.id, kind: e.kind || "entity", status: "",
+          claim: e.label || "", type: "entity" }});
+      }
+      const edges = [];
+      for (const r of relations) {
+        edges.push({ data: { id: "e"+r.id, source: r.source_id, target: r.target_id,
+          kind: r.kind, status: r.status || "" }});
+      }
+      return { nodes, edges };
+    }
+    const kinds = new Set();
+    for (const n of [...claims, ...entities]) kinds.add(n.kind || "");
+    const kindSel = document.getElementById("kind");
+    for (const k of [...kinds].sort()) {
+      if (!k) continue;
+      const o = document.createElement("option"); o.value = k; o.textContent = k; kindSel.appendChild(o);
+    }
+    const cy = cytoscape({
+      container: document.getElementById("cy"),
+      elements: elements(),
+      layout: { name: "cose", animate: false },
+      style: [
+        { selector: "node", style: { label: "data(label)", "font-size": 8, "text-wrap": "ellipsis",
+          "text-max-width": 80, "background-color": "#64748b", color: "#111", "text-valign": "bottom" } },
+        { selector: "node[type = 'entity']", style: { shape: "round-rectangle" } },
+        { selector: "edge", style: { label: "data(kind)", "font-size": 7, "curve-style": "bezier",
+          "target-arrow-shape": "triangle", width: 1.2 } },
+        { selector: "edge[kind = 'related']", style: { "line-style": "dashed", opacity: 0.4 } },
+      ]
+    });
+    for (const [k, color] of Object.entries(colors)) {
+      cy.style().selector(`node[kind = '${k}']`).style("background-color", color).update();
+    }
+    function applyFilter() {
+      const kind = kindSel.value;
+      const hideRel = document.getElementById("hideRelated").checked;
+      const q = document.getElementById("q").value.toLowerCase();
+      cy.batch(() => {
+        cy.nodes().forEach(n => {
+          const d = n.data();
+          let show = true;
+          if (kind && d.kind !== kind) show = false;
+          if (q && !(d.id + " " + (d.claim||"")).toLowerCase().includes(q)) show = false;
+          n.style("display", show ? "element" : "none");
+        });
+        cy.edges().forEach(e => {
+          let show = e.source().visible() && e.target().visible();
+          if (hideRel && e.data("kind") === "related") show = false;
+          e.style("display", show ? "element" : "none");
+        });
+      });
+    }
+    kindSel.onchange = applyFilter;
+    document.getElementById("hideRelated").onchange = applyFilter;
+    document.getElementById("q").oninput = applyFilter;
+    applyFilter();
+    cy.on("tap", "node", ev => {
+      const d = ev.target.data();
+      document.getElementById("detail").textContent = JSON.stringify(d, null, 2);
+    });
+  </script>
+</body>
+</html>

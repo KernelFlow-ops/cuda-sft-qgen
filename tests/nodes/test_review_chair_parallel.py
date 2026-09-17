@@ -1,0 +1,302 @@
+"""Tests for parallel review chair processing (Agent D)."""
+from __future__ import annotations
+
+import time
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from cuda_sft_qgen.graph.nodes.review import (
+    _enhanced_steering,
+    _parallel_chair_decision,
+    _parallel_chair_decisions,
+)
+from cuda_sft_qgen.models import DiversityReport, Question, SteeringBrief
+
+
+@pytest.fixture
+def mock_question():
+    """Mock Question object."""
+    return Question(
+        id="test-q-001",
+        l3_id="CUDA.Memory.L2",
+        l3_claim="L2 cache behavior",
+        question="How does L2 cache work in CUDA?",
+        tests_claim="Test L2 cache behavior",
+        hardware="hopper",
+        topic_path=["CUDA", "Memory", "L2"],
+        question_type="conceptual",
+        kind="mechanism",
+        difficulty=2,
+        bloom="apply",
+        persona="cuda_expert",
+        language="en",
+        granularity="api",
+    )
+
+
+@pytest.fixture
+def mock_runtime():
+    """Mock runtime with LLM."""
+    rt = MagicMock()
+    rt.knowledge = None
+    rt.review_llm = None
+    rt.settings.review = {}
+    rt.settings.nvidia_model = "test-reviewer"
+    rt.llm.complete_json.return_value = {
+        "id": "test-q-001",
+        "action": "accept",
+        "reason": "Verified question",
+        "checks": {k: "pass" for k in ("correctness", "answerability", "claim_alignment",
+                    "hardware_compatibility", "answer_leakage", "metadata", "duplication")},
+        "evidence": ["The claim and stem agree."],
+        "internal_reference_answer": "Expected answer",
+        "assessed_metadata": {"question_type": "conceptual", "difficulty": 2,
+                              "bloom": "apply", "hardware": "hopper",
+                              "granularity": "api", "language": "en"},
+    }
+    rt.store.recent_rejected_skeletons.return_value = ["template1", "template2"]
+    rt.settings.quotas = {
+        "question_types": {"conceptual": 0.3, "debug": 0.2},
+        "difficulty": {"1": 0.2, "2": 0.4, "3": 0.3, "4": 0.1},
+        "l1_share": {"min": 0.02, "max": 0.15},
+    }
+    return rt
+
+
+class TestParallelChairDecision:
+    """Test single chair decision processing."""
+
+    def test_accept_decision(self, mock_question, mock_runtime):
+        """Test that accept decision is returned correctly."""
+        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime):
+            with patch("cuda_sft_qgen.graph.nodes.review.load_prompt", return_value="Test prompt"):
+                item = {
+                    "question": mock_question.model_dump(),
+                    "decision": {"verdict": "gray", "nearest_cosine": 0.92},
+                    "is_suspect": False,
+                }
+
+                result = _parallel_chair_decision(item, "Test prompt")
+
+                assert result["id"] == "test-q-001"
+                assert result["action"] == "accept"
+                assert "reason" in result
+
+    def test_reject_decision(self, mock_question, mock_runtime):
+        """Test that reject decision is returned correctly."""
+        mock_runtime.llm.complete_json.return_value.update(action="reject", reason="duplicate question")
+        mock_runtime.llm.complete_json.return_value["checks"]["duplication"] = "fail"
+
+        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime):
+            with patch("cuda_sft_qgen.graph.nodes.review.load_prompt", return_value="Test prompt"):
+                item = {
+                    "question": mock_question.model_dump(),
+                    "decision": {"verdict": "gray"},
+                    "is_suspect": False,
+                }
+
+                result = _parallel_chair_decision(item, "Test prompt")
+
+                assert result["id"] == "test-q-001"
+                assert result["action"] == "reject"
+                assert result["reason"] == "duplicate question"
+
+    def test_llm_failure_fallback(self, mock_question, mock_runtime):
+        """Test that LLM failure remains pending."""
+        mock_runtime.llm.complete_json.side_effect = Exception("LLM error")
+
+        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime):
+            with patch("cuda_sft_qgen.graph.nodes.review.load_prompt", return_value="Test prompt"):
+                item = {
+                    "question": mock_question.model_dump(),
+                    "decision": {"verdict": "gray"},
+                    "is_suspect": False,
+                }
+
+                result = _parallel_chair_decision(item, "Test prompt")
+
+                assert result["id"] == "test-q-001"
+                assert result["action"] == "pending"
+
+
+class TestParallelChairDecisions:
+    """Test parallel processing of multiple chair decisions."""
+
+    def test_empty_items(self):
+        """Test that empty items return empty dict."""
+        result = _parallel_chair_decisions([])
+        assert result == {}
+
+    def test_parallel_processing(self, mock_question, mock_runtime):
+        """Test that multiple items are processed in parallel."""
+        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime):
+            with patch("cuda_sft_qgen.graph.nodes.review.load_prompt", return_value="Test prompt"):
+                items = []
+                for i in range(5):
+                    q = mock_question.model_copy()
+                    q.id = f"test-q-{i:03d}"
+                    items.append({
+                        "question": q.model_dump(),
+                        "decision": {"verdict": "gray"},
+                        "is_suspect": False,
+                    })
+
+                start = time.time()
+                results = _parallel_chair_decisions(items, max_workers=4)
+                elapsed = time.time() - start
+
+                assert len(results) == 5
+                assert all(qid in results for qid in [f"test-q-{i:03d}" for i in range(5)])
+                # Parallel should be faster than 5 * single_call_time (rough check)
+                assert elapsed < 5.0  # Generous upper bound
+
+    def test_deterministic_results(self, mock_question, mock_runtime):
+        """Test that same input produces same output (determinism)."""
+        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime):
+            with patch("cuda_sft_qgen.graph.nodes.review.load_prompt", return_value="Test prompt"):
+                items = []
+                for i in range(3):
+                    q = mock_question.model_copy()
+                    q.id = f"test-q-{i:03d}"
+                    items.append({
+                        "question": q.model_dump(),
+                        "decision": {"verdict": "gray"},
+                        "is_suspect": False,
+                    })
+
+                results1 = _parallel_chair_decisions(items, max_workers=2)
+                results2 = _parallel_chair_decisions(items, max_workers=2)
+
+                # Results should have same keys
+                assert set(results1.keys()) == set(results2.keys())
+                # Results should have same actions (assuming mock returns consistent values)
+                for qid in results1:
+                    assert results1[qid]["action"] == results2[qid]["action"]
+
+
+class TestEnhancedSteering:
+    """Test enhanced steering generation with high-imbalance handling."""
+
+    def test_base_steering(self, mock_runtime):
+        """Test base steering without enhancements."""
+        report = DiversityReport(
+            accepted_count=100,
+            pending_count=20,
+            l1_hist={"CUDA": 50, "Memory": 30, "Kernel": 20},
+            type_hist={"conceptual": 60, "debug": 40},
+            difficulty_hist={"1": 20, "2": 40, "3": 30, "4": 10},
+            hardware_hist={"hopper": 80, "ampere": 20},
+            granularity_hist={"api": 60, "kernel": 40},
+            kind_hist={"mechanism": 100},
+            leaf_coverage=0.85,
+            kl_l1=0.10,  # Low KL
+            kl_type=0.05,
+            kl_difficulty=0.05,
+            entropy_ratio_l1=0.90,  # High entropy
+            mean_nn_cosine=0.75,
+            underrepresented=["CUDA"],
+            overrepresented=["Memory"],
+            notes=[],
+        )
+
+        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime):
+            steering = _enhanced_steering(report, mock_runtime.settings.quotas, ["t1", "t2"], anti_cap=15)
+
+            assert isinstance(steering, SteeringBrief)
+            assert "CUDA" in steering.underrepresented
+            assert "Memory" in steering.overrepresented
+            assert len(steering.forbidden_templates) >= 2
+
+    def test_high_kl_enhancement(self, mock_runtime):
+        """Test that high KL divergence forces scarcest L1s."""
+        report = DiversityReport(
+            accepted_count=100,
+            pending_count=20,
+            l1_hist={"CUDA": 70, "Memory": 20, "Kernel": 5, "Profiling": 3, "Debug": 2},
+            type_hist={"conceptual": 60, "debug": 40},
+            difficulty_hist={"1": 20, "2": 40, "3": 30, "4": 10},
+            hardware_hist={"hopper": 80, "ampere": 20},
+            granularity_hist={"api": 60, "kernel": 40},
+            kind_hist={"mechanism": 100},
+            leaf_coverage=0.85,
+            kl_l1=0.25,  # High KL (> 0.20)
+            kl_type=0.05,
+            kl_difficulty=0.05,
+            entropy_ratio_l1=0.90,
+            mean_nn_cosine=0.75,
+            underrepresented=[],
+            overrepresented=["CUDA"],
+            notes=[],
+        )
+
+        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime):
+            steering = _enhanced_steering(report, mock_runtime.settings.quotas, [], anti_cap=15)
+
+            # Should contain top-3 scarcest: Debug (2), Profiling (3), Kernel (5)
+            assert "Debug" in steering.underrepresented or "Profiling" in steering.underrepresented
+            assert "High KL divergence" in steering.style_notes
+
+    def test_low_entropy_enhancement(self, mock_runtime):
+        """Test that low entropy expands forbidden templates."""
+        report = DiversityReport(
+            accepted_count=100,
+            pending_count=20,
+            l1_hist={"CUDA": 90, "Memory": 10},  # Very imbalanced
+            type_hist={"conceptual": 60, "debug": 40},
+            difficulty_hist={"1": 20, "2": 40, "3": 30, "4": 10},
+            hardware_hist={"hopper": 80, "ampere": 20},
+            granularity_hist={"api": 60, "kernel": 40},
+            kind_hist={"mechanism": 100},
+            leaf_coverage=0.85,
+            kl_l1=0.10,
+            kl_type=0.05,
+            kl_difficulty=0.05,
+            entropy_ratio_l1=0.70,  # Low entropy (< 0.80)
+            mean_nn_cosine=0.75,
+            underrepresented=[],
+            overrepresented=["CUDA"],
+            notes=[],
+        )
+
+        mock_runtime.store.recent_rejected_skeletons.return_value = [f"skel-{i}" for i in range(30)]
+
+        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime):
+            steering = _enhanced_steering(report, mock_runtime.settings.quotas, [], anti_cap=15)
+
+            # Should expand forbidden templates
+            assert len(steering.forbidden_templates) > 15  # More than base anti_cap
+            assert "Low entropy" in steering.style_notes
+
+    def test_combined_enhancements(self, mock_runtime):
+        """Test that both enhancements work together."""
+        report = DiversityReport(
+            accepted_count=100,
+            pending_count=20,
+            l1_hist={"CUDA": 90, "Memory": 8, "Kernel": 2},
+            type_hist={"conceptual": 60, "debug": 40},
+            difficulty_hist={"1": 20, "2": 40, "3": 30, "4": 10},
+            hardware_hist={"hopper": 80, "ampere": 20},
+            granularity_hist={"api": 60, "kernel": 40},
+            kind_hist={"mechanism": 100},
+            leaf_coverage=0.85,
+            kl_l1=0.30,  # High KL
+            kl_type=0.05,
+            kl_difficulty=0.05,
+            entropy_ratio_l1=0.70,  # Low entropy
+            mean_nn_cosine=0.75,
+            underrepresented=[],
+            overrepresented=["CUDA"],
+            notes=[],
+        )
+
+        mock_runtime.store.recent_rejected_skeletons.return_value = [f"skel-{i}" for i in range(30)]
+
+        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime):
+            steering = _enhanced_steering(report, mock_runtime.settings.quotas, [], anti_cap=15)
+
+            # Both enhancements should be present
+            assert "Kernel" in steering.underrepresented  # Scarcest L1
+            assert len(steering.forbidden_templates) > 15  # Expanded templates
+            assert "High KL divergence" in steering.style_notes
+            assert "Low entropy" in steering.style_notes

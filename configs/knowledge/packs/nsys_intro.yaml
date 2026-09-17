@@ -1,0 +1,82 @@
+id: nsys_intro
+title: Nsight Systems 入门与系统瓶颈
+priority: 3
+domains: [T12]
+l2_targets:
+  - {domain: T12, l2: nsys_intro, target_leaves: 16}
+facets: [profiling, failure, mechanism, api]
+official_sources:
+  - https://docs.nvidia.com/nsight-systems/UserGuide/index.html
+seed_claims:
+  - l3_id: nsys_intro_vs_ncu
+    domain_id: T12
+    l2_id: nsys_intro
+    l2_name: Nsight Systems 入门
+    claim: nsys 看 CPU/GPU 间隙、拷贝、流重叠；ncu 看单 kernel 管道。先 nsys 后 ncu。
+    types: [profiling, conceptual]
+    difficulty: [1, 2]
+    kind: mechanism
+  - l3_id: nsys_intro_default_stream
+    domain_id: T12
+    l2_id: nsys_intro
+    l2_name: Nsight Systems 入门
+    claim: 时间线上 GPU idle 紧跟 cudaMalloc/cudaDeviceSynchronize 通常是默认流隐式同步，不是 kernel 太慢。
+    types: [profiling, debug]
+    difficulty: [2]
+    kind: failure
+  - l3_id: nsys_intro_small_kernel
+    domain_id: T12
+    l2_id: nsys_intro
+    l2_name: Nsight Systems 入门
+    claim: 大量 <10µs kernel 的 gap 来自 launch 与 CPU 提交，应合图或融合，而不是先调 Occupancy。
+    types: [profiling, optimization]
+    difficulty: [2, 3]
+    kind: mechanism
+  - l3_id: nsys_intro_memcpy
+    domain_id: T12
+    l2_id: nsys_intro
+    l2_name: Nsight Systems 入门
+    claim: cudaMemcpy 默认同步；时间线出现 GPU idle 贴着 H2D 完成，通常是默认方向同步而非 kernel 启动延迟。
+    types: [profiling, debug]
+    difficulty: [1, 2]
+    kind: api
+  - l3_id: nsys_intro_graph
+    domain_id: T12
+    l2_id: nsys_intro
+    l2_name: Nsight Systems 入门
+    claim: cudaGraphLaunch 一次提交后 GPU 上节点间隙应远小于逐 kernel launch；若仍见 CPU 间隙则图未真正捕获。
+    types: [profiling, compare]
+    difficulty: [2, 3]
+    kind: mechanism
+  - l3_id: nsys_intro_nvtx
+    domain_id: T12
+    l2_id: nsys_intro
+    l2_name: Nsight Systems 入门
+    claim: 融合算子要用 NVTX 分段；没有 NVTX 时无法在 nsys 里对准自定义 epilogue 与 GEMM。
+    types: [profiling, debug]
+    difficulty: [2]
+    kind: api
+  - l3_id: nsys_intro_wait_event
+    domain_id: T12
+    l2_id: nsys_intro
+    l2_name: Nsight Systems 入门
+    claim: 两条 stream 从不重叠且中间有 WaitEvent 是故意串行；当成意外 idle 去优化占用无效。
+    types: [profiling, compare]
+    difficulty: [2]
+    kind: mechanism
+  - l3_id: nsys_intro_uvm
+    domain_id: T12
+    l2_id: nsys_intro
+    l2_name: Nsight Systems 入门
+    claim: UVM 缺页在时间线上显示为主机故障处理；NCU 的 kernel 时间会含迁移，看起来像算子变慢。
+    types: [profiling, debug]
+    difficulty: [3]
+    kind: failure
+relations:
+  - {source: nsys_intro_default_stream, target: nsys_intro_vs_ncu, kind: requires, reason: interpret idle after knowing nsys role}
+  - {source: nsys_intro_graph, target: nsys_intro_small_kernel, kind: derives, reason: graphs remove launch gaps}
+  - {source: nsys_intro_nvtx, target: nsys_intro_vs_ncu, kind: precedes, reason: annotate before comparing kernels}
+gap_prompts:
+  - nsys 与 ncu 的分工
+  - 默认流同步、小 kernel、Graph、NVTX
+  - UVM 缺页不像 memcheck 错误

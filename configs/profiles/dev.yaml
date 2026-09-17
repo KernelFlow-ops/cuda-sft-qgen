@@ -1,0 +1,31 @@
+# Development profile: faster iterations, more verbose logging
+
+generation:
+  temperature: 0.9
+  max_tokens: 8192
+  writer_concurrency: 4
+  llm_per_key_concurrency: 2
+  embed_per_key_concurrency: 2
+  prompt_cache: true
+  embedding_cache: true
+  evolver_fraction: 0.20
+  fewshot_positives: 3
+  fewshot_negatives: 1
+
+review:
+  batch_size: 10
+  semantic_dup_threshold: 0.92
+  semantic_gray_threshold: 0.88
+  llm_every_k_batches: 2
+
+taxonomy:
+  target_leaves_per_l2: 20
+  manager:
+    enabled: true
+    every_k_reviews: 10
+    max_llm_calls_per_tick: 1
+    max_leaves_per_tick: 6
+    allow_refine_in_pipeline: false
+
+paths:
+  data_dir: data/dev

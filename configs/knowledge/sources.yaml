@@ -1,0 +1,14 @@
+# Official NVIDIA hosts only; used as retrieval candidates, never as evidence by URL alone.
+hosts:
+  - docs.nvidia.com
+  - developer.nvidia.com
+  - nvidia.github.io
+urls:
+  - https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html
+  - https://docs.nvidia.com/cuda/parallel-thread-execution/index.html
+  - https://docs.nvidia.com/cuda/cuda-runtime-api/index.html
+  - https://docs.nvidia.com/cuda/cuda-driver-api/index.html
+  - https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html
+  - https://docs.nvidia.com/nsight-systems/UserGuide/index.html
+  - https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html
+  - https://docs.nvidia.com/cutlass/index.html

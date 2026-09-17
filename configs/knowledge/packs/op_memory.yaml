@@ -1,0 +1,82 @@
+id: op_memory
+title: 算子视角的 GPU 内存预算
+priority: 2
+domains: [T02]
+l2_targets:
+  - {domain: T02, l2: op_smem_budget, target_leaves: 16}
+facets: [formula, failure, cross_factor, numeric]
+official_sources:
+  - https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html
+seed_claims:
+  - l3_id: op_smem_budget_fa
+    domain_id: T02
+    l2_id: op_smem_budget
+    l2_name: 算子 smem 预算
+    claim: FA tile smem ≈ (Br+Bc)*d*sizeof；再加 stages 或反向 Q/K/V/dO 会超 cap，应降 Br/Bc 而不是加 occupancy。
+    types: [optimization, layout]
+    difficulty: [3, 4]
+    kind: formula
+  - l3_id: op_smem_budget_gemm
+    domain_id: T02
+    l2_id: op_smem_budget
+    l2_name: 算子 smem 预算
+    claim: GEMM 双缓冲 A+B 字节 = 2*(BM*BK+BN*BK)*sizeof；stages=4 在 164KB 预算下可能挤掉 epilogue smem。
+    types: [optimization, layout]
+    difficulty: [3]
+    kind: numeric
+  - l3_id: op_smem_carveout
+    domain_id: T02
+    l2_id: op_smem_budget
+    l2_name: 算子 smem 预算
+    claim: 增大 opt-in smem carveout 会降低 occupancy；FA/GEMM 先满足 tile 字节，再看驻留 warp 是否还能藏延迟。
+    types: [optimization, profiling]
+    difficulty: [3]
+    kind: mechanism
+  - l3_id: op_smem_cp_async_wait
+    domain_id: T02
+    l2_id: op_smem_budget
+    l2_name: 算子 smem 预算
+    claim: cp.async 完成前读 smem 目标会读脏数据；必须 wait_group/mbarrier，不能用 __syncthreads 代替异步完成。
+    types: [debug, conceptual]
+    difficulty: [3]
+    kind: failure
+  - l3_id: op_smem_tma_16b
+    domain_id: T02
+    l2_id: op_smem_budget
+    l2_name: 算子 smem 预算
+    claim: TMA 进 smem 的 shared 地址也要满足描述符对齐；只保证 gmem 16B 而 smem 偏 8B 仍会错数据。
+    types: [debug, layout]
+    difficulty: [3]
+    kind: failure
+  - l3_id: op_smem_malloc_hot
+    domain_id: T02
+    l2_id: op_smem_budget
+    l2_name: 算子 smem 预算
+    claim: 热路径上的同步 cudaMalloc 在 nsys 上显示为 GPU idle，不是 smem 不足；应提到图外或 mempool。
+    types: [profiling, debug]
+    difficulty: [2]
+    kind: failure
+  - l3_id: op_smem_ldg_stale
+    domain_id: T02
+    l2_id: op_smem_budget
+    l2_name: 算子 smem 预算
+    claim: __ldg/ld.global.nc 读刚被同 kernel 写过的地址可能读到旧值；算子 epilogue 刚写再 __ldg 是错的。
+    types: [debug, conceptual]
+    difficulty: [3]
+    kind: failure
+  - l3_id: op_smem_partial_rmw
+    domain_id: T02
+    l2_id: op_smem_budget
+    l2_name: 算子 smem 预算
+    claim: 部分写 32B sector 可能 RMW；warp 只写 8 个 float 的前 4 个时事务仍可能按整 sector 计。
+    types: [profiling, optimization]
+    difficulty: [3]
+    kind: numeric
+relations:
+  - {source: op_smem_carveout, target: op_smem_budget_fa, kind: requires, reason: carveout vs tile bytes}
+  - {source: op_smem_budget_gemm, target: op_smem_carveout, kind: requires, reason: stages vs occupancy}
+  - {source: op_smem_tma_16b, target: op_smem_cp_async_wait, kind: precedes, reason: copy then wait}
+gap_prompts:
+  - FA/GEMM smem 字节预算与 carveout 权衡
+  - 异步拷贝 wait 与 TMA 对齐
+  - 热路径 cudaMalloc 在 nsys 上是 idle

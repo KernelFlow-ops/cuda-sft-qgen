@@ -1,0 +1,86 @@
+id: ncu_workflow
+title: Nsight Compute 调试工作流
+priority: 2
+domains: [T12]
+l2_targets:
+  - {domain: T12, l2: ncu_workflow, target_leaves: 16}
+facets: [profiling, mechanism, failure, formula]
+official_sources:
+  - https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html
+entities:
+  - {id: metric:l1tex_sectors, kind: metric, label: l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum}
+  - {id: metric:dram_bytes, kind: metric, label: dram__bytes.sum}
+seed_claims:
+  - l3_id: ncu_workflow_order
+    domain_id: T12
+    l2_id: ncu_workflow
+    l2_name: NCU 调试工作流
+    claim: 先用 nsys 定位 kernel，再用 ncu 看 SOL → stall → Source/SASS → 改代码复测；颠倒顺序会把系统 idle 当 SM 瓶颈。
+    types: [profiling, conceptual]
+    difficulty: [2, 3]
+    kind: mechanism
+  - l3_id: ncu_workflow_sol
+    domain_id: T12
+    l2_id: ncu_workflow
+    l2_name: NCU 调试工作流
+    claim: SOL 管道占用 100% 的那条（l1tex/dram/tensor）才是瓶颈；全低且占用高应先看 stall，不是再加 block。
+    types: [profiling, conceptual]
+    difficulty: [2, 3]
+    kind: mechanism
+  - l3_id: ncu_workflow_scoreboard
+    domain_id: T12
+    l2_id: ncu_workflow
+    l2_name: NCU 调试工作流
+    claim: long scoreboard 高说明在等内存；加 occupancy 往往更堵，应先减事务或加重叠拷贝。
+    types: [profiling, optimization]
+    difficulty: [3]
+    kind: failure
+  - l3_id: ncu_workflow_sectors
+    domain_id: T12
+    l2_id: ncu_workflow
+    l2_name: NCU 调试工作流
+    claim: l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum 近似全局 load sector 数；除以理论最小 sector 得到超额倍数。
+    types: [profiling, optimization]
+    difficulty: [3]
+    kind: formula
+  - l3_id: ncu_workflow_replay
+    domain_id: T12
+    l2_id: ncu_workflow
+    l2_name: NCU 调试工作流
+    claim: NCU 默认 kernel replay 多次执行同一 kernel；有全局原子副作用的算子必须改 range/application replay。
+    types: [profiling, debug]
+    difficulty: [3]
+    kind: failure
+  - l3_id: ncu_workflow_lineinfo
+    domain_id: T12
+    l2_id: ncu_workflow
+    l2_name: NCU 调试工作流
+    claim: 没有 -lineinfo 时 Source 页无法把 SASS PC 映回 C++，逐行周期归因会消失。
+    types: [profiling, syntax]
+    difficulty: [1, 2]
+    kind: api
+  - l3_id: ncu_workflow_fa_sig
+    domain_id: T12
+    l2_id: ncu_workflow
+    l2_name: NCU 调试工作流
+    claim: FA 正向常见 l1tex/dram SOL 高 + long scoreboard；先加 occupancy 通常不降 walltime。
+    types: [profiling, optimization]
+    difficulty: [3]
+    kind: mechanism
+  - l3_id: ncu_workflow_gemm_sig
+    domain_id: T12
+    l2_id: ncu_workflow
+    l2_name: NCU 调试工作流
+    claim: 健康 GEMM 应 tensor SOL 高；若大量 FFMA 且 tensor 低，说明走了非 TC 残差路径。
+    types: [profiling, compare]
+    difficulty: [3]
+    kind: mechanism
+relations:
+  - {source: ncu_workflow_sol, target: ncu_workflow_order, kind: requires, reason: nsys then ncu sol}
+  - {source: ncu_workflow_sectors, target: metric:l1tex_sectors, kind: measures, reason: sector counter}
+  - {source: ncu_workflow_fa_sig, target: ncu_workflow_scoreboard, kind: derives, reason: fa is memory stall}
+  - {source: ncu_workflow_gemm_sig, target: ncu_workflow_sol, kind: requires, reason: tensor sol}
+gap_prompts:
+  - nsys 然后 ncu SOL/stall/source 的顺序
+  - 真实计数器名与 replay/lineinfo 陷阱
+  - FA 与 GEMM 的 NCU 签名

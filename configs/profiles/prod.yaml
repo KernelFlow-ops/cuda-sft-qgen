@@ -1,0 +1,35 @@
+# Production profile: strict quality, optimized throughput
+
+generation:
+  temperature: 1.0
+  max_tokens: 16384
+  writer_concurrency: 8
+  llm_per_key_concurrency: 3
+  embed_per_key_concurrency: 3
+  embed_oversub: 3
+  prompt_cache: true
+  embedding_cache: true
+  evolver_fraction: 0.35
+  fewshot_positives: 5
+  fewshot_negatives: 2
+
+review:
+  batch_size: 30
+  semantic_dup_threshold: 0.95
+  semantic_gray_threshold: 0.91
+  template_jaccard_threshold: 0.93
+  simhash_hamming_threshold: 2
+  llm_every_k_batches: 1
+
+taxonomy:
+  target_leaves_per_l2: 40
+  target_leaf_count: 5000
+  manager:
+    enabled: true
+    every_k_reviews: 3
+    max_llm_calls_per_tick: 3
+    max_leaves_per_tick: 15
+    health_expand_threshold: 65
+
+paths:
+  data_dir: data/prod

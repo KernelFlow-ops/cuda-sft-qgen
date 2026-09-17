@@ -1,3 +1,5 @@
+"""Tests for skeletonize, SimHash, Jaccard, and fingerprint stability."""
+
 from __future__ import annotations
 
 from cuda_sft_qgen.review.fingerprint import (

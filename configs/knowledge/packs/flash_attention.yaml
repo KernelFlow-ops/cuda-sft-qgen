@@ -1,0 +1,107 @@
+id: flash_attention
+title: FlashAttention 正向反向与推理
+priority: 1
+domains: [T13, T02, T08, T12]
+l2_targets:
+  - {domain: T13, l2: flash_fwd_fa2, target_leaves: 16}
+  - {domain: T13, l2: flash_fa3_hopper, target_leaves: 16}
+  - {domain: T13, l2: flash_decode, target_leaves: 16}
+facets: [formula, mechanism, failure, feature]
+official_sources:
+  - https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html
+entities:
+  - {id: operator:flash_attn_fwd, kind: operator, label: FlashAttention forward}
+  - {id: feature:tma, kind: feature, label: TMA}
+seed_claims:
+  - l3_id: flash_fwd_fa2_q_resident
+    domain_id: T13
+    l2_id: flash_fwd_fa2
+    l2_name: FlashAttention-2 正向
+    claim: FA2 让 Q tile 常驻 SRAM、K/V 按 Bc 流式；把 Q 也按 Bc 反复从 gmem 搬回会多一轮 Q 流量。
+    types: [optimization, layout]
+    difficulty: [3, 4]
+    kind: mechanism
+  - l3_id: flash_fwd_fa2_rescale
+    domain_id: T13
+    l2_id: flash_fwd_fa2
+    l2_name: FlashAttention-2 正向
+    claim: m_new=max(m_old,m_tile) 后 l_new=exp(m_old-m_new)*l_old+sum(exp(x-m_new))；漏乘 exp 差会破坏归一化。
+    types: [conceptual, code_complete]
+    difficulty: [3]
+    kind: formula
+  - l3_id: flash_fwd_fa2_causal
+    domain_id: T13
+    l2_id: flash_fwd_fa2
+    l2_name: FlashAttention-2 正向
+    claim: causal 下 Bc 超当前行合法列必须 predication；否则读到未来 key。
+    types: [debug, layout]
+    difficulty: [3, 4]
+    kind: failure
+  - l3_id: flash_fa3_tma
+    domain_id: T13
+    l2_id: flash_fa3_hopper
+    l2_name: FlashAttention-3 Hopper
+    claim: FA3/Hopper 用 TMA 搬 K/V 且与 WGMMA overlap；sm_80 没有 TMA，不能把 FA3 路径当 Ampere 实现。
+    types: [feature, compare]
+    difficulty: [3, 4]
+    kind: feature
+  - l3_id: flash_fa3_warp_spec
+    domain_id: T13
+    l2_id: flash_fa3_hopper
+    l2_name: FlashAttention-3 Hopper
+    claim: FA3 常见 producer/consumer warp specialization；producer 只发 TMA，consumer 做 WGMMA/softmax，角色反了会缺数据或空转。
+    types: [optimization, conceptual]
+    difficulty: [4]
+    kind: mechanism
+  - l3_id: flash_decode_splitk
+    domain_id: T13
+    l2_id: flash_decode
+    l2_name: FlashDecoding
+    claim: FlashDecoding 沿 seq 把 KV 切 split-K，再做 online softmax 归约；漏掉 split 间 m/l 归约会得到分块局部 softmax。
+    types: [optimization, conceptual]
+    difficulty: [3, 4]
+    kind: failure
+  - l3_id: flash_decode_paged
+    domain_id: T13
+    l2_id: flash_decode
+    l2_name: FlashDecoding
+    claim: paged KV 必须经 block table 映射物理页；把逻辑 token 下标当连续 gmem 偏移会读错页。
+    types: [layout, debug]
+    difficulty: [3, 4]
+    kind: failure
+  - l3_id: flash_decode_gqa
+    domain_id: T13
+    l2_id: flash_decode
+    l2_name: FlashDecoding
+    claim: GQA 下每个 KV head 对应 q_heads/kv_heads 个 Q head；8Q/1KV 时重复因子=8，用 1 会读错 K 头。
+    types: [layout, debug]
+    difficulty: [3]
+    kind: formula
+  - l3_id: flash_bwd_ml
+    domain_id: T13
+    l2_id: flash_bwd
+    l2_name: FlashAttention 反向
+    claim: 反向重算 softmax 必须用正向保存的 m/l；缺统计只能物化 S。
+    types: [optimization, conceptual]
+    difficulty: [3, 4]
+    kind: mechanism
+  - l3_id: flash_bwd_ds
+    domain_id: T13
+    l2_id: flash_bwd
+    l2_name: FlashAttention 反向
+    claim: dS = P ⊙ (dP - rowsum(dP ⊙ P))；漏减 rowsum 项梯度偏置。
+    types: [conceptual, code_complete]
+    difficulty: [4]
+    kind: formula
+relations:
+  - {source: flash_fwd_fa2_rescale, target: flash_fwd_fa2_q_resident, kind: requires, reason: online softmax while Q resident}
+  - {source: flash_fa3_tma, target: feature:tma, kind: uses_feature, reason: hopper tma}
+  - {source: flash_fa3_tma, target: flash_fwd_fa2_q_resident, kind: supersedes, reason: fa3 adds tma on fa2 tiling}
+  - {source: flash_decode_gqa, target: flash_decode_splitk, kind: requires, reason: gqa mapping inside decode tiles}
+  - {source: flash_bwd_ds, target: flash_bwd_ml, kind: requires, reason: dS uses recomputed P from m/l}
+  - {source: flash_fwd_fa2_q_resident, target: operator:flash_attn_fwd, kind: implements, reason: fa2 forward}
+gap_prompts:
+  - FA2 Q 常驻、K/V 流式
+  - FA3 TMA+WGMMA 且 sm_80 非法
+  - FlashDecoding split-K 与 paged KV
+  - 反向 dS 恒等式与 m/l 重算

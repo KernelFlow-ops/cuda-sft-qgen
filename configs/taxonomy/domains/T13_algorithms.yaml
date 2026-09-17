@@ -985,3 +985,83 @@ children:
     - 3
     - 4
     kind: feature
+- id: flash_decode
+  name: FlashDecoding
+  leaves:
+  - id: flash_decode_splitk
+    claim: FlashDecoding 沿 seq 把 KV 切 split-K，再做 online softmax 归约；漏掉 split 间 m/l 归约会得到分块局部 softmax。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: flash_decode_paged
+    claim: paged KV 必须经 block table 映射物理页；把逻辑 token 下标当连续 gmem 偏移会读错页。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    - 4
+    kind: failure
+  - id: flash_decode_gqa
+    claim: GQA 下每个 KV head 对应 q_heads/kv_heads 个 Q head；8Q/1KV 时重复因子=8，用 1 会读错 K 头。
+    types:
+    - layout
+    - debug
+    difficulty:
+    - 3
+    kind: formula
+
+- id: flash_fa3_hopper
+  name: FlashAttention-3 Hopper
+  leaves:
+  - id: flash_fa3_tma
+    claim: FA3/Hopper 用 TMA 搬 K/V 且与 WGMMA overlap；sm_80 没有 TMA，不能把 FA3 路径当 Ampere 实现。
+    types:
+    - feature
+    - compare
+    difficulty:
+    - 3
+    - 4
+    kind: feature
+  - id: flash_fa3_warp_spec
+    claim: FA3 常见 producer/consumer warp specialization；producer 只发 TMA，consumer 做 WGMMA/softmax，角色反了会缺数据或空转。
+    types:
+    - optimization
+    - conceptual
+    difficulty:
+    - 4
+    kind: mechanism
+
+- id: flash_fwd_fa2
+  name: FlashAttention-2 正向
+  leaves:
+  - id: flash_fwd_fa2_q_resident
+    claim: FA2 让 Q tile 常驻 SRAM、K/V 按 Bc 流式；把 Q 也按 Bc 反复从 gmem 搬回会多一轮 Q 流量。
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: mechanism
+  - id: flash_fwd_fa2_rescale
+    claim: m_new=max(m_old,m_tile) 后 l_new=exp(m_old-m_new)*l_old+sum(exp(x-m_new))；漏乘 exp 差会破坏归一化。
+    types:
+    - conceptual
+    - code_complete
+    difficulty:
+    - 3
+    kind: formula
+  - id: flash_fwd_fa2_causal
+    claim: causal 下 Bc 超当前行合法列必须 predication；否则读到未来 key。
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: failure

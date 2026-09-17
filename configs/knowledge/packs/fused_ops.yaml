@@ -1,0 +1,134 @@
+id: fused_ops
+title: 融合算子实现要点
+priority: 4
+domains: [T31]
+l2_targets:
+  - {domain: T31, l2: layernorm_rms, target_leaves: 8}
+  - {domain: T31, l2: softmax_epilogue, target_leaves: 8}
+  - {domain: T31, l2: rope, target_leaves: 8}
+  - {domain: T31, l2: silu_gelu_glu, target_leaves: 8}
+facets: [formula, failure, mechanism, profiling]
+official_sources:
+  - https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html
+entities:
+  - {id: operator:rms_norm, kind: operator, label: RMSNorm}
+  - {id: operator:rope, kind: operator, label: RoPE}
+seed_claims:
+  - l3_id: layernorm_rms_welford
+    domain_id: T31
+    domain_name: 融合算子实现要点
+    l2_id: layernorm_rms
+    l2_name: LayerNorm / RMSNorm
+    claim: RMSNorm 不减均值，只算 rsqrt(mean(x^2)+eps)；把 LayerNorm 的减均值套到 RMS 会改变数值。
+    types: [conceptual, code_complete]
+    difficulty: [2, 3]
+    kind: formula
+  - l3_id: layernorm_rms_smem
+    domain_id: T31
+    domain_name: 融合算子实现要点
+    l2_id: layernorm_rms
+    l2_name: LayerNorm / RMSNorm
+    claim: 行归约可 warp shuffle，不必把整行进 smem；hidden=4096 时整行 FP16 已 8KB，再双缓冲会挤占用。
+    types: [optimization, layout]
+    difficulty: [3]
+    kind: numeric
+  - l3_id: softmax_epilogue_max
+    domain_id: T31
+    domain_name: 融合算子实现要点
+    l2_id: softmax_epilogue
+    l2_name: Softmax epilogue
+    claim: softmax 必须先 warp/block max 再 exp；先 exp 再 max 在 FP16 上更易溢出。
+    types: [debug, conceptual]
+    difficulty: [2, 3]
+    kind: failure
+  - l3_id: softmax_epilogue_l1tex
+    domain_id: T31
+    domain_name: 融合算子实现要点
+    l2_id: softmax_epilogue
+    l2_name: Softmax epilogue
+    claim: 独立 softmax kernel 在 NCU 上常 l1tex SOL 高、tensor 低；融进 GEMM epilogue 后应看到 tensor SOL 上升。
+    types: [profiling, optimization]
+    difficulty: [3]
+    kind: mechanism
+  - l3_id: rope_pair
+    domain_id: T31
+    domain_name: 融合算子实现要点
+    l2_id: rope
+    l2_name: RoPE
+    claim: RoPE 以 2D 对 (x0,x1) 旋转；按下标把偶奇当独立通道乘 cos/sin 会转错平面。
+    types: [layout, debug]
+    difficulty: [3]
+    kind: failure
+  - l3_id: rope_cache
+    domain_id: T31
+    domain_name: 融合算子实现要点
+    l2_id: rope
+    l2_name: RoPE
+    claim: 推理 RoPE 的 θ 依赖绝对位置；用相对 tile 内下标当全局 pos 会让 KV cache 后续 token 相位错。
+    types: [debug, conceptual]
+    difficulty: [3, 4]
+    kind: failure
+  - l3_id: silu_glu_pair
+    domain_id: T31
+    domain_name: 融合算子实现要点
+    l2_id: silu_gelu_glu
+    l2_name: SiLU / GELU / GLU
+    claim: SwiGLU 是 silu(gate)*up；把 silu 打在 up 上或漏乘 gate 会改变 MLP 宽度语义。
+    types: [debug, conceptual]
+    difficulty: [2, 3]
+    kind: failure
+  - l3_id: silu_vec
+    domain_id: T31
+    domain_name: 融合算子实现要点
+    l2_id: silu_gelu_glu
+    l2_name: SiLU / GELU / GLU
+    claim: 逐元素 SiLU 应向量化 load；stride 不等于 1 的中间张量会让 float4 路径变成多 sector。
+    types: [optimization, layout]
+    difficulty: [2, 3]
+    kind: mechanism
+  - l3_id: quantize_scale
+    domain_id: T31
+    domain_name: 融合算子实现要点
+    l2_id: quantize_elem
+    l2_name: 量化
+    claim: per-tensor scale 必须在量化前广播到元素；漏 scale 直接 round 到 int8 会饱和。
+    types: [numeric, debug]
+    difficulty: [2, 3]
+    kind: formula
+  - l3_id: transpose_smem
+    domain_id: T31
+    domain_name: 融合算子实现要点
+    l2_id: transpose_permute
+    l2_name: Transpose / permute
+    claim: smem 转置要用 bank-swizzle 或 padding；朴素 s[ty][tx]=s[tx][ty] 在 32 列上 32-way 冲突。
+    types: [layout, optimization]
+    difficulty: [3]
+    kind: failure
+  - l3_id: embed_gather
+    domain_id: T31
+    domain_name: 融合算子实现要点
+    l2_id: embedding_gather
+    l2_name: Embedding gather
+    claim: embedding gather 是不规则 gmem 读；NCU 上 sector 超额高是预期，用向量化连续读的模型会误判。
+    types: [profiling, conceptual]
+    difficulty: [2, 3]
+    kind: mechanism
+  - l3_id: bias_act_epilogue
+    domain_id: T31
+    domain_name: 融合算子实现要点
+    l2_id: bias_act_fusion
+    l2_name: Bias+activation 融合
+    claim: bias+act 应在 GEMM 累加器仍在寄存器时做；先写 gmem 再开 epilogue kernel 会多一轮 DRAM。
+    types: [optimization, conceptual]
+    difficulty: [2, 3]
+    kind: mechanism
+relations:
+  - {source: layernorm_rms_smem, target: layernorm_rms_welford, kind: requires, reason: reduction algorithm before smem}
+  - {source: rope_cache, target: rope_pair, kind: requires, reason: pair rotation then position}
+  - {source: softmax_epilogue_l1tex, target: softmax_epilogue_max, kind: related, reason: softmax numeric vs profile}
+  - {source: layernorm_rms_welford, target: operator:rms_norm, kind: implements, reason: rms}
+  - {source: rope_pair, target: operator:rope, kind: implements, reason: rope}
+gap_prompts:
+  - RMSNorm 与 LayerNorm 差在减均值
+  - RoPE 2D 对与绝对位置
+  - softmax/GEMM epilogue 融合在 NCU 上的变化

@@ -1,0 +1,30 @@
+# Test profile: minimal settings for CI/testing
+
+generation:
+  temperature: 0.7
+  max_tokens: 4096
+  writer_concurrency: 2
+  llm_per_key_concurrency: 1
+  embed_per_key_concurrency: 1
+  embed_oversub: 1
+  prompt_cache: false
+  embedding_cache: false
+  evolver_fraction: 0.10
+  fewshot_positives: 2
+  fewshot_negatives: 1
+
+review:
+  batch_size: 5
+  semantic_dup_threshold: 0.90
+  llm_every_k_batches: 5
+
+taxonomy:
+  target_leaves_per_l2: 10
+  manager:
+    enabled: false
+    every_k_reviews: 20
+    max_llm_calls_per_tick: 1
+    max_leaves_per_tick: 3
+
+paths:
+  data_dir: data/test

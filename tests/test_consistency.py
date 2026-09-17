@@ -1,3 +1,5 @@
+"""Tests for hardware/leaf consistency heuristics used as chair diagnostics."""
+
 from __future__ import annotations
 
 from cuda_sft_qgen.models import Question
@@ -6,6 +8,9 @@ from cuda_sft_qgen.review.consistency import (
     consistency_reason,
     hardware_mismatch,
     leaf_mismatch,
+    leaf_soft_suspect,
+    scene_arches,
+    sm_name_conflicts,
 )
 from cuda_sft_qgen.sieve import rule_sieve
 from cuda_sft_qgen.config import load_settings
@@ -31,7 +36,7 @@ def _q(**kwargs) -> Question:
     return Question.model_validate(data)
 
 
-def test_blackwell_sm90_is_hw_mismatch():
+def test_blackwell_sm90_is_chair_suspect_not_hard_sieve():
     q = _q(
         hardware="blackwell",
         question=(
@@ -39,8 +44,10 @@ def test_blackwell_sm90_is_hw_mismatch():
             "NCU 报告 Long Scoreboard。请指出该 stall 的最小改动。"
         ),
     )
-    assert hardware_mismatch(q) == "sieve_hw_mismatch"
-    assert consistency_reason(q) == "sieve_hw_mismatch"
+    assert sm_name_conflicts(q.question)
+    assert hardware_mismatch(q) is None
+    assert consistency_reason(q) == "sieve_off_leaf"
+    assert leaf_soft_suspect(q) is True
 
 
 def test_ampere_label_hopper_scene_mismatch():
@@ -111,15 +118,32 @@ def test_sieve_runs_consistency():
     settings = load_settings(fake_llm=True)
     settings.question_min_chars = 40
     bad = _q(
-        hardware="blackwell",
+        hardware="ampere",
         question=(
-            "已捕获一个 CUDA Graph 并在 Blackwell (SM 9.0) 上实例化为 cudaGraphExec_t。"
-            "下列哪些改动仅通过 cudaGraphExecUpdate 即可生效？"
+            "On a Hopper (sm_90) GPU you want to use the optional TMA store epilogue "
+            "to write a D tile back to global memory. Which snippet is legal?"
         ),
         l3_id="graph_update",
         l3_claim="cudaGraphExecUpdate 可更新的参数集合",
     )
-    assert rule_sieve(bad, settings) == "sieve_hw_mismatch"
+    # Cheap length/topic filters still run; hw/leaf are warnings, not hard-fail.
+    assert rule_sieve(bad, settings) is None
+    assert hardware_mismatch(bad) == "sieve_hw_mismatch"
+
+
+def test_hopper_blackwell_slash_matches_labeled_blackwell():
+    q = _q(
+        hardware="blackwell",
+        question_type="compare",
+        question=(
+            "Consider a decoupled look-back prefix-sum on Hopper/Blackwell where each "
+            "CTA publishes a flag. Why must the next CTA acquire the flag before reading "
+            "the partial sum? Mention __syncthreads only as a contrast."
+        ),
+    )
+    assert "hopper" in scene_arches(q.question)
+    assert "blackwell" in scene_arches(q.question)
+    assert hardware_mismatch(q) is None
 
 
 def test_chair_unique_reject_only_for_consistency():

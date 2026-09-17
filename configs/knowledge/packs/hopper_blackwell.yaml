@@ -1,0 +1,88 @@
+id: hopper_blackwell
+title: Hopper / Blackwell 新特性约束
+priority: 2
+domains: [T08, T30]
+l2_targets:
+  - {domain: T08, l2: tma, target_leaves: 16}
+  - {domain: T08, l2: blackwell, target_leaves: 16}
+facets: [feature, failure, formula, api]
+official_sources:
+  - https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html
+entities:
+  - {id: feature:tma, kind: feature, label: TMA}
+  - {id: feature:wgmma, kind: feature, label: WGMMA}
+  - {id: feature:tmem, kind: feature, label: TMEM}
+seed_claims:
+  - l3_id: hb_tma_expect_tx
+    domain_id: T08
+    l2_id: tma
+    l2_name: TMA
+    claim: 发 TMA 前 mbarrier.expect_tx 必须加上本次字节数；expect_tx 少于完成字节会提前放行，多于会死等。
+    types: [debug, syntax]
+    difficulty: [3, 4]
+    kind: formula
+  - l3_id: hb_tma_base16
+    domain_id: T08
+    l2_id: tma
+    l2_name: TMA
+    claim: TMA 全局基址必须 16B 对齐；1B 对齐的 packed 量化缓冲不能直接当 tensor map 源。
+    types: [debug, layout]
+    difficulty: [3]
+    kind: failure
+  - l3_id: hb_tma_not_sm80
+    domain_id: T08
+    l2_id: tma
+    l2_name: TMA
+    claim: TMA（cp.async.bulk.tensor）从 sm_90 起；sm_80 只有 cp.async.ca/cg，不能把 tensormap 当 Ampere 路径。
+    types: [conceptual, compare]
+    difficulty: [3]
+    kind: feature
+  - l3_id: hb_wgmma_fence
+    domain_id: T08
+    l2_id: tma
+    l2_name: TMA
+    claim: WGMMA 累加器在寄存器/TMEM 上，consumer 必须 wgmma.fence/commit/wait；用 __syncthreads 代替 wait 会读到未完成 MMA。
+    types: [debug, conceptual]
+    difficulty: [3, 4]
+    kind: failure
+  - l3_id: hb_tmem_not_smem
+    domain_id: T08
+    l2_id: blackwell
+    l2_name: Blackwell TMEM / UMMA
+    claim: TMEM 不是 smem；UMMA 操作数可来自 TMEM，把 TMEM 当地址当 shared 指针用是非法的。
+    types: [debug, conceptual]
+    difficulty: [3, 4]
+    kind: feature
+  - l3_id: hb_umma_shape
+    domain_id: T08
+    l2_id: blackwell
+    l2_name: Blackwell TMEM / UMMA
+    claim: sm_100 UMMA/tcgen05 形状与 sm_90 WGMMA 不完全兼容；把 Hopper WGMMA atom 原样标成 Blackwell 路径会编码失败。
+    types: [compare, syntax]
+    difficulty: [3, 4]
+    kind: feature
+  - l3_id: hb_cluster_dsyn
+    domain_id: T08
+    l2_id: tma
+    l2_name: TMA
+    claim: cluster 内 TMA multicast 完成打在 mbarrier 上；只用 CTA __syncthreads 不能保证邻 CTA DSMEM 可见。
+    types: [debug, conceptual]
+    difficulty: [3, 4]
+    kind: failure
+  - l3_id: hb_green_ctx
+    domain_id: T08
+    l2_id: blackwell
+    l2_name: Blackwell TMEM / UMMA
+    claim: Green context 切分的是 SM 集合与流资源，不改变 kernel 内 TMA/TMEM ISA；不能用 green context 代替 sm_90 特性探测。
+    types: [conceptual, compare]
+    difficulty: [3]
+    kind: mechanism
+relations:
+  - {source: hb_tma_expect_tx, target: hb_tma_base16, kind: requires, reason: alignment before tx count}
+  - {source: hb_tma_not_sm80, target: feature:tma, kind: uses_feature, reason: tma gate}
+  - {source: hb_tmem_not_smem, target: feature:tmem, kind: uses_feature, reason: tmem}
+  - {source: hb_wgmma_fence, target: feature:wgmma, kind: uses_feature, reason: wgmma completion}
+gap_prompts:
+  - expect_tx 字节与 TMA 完成字节必须相等
+  - TMEM 不是 smem
+  - sm_80 没有 TMA

@@ -1026,3 +1026,71 @@ children:
     difficulty:
     - 2
     kind: mechanism
+- id: op_smem_budget
+  name: 算子 smem 预算
+  leaves:
+  - id: op_smem_budget_fa
+    claim: FA tile smem ≈ (Br+Bc)*d*sizeof；再加 stages 或反向 Q/K/V/dO 会超 cap，应降 Br/Bc 而不是加 occupancy。
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    - 4
+    kind: formula
+  - id: op_smem_budget_gemm
+    claim: GEMM 双缓冲 A+B 字节 = 2*(BM*BK+BN*BK)*sizeof；stages=4 在 164KB 预算下可能挤掉 epilogue smem。
+    types:
+    - optimization
+    - layout
+    difficulty:
+    - 3
+    kind: numeric
+  - id: op_smem_carveout
+    claim: 增大 opt-in smem carveout 会降低 occupancy；FA/GEMM 先满足 tile 字节，再看驻留 warp 是否还能藏延迟。
+    types:
+    - optimization
+    - profiling
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: op_smem_cp_async_wait
+    claim: cp.async 完成前读 smem 目标会读脏数据；必须 wait_group/mbarrier，不能用 __syncthreads 代替异步完成。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: op_smem_tma_16b
+    claim: TMA 进 smem 的 shared 地址也要满足描述符对齐；只保证 gmem 16B 而 smem 偏 8B 仍会错数据。
+    types:
+    - debug
+    - layout
+    difficulty:
+    - 3
+    kind: failure
+  - id: op_smem_malloc_hot
+    claim: 热路径上的同步 cudaMalloc 在 nsys 上显示为 GPU idle，不是 smem 不足；应提到图外或 mempool。
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    kind: failure
+  - id: op_smem_ldg_stale
+    claim: __ldg/ld.global.nc 读刚被同 kernel 写过的地址可能读到旧值；算子 epilogue 刚写再 __ldg 是错的。
+    types:
+    - debug
+    - conceptual
+    difficulty:
+    - 3
+    kind: failure
+  - id: op_smem_partial_rmw
+    claim: 部分写 32B sector 可能 RMW；warp 只写 8 个 float 的前 4 个时事务仍可能按整 sector 计。
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: numeric

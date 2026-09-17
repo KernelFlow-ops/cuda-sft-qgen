@@ -31,3 +31,4 @@ include:
 - domains/T28_errors_determinism.yaml
 - domains/T29_math_libs.yaml
 - domains/T30_arch_features.yaml
+- domains/T31_operators.yaml

@@ -1,3 +1,5 @@
+"""Tests that split domain YAML loads and preserves legacy L3 ids."""
+
 from __future__ import annotations
 
 from cuda_sft_qgen.config import load_settings
@@ -12,7 +14,7 @@ def test_split_taxonomy_loads_and_keeps_legacy_ids():
     assert len(ids) == len(set(ids))
     for legacy in ("tmem", "coalescing", "syncthreads", "umma", "shape_stride"):
         assert legacy in ids
-    assert len(tax.l1_ids()) == 30
+    assert len(tax.l1_ids()) == 31
     assert len(tax.leaves) >= 2500
 
 

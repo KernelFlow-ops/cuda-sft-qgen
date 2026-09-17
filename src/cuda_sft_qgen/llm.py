@@ -1,3 +1,9 @@
+"""NVIDIA chat-completions client, FakeLLM, and JSON-completion helper.
+
+Streaming is required so usage and reasoning tokens can be recorded. Empty
+``content`` with non-empty ``reasoning_content`` is recovered as the reply.
+"""
+
 from __future__ import annotations
 
 import json
@@ -10,14 +16,23 @@ from cuda_sft_qgen.config import Settings
 from cuda_sft_qgen.errors import RateLimitError
 from cuda_sft_qgen.jsonutil import parse_json_object, strip_think
 from cuda_sft_qgen.keys import PRI_WRITER, ApiKeyPool
+from cuda_sft_qgen.observability import get_metrics
 
 logger = logging.getLogger(__name__)
 
 
 def thinking_kwargs(level: str) -> dict[str, Any]:
+    """Map ``none|low|medium|high`` onto Nemotron ``chat_template_kwargs``."""
     level = (level or "medium").lower()
     if level == "none":
         return {"enable_thinking": False}
+    if level in {"low", "low_effort"}:
+        # Nemotron 3 Ultra: short reasoning (chat_template_kwargs.low_effort).
+        return {
+            "enable_thinking": True,
+            "low_effort": True,
+            "force_nonempty_content": True,
+        }
     if level == "medium":
         return {
             "enable_thinking": True,
@@ -30,6 +45,8 @@ def thinking_kwargs(level: str) -> dict[str, Any]:
 
 
 class LLMClient:
+    """Minimal chat client: complete text or a parsed JSON object."""
+
     def complete(
         self,
         messages: list[dict[str, str]],
@@ -40,6 +57,7 @@ class LLMClient:
         priority: int = PRI_WRITER,
         prompt_cache_key: str | None = None,
     ) -> str:
+        """Return assistant text for ``messages``."""
         raise NotImplementedError
 
     def complete_json(
@@ -51,7 +69,9 @@ class LLMClient:
         retries: int = 1,
         priority: int = PRI_WRITER,
         prompt_cache_key: str | None = None,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
+        """Call :meth:`complete` and parse a JSON object, with a repair retry."""
         last_err: Exception | None = None
         for attempt in range(retries + 1):
             text = self.complete(
@@ -60,6 +80,7 @@ class LLMClient:
                 temperature=temperature,
                 priority=priority,
                 prompt_cache_key=prompt_cache_key,
+                max_tokens=max_tokens,
             )
             try:
                 return parse_json_object(text)
@@ -79,7 +100,10 @@ class LLMClient:
 
 
 class NvidiaLLM(LLMClient):
+    """Streaming NVIDIA Integrate API client backed by :class:`ApiKeyPool`."""
+
     def __init__(self, settings: Settings, pool: ApiKeyPool) -> None:
+        """Bind runtime settings and the shared API key pool."""
         self.settings = settings
         self.pool = pool
 
@@ -93,6 +117,7 @@ class NvidiaLLM(LLMClient):
         priority: int = PRI_WRITER,
         prompt_cache_key: str | None = None,
     ) -> str:
+        """Stream a completion; records duration, tokens, and failures."""
         level = thinking_level or self.settings.thinking_level
         extra: dict[str, Any] = {"chat_template_kwargs": thinking_kwargs(level)}
         payload = {
@@ -104,12 +129,33 @@ class NvidiaLLM(LLMClient):
             "top_p": self.settings.top_p,
             "max_tokens": self.settings.max_tokens if max_tokens is None else max_tokens,
             "stream": True,
+            "stream_options": {"include_usage": True},
             "extra_body": extra,
         }
-        return self._stream_with_retry(payload, priority=priority)
+        t0 = time.monotonic()
+        metrics = get_metrics()
+        labels = {"priority": str(priority), "model": self.settings.nvidia_model}
+        metrics.increment("llm_requests", labels=labels)
+        try:
+            text = self._stream_with_retry(payload, priority=priority)
+        except Exception:
+            metrics.increment("llm_failures", labels=labels)
+            raise
+        finally:
+            metrics.observe("llm_seconds", time.monotonic() - t0, labels)
+        logger.info(
+            "llm_complete duration_s=%.2f out_chars=%s thinking=%s max_tokens=%s priority=%s",
+            time.monotonic() - t0,
+            len(text or ""),
+            level,
+            payload["max_tokens"],
+            priority,
+        )
+        return text
 
     @staticmethod
     def _is_rate_limit(exc: Exception) -> bool:
+        """True for 429 / overloaded / temporarily unavailable errors."""
         text = str(exc)
         lowered = text.lower()
         return (
@@ -126,6 +172,7 @@ class NvidiaLLM(LLMClient):
         retries: int | None = None,
         priority: int = PRI_WRITER,
     ) -> str:
+        """Acquire a key, stream, and rotate on 429 until per-key budget is spent."""
         per_key = max(1, int(self.settings.llm_rate_limit_retries_per_call))
         max_rate = per_key * max(1, self.pool.n_keys)
         hard_retries = retries if retries is not None else max(max_rate, 6)
@@ -157,6 +204,8 @@ class NvidiaLLM(LLMClient):
                         per_key,
                         exc,
                     )
+                    # Do not hop onto the remaining keys in the same millisecond.
+                    time.sleep(min(2.0, max(0.4, wait * 0.1)))
                     continue
                 wait = min(60.0, float(2 ** attempt))
                 logger.warning(
@@ -175,23 +224,49 @@ class NvidiaLLM(LLMClient):
         raise RuntimeError(f"LLM call failed after retries: {last}")
 
     def _stream_once(self, client: Any, payload: dict[str, Any]) -> str:
+        """Consume one streamed completion; recover content from reasoning if empty."""
         stream = client.chat.completions.create(**payload)
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
+        finish_reason = None
         for chunk in stream:
+            usage = getattr(chunk, "usage", None)
+            if usage is not None:
+                labels = {"model": str(payload["model"])}
+                for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                    value = getattr(usage, field, None)
+                    if isinstance(value, int):
+                        get_metrics().increment("llm_" + field, value, labels)
+                get_metrics().increment("llm_usage_reports", labels=labels)
             if not chunk.choices:
                 continue
-            delta = chunk.choices[0].delta
+            choice = chunk.choices[0]
+            finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+            delta = choice.delta
             reasoning = getattr(delta, "reasoning_content", None)
             if reasoning:
                 reasoning_parts.append(reasoning)
             if delta.content:
                 content_parts.append(delta.content)
         content = strip_think("".join(content_parts))
-        if self.settings.log_reasoning and reasoning_parts:
-            logger.info("reasoning: %s", "".join(reasoning_parts)[:2000])
-        if not content and reasoning_parts:
-            logger.warning("empty content after stream; reasoning tokens were present")
+        reasoning = "".join(reasoning_parts)
+        if self.settings.log_reasoning and reasoning:
+            logger.info("reasoning: %s", reasoning[:2000])
+        if not content and reasoning:
+            recovered = strip_think(reasoning)
+            if recovered:
+                logger.warning(
+                    "empty content after stream; recovered %s chars from reasoning (finish=%s)",
+                    len(recovered),
+                    finish_reason,
+                )
+                return recovered
+            logger.warning(
+                "empty content after stream; reasoning tokens were present finish=%s",
+                finish_reason,
+            )
+        elif finish_reason and finish_reason not in {"stop", "None", None}:
+            logger.info("llm_finish reason=%s content_chars=%s", finish_reason, len(content))
         return content
 
 
@@ -208,6 +283,7 @@ class FakeLLM(LLMClient):
         priority: int = PRI_WRITER,
         prompt_cache_key: str | None = None,
     ) -> str:
+        """Return a deterministic JSON fixture matching the prompt role (writer/chair/taxonomy)."""
         user = ""
         system = ""
         for m in messages:
@@ -217,6 +293,20 @@ class FakeLLM(LLMClient):
             if m.get("role") == "user":
                 user = m.get("content") or ""
                 break
+        if "QUALITY_REVIEW_V1" in system:
+            payload = json.loads(user)
+            # Offline fixtures exercise the contract, not CUDA factual correctness.
+            return json.dumps({
+                "id": payload["id"], "action": "accept",
+                "reason": "Offline fixture contract accepted; not a factual assessment.",
+                "checks": {key: "pass" for key in (
+                    "correctness", "answerability", "claim_alignment", "hardware_compatibility",
+                    "answer_leakage", "metadata", "duplication",
+                )},
+                "evidence": ["Offline fixture response; no factual verification performed."],
+                "internal_reference_answer": "Offline fixture reference answer.",
+                "assessed_metadata": payload["requested_metadata"],
+            }, ensure_ascii=False)
         if "suggested_claim" in user:
             return json.dumps({"suggestions": []}, ensure_ascii=False)
         if "health_notes" in user or "WorkOrder" in user or '"refine_ids"' in user:
@@ -282,6 +372,7 @@ class FakeLLM(LLMClient):
 
 
 def _extract_between(text: str, start: str, end: str) -> str:
+    """Slice ``text`` between ``start`` and ``end`` for FakeLLM brief parsing."""
     i = text.find(start)
     if i < 0:
         return ""
@@ -292,6 +383,11 @@ def _extract_between(text: str, start: str, end: str) -> str:
 
 
 def build_llm(settings: Settings, pool: ApiKeyPool | None = None) -> LLMClient:
+    """Return FakeLLM when ``fake_llm`` is set; otherwise NvidiaLLM.
+
+    Raises:
+        RuntimeError: If a real client is requested without an API key pool.
+    """
     if settings.fake_llm:
         return FakeLLM()
     if pool is None:
@@ -300,4 +396,5 @@ def build_llm(settings: Settings, pool: ApiKeyPool | None = None) -> LLMClient:
 
 
 def iter_message_dicts(messages: Iterable[dict[str, str]]) -> list[dict[str, str]]:
+    """Materialize a message iterable (used by tests and prompt dumps)."""
     return list(messages)

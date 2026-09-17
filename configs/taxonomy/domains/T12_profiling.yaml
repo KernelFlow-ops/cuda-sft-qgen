@@ -959,3 +959,145 @@ children:
     difficulty:
     - 2
     kind: formula
+- id: ncu_workflow
+  name: NCU 调试工作流
+  leaves:
+  - id: ncu_workflow_order
+    claim: 先用 nsys 定位 kernel，再用 ncu 看 SOL → stall → Source/SASS → 改代码复测；颠倒顺序会把系统 idle 当 SM 瓶颈。
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: ncu_workflow_sol
+    claim: SOL 管道占用 100% 的那条（l1tex/dram/tensor）才是瓶颈；全低且占用高应先看 stall，不是再加 block。
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: ncu_workflow_scoreboard
+    claim: long scoreboard 高说明在等内存；加 occupancy 往往更堵，应先减事务或加重叠拷贝。
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: failure
+  - id: ncu_workflow_sectors
+    claim: l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum 近似全局 load sector 数；除以理论最小 sector 得到超额倍数。
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: formula
+  - id: ncu_workflow_replay
+    claim: NCU 默认 kernel replay 多次执行同一 kernel；有全局原子副作用的算子必须改 range/application replay。
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 3
+    kind: failure
+  - id: ncu_workflow_lineinfo
+    claim: 没有 -lineinfo 时 Source 页无法把 SASS PC 映回 C++，逐行周期归因会消失。
+    types:
+    - profiling
+    - syntax
+    difficulty:
+    - 1
+    - 2
+    kind: api
+  - id: ncu_workflow_fa_sig
+    claim: FA 正向常见 l1tex/dram SOL 高 + long scoreboard；先加 occupancy 通常不降 walltime。
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 3
+    kind: mechanism
+  - id: ncu_workflow_gemm_sig
+    claim: 健康 GEMM 应 tensor SOL 高；若大量 FFMA 且 tensor 低，说明走了非 TC 残差路径。
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 3
+    kind: mechanism
+
+- id: nsys_intro
+  name: Nsight Systems 入门
+  leaves:
+  - id: nsys_intro_vs_ncu
+    claim: nsys 看 CPU/GPU 间隙、拷贝、流重叠；ncu 看单 kernel 管道。先 nsys 后 ncu。
+    types:
+    - profiling
+    - conceptual
+    difficulty:
+    - 1
+    - 2
+    kind: mechanism
+  - id: nsys_intro_default_stream
+    claim: 时间线上 GPU idle 紧跟 cudaMalloc/cudaDeviceSynchronize 通常是默认流隐式同步，不是 kernel 太慢。
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    kind: failure
+  - id: nsys_intro_small_kernel
+    claim: 大量 <10µs kernel 的 gap 来自 launch 与 CPU 提交，应合图或融合，而不是先调 Occupancy。
+    types:
+    - profiling
+    - optimization
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: nsys_intro_memcpy
+    claim: cudaMemcpy 默认同步；时间线出现 GPU idle 贴着 H2D 完成，通常是默认方向同步而非 kernel 启动延迟。
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 1
+    - 2
+    kind: api
+  - id: nsys_intro_graph
+    claim: cudaGraphLaunch 一次提交后 GPU 上节点间隙应远小于逐 kernel launch；若仍见 CPU 间隙则图未真正捕获。
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 2
+    - 3
+    kind: mechanism
+  - id: nsys_intro_nvtx
+    claim: 融合算子要用 NVTX 分段；没有 NVTX 时无法在 nsys 里对准自定义 epilogue 与 GEMM。
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 2
+    kind: api
+  - id: nsys_intro_wait_event
+    claim: 两条 stream 从不重叠且中间有 WaitEvent 是故意串行；当成意外 idle 去优化占用无效。
+    types:
+    - profiling
+    - compare
+    difficulty:
+    - 2
+    kind: mechanism
+  - id: nsys_intro_uvm
+    claim: UVM 缺页在时间线上显示为主机故障处理；NCU 的 kernel 时间会含迁移，看起来像算子变慢。
+    types:
+    - profiling
+    - debug
+    difficulty:
+    - 3
+    kind: failure

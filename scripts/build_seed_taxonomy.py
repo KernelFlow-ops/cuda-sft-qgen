@@ -41,6 +41,7 @@ TYPE_FIX = {
 
 
 def sanitize_leaf(item: dict) -> dict:
+    """Coerce types/difficulty onto the current taxonomy enums."""
     out = dict(item)
     types = []
     for t in out.get("types") or []:
@@ -100,6 +101,7 @@ def _annotate(item: dict) -> dict:
 
 
 def graft_legacy(domains: list[dict]) -> list[dict]:
+    """Merge EXTRA_LEAVES and NEW_L2 onto T01–T15 domain dicts."""
     out = copy.deepcopy(domains)
     by_id = {d["id"]: d for d in out}
     for domain in out:
@@ -135,6 +137,7 @@ def graft_legacy(domains: list[dict]) -> list[dict]:
 
 
 def write_index(domain_ids: list[str], version: int, name: str) -> None:
+    """Rewrite ``cuda.yaml`` as an include list of per-domain files."""
     include = []
     for did in domain_ids:
         if did in FILES:
@@ -148,6 +151,7 @@ def write_index(domain_ids: list[str], version: int, name: str) -> None:
 
 
 def main() -> None:
+    """Split the seed taxonomy (or re-graft extras if already split)."""
     raw = _load(SRC)
     if "include" in raw:
         # Already split; still re-graft legacy extras onto T01–T15 files.

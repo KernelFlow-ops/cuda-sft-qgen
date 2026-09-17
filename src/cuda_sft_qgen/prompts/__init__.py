@@ -1,3 +1,5 @@
+"""Load Markdown/YAML prompt templates shipped with the package."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -9,6 +11,7 @@ _DIR = Path(__file__).parent
 
 
 def _first_existing(paths: list[Path]) -> Path:
+    """Return the first path that exists; raise using the preferred name."""
     for path in paths:
         if path.exists():
             return path
@@ -16,6 +19,14 @@ def _first_existing(paths: list[Path]) -> Path:
 
 
 def load_prompt(name: str) -> str:
+    """Read a prompt Markdown file from prompts/, layers/, or taxonomy/.
+
+    Args:
+        name: Stem without extension, e.g. ``writer`` or ``expand``.
+
+    Returns:
+        File contents as UTF-8 text.
+    """
     path = _first_existing(
         [
             _DIR / f"{name}.md",
@@ -27,6 +38,11 @@ def load_prompt(name: str) -> str:
 
 
 def load_prompt_yaml(name: str) -> Any:
+    """Load a YAML prompt sidecar from prompts/ or prompts/taxonomy/.
+
+    Args:
+        name: Stem without extension, e.g. ``facets`` or ``anti_patterns``.
+    """
     path = _first_existing(
         [
             _DIR / f"{name}.yaml",

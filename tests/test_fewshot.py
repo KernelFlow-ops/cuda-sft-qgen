@@ -1,3 +1,5 @@
+"""Tests for few-shot positive/negative/anti-template selection."""
+
 from __future__ import annotations
 
 from cuda_sft_qgen.models import Question, QuestionBrief

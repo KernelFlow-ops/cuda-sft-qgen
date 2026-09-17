@@ -1,3 +1,5 @@
+"""Tests for LLM JSON extraction, think-trace stripping, and truncated payloads."""
+
 from __future__ import annotations
 
 from cuda_sft_qgen.jsonutil import _scan_fields, normalize_language, parse_question_payload
@@ -100,6 +102,19 @@ def test_think_tag_stripped():
     obj = parse_question_payload(raw)
     assert obj is not None
     assert "coalescing" in obj["question"]
+
+
+def test_inner_cuda_fence_does_not_replace_json_payload():
+    raw = (
+        '```json\n'
+        '{"question": "see\\n\\n```cuda\\n__global__ void k() {}\\n```\\n'
+        'What happens to occupancy?", '
+        '"tests_claim": "occupancy", "language": "zh"}\n'
+        '```'
+    )
+    obj = parse_question_payload(raw)
+    assert obj is not None
+    assert "occupancy" in obj["question"]
 
 
 def test_language_extra_keys_and_leak():

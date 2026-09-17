@@ -7,6 +7,8 @@ Hard constraints (violate = unusable item):
 - MUST produce tests_claim as one falsifiable sentence that names the mechanism; do NOT copy l3_claim verbatim.
 - Language {{language}}: Chinese stem keeps English identifiers/APIs intact.
 - Hardware {{hardware}}: do not treat a Hopper/Blackwell-only mechanism as correct on Ampere (or vice versa).
+- If HARDWARE is blackwell, write sm_100 / SM10x, never sm_90. Hopper is sm_90, Ampere is sm_80.
+- When comparing two architectures (Hopper/Blackwell), name BOTH in the scene.
 - Do NOT write a glossary, a blog intro, "请介绍/谈谈你对", or "畅所欲言".
 - Do NOT hide the full worked answer in the question.
 - Open-ended "how would you optimize" with no numbers, counters, or code is forbidden.

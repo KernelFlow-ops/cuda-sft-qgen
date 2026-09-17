@@ -1,3 +1,9 @@
+"""Embedding backends: NVIDIA API, HuggingFace, and a hash-seeded fake.
+
+:class:`Embedder.embed` consults :class:`EmbeddingCache` first and only calls
+the provider for misses. Vectors are L2-normalized for cosine search.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -12,11 +18,13 @@ from cuda_sft_qgen.cache import EmbeddingCache
 from cuda_sft_qgen.config import Settings
 from cuda_sft_qgen.keys import ApiKeyPool
 from cuda_sft_qgen.review.normalize import exact_hash
+from cuda_sft_qgen.observability import get_metrics
 
 logger = logging.getLogger(__name__)
 
 
 def _split_even(items: list[str], n_parts: int) -> list[list[str]]:
+    """Partition ``items`` into up to ``n_parts`` contiguous batches."""
     n_parts = max(1, min(len(items), n_parts))
     k, m = divmod(len(items), n_parts)
     batches: list[list[str]] = []
@@ -31,11 +39,13 @@ def _split_even(items: list[str], n_parts: int) -> list[list[str]]:
 
 
 def _chunks(items: list[str], size: int) -> list[list[str]]:
+    """Split ``items`` into consecutive chunks of at most ``size``."""
     size = max(1, int(size))
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
 def l2_normalize(mat: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    """Row-wise L2 normalize; 1-D input is treated as a single row."""
     mat = np.asarray(mat, dtype=np.float32)
     if mat.ndim == 1:
         mat = mat.reshape(1, -1)
@@ -44,11 +54,14 @@ def l2_normalize(mat: np.ndarray, eps: float = 1e-12) -> np.ndarray:
 
 
 class Embedder:
+    """Cache-aware embedding interface; subclasses implement ``_embed_uncached``."""
+
     dim: int | None = None
     cache: EmbeddingCache | None = None
     uncached_calls: int = 0
 
     def embed(self, texts: Sequence[str]) -> np.ndarray:
+        """Return an (n, dim) float32 matrix, filling cache misses via the backend."""
         items = list(texts)
         if not items:
             return np.zeros((0, self.dim or 1024), dtype=np.float32)
@@ -77,17 +90,22 @@ class Embedder:
         return np.stack(rows, axis=0)
 
     def _embed_uncached(self, texts: list[str]) -> np.ndarray:
+        """Provider call that bypasses the local cache."""
         raise NotImplementedError
 
 
 class NvidiaEmbedder(Embedder):
+    """NVIDIA Integrate embeddings API with per-chunk pool acquire and 429 retry."""
+
     def __init__(self, settings: Settings, pool: ApiKeyPool) -> None:
+        """Bind settings and the shared API key pool."""
         self.settings = settings
         self.pool = pool
         self.dim = None
         self.uncached_calls = 0
 
     def _embed_uncached(self, texts: list[str]) -> np.ndarray:
+        """Embed ``texts`` in parallel chunks up to pool embed capacity."""
         items = list(texts)
         if not items:
             return np.zeros((0, self.dim or 1024), dtype=np.float32)
@@ -113,6 +131,7 @@ class NvidiaEmbedder(Embedder):
         return mat
 
     def _embed_batch_with_retry(self, texts: list[str], retries: int = 8) -> np.ndarray:
+        """Acquire an embed slot and retry with cooldown on rate limits."""
         last: Exception | None = None
         for attempt in range(retries):
             slot = self.pool.acquire("embed")
@@ -139,6 +158,8 @@ class NvidiaEmbedder(Embedder):
         raise RuntimeError(f"embed failed: {last}")
 
     def _embed_once(self, client: Any, texts: list[str]) -> np.ndarray:
+        """Single embeddings.create call; falls back if ``input_type`` is rejected."""
+        get_metrics().increment("embedding_requests")
         kwargs = {
             "model": self.settings.embedding_model,
             "input": texts,
@@ -152,6 +173,10 @@ class NvidiaEmbedder(Embedder):
         except Exception:
             resp = client.embeddings.create(**kwargs)
         vectors = [item.embedding for item in resp.data]
+        usage = getattr(resp, "usage", None)
+        tokens = getattr(usage, "total_tokens", None)
+        if isinstance(tokens, int):
+            get_metrics().increment("embedding_tokens", tokens)
         mat = l2_normalize(np.asarray(vectors, dtype=np.float32))
         self.dim = mat.shape[1]
         self.pool.note_success("embed")
@@ -159,7 +184,10 @@ class NvidiaEmbedder(Embedder):
 
 
 class HuggingFaceEmbedder(Embedder):
+    """Local SentenceTransformer backend (optional ``.[hf]`` extra)."""
+
     def __init__(self, settings: Settings) -> None:
+        """Load a local SentenceTransformer; requires the ``hf`` extra."""
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:
@@ -186,6 +214,7 @@ class FakeEmbedder(Embedder):
     """Hash-seeded vectors so identical strings have cosine 1."""
 
     def __init__(self, dim: int = 64) -> None:
+        """Use ``dim``-wide hash-seeded Gaussians so identical strings cosine-match."""
         self.dim = dim
         self.uncached_calls = 0
 
@@ -205,6 +234,11 @@ class FakeEmbedder(Embedder):
 
 
 def build_embedder(settings: Settings, pool: ApiKeyPool | None = None) -> Embedder:
+    """Select fake, HuggingFace, or NVIDIA embedder from settings.
+
+    Raises:
+        RuntimeError: If NVIDIA is selected without an API key pool.
+    """
     if settings.fake_llm or settings.embedding_provider == "fake":
         return FakeEmbedder()
     if settings.embedding_provider == "huggingface":

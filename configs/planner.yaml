@@ -1,0 +1,28 @@
+# Adaptive planner configuration
+adaptive_sampling:
+  # Enable adaptive leaf sampling based on health scores
+  enabled: false
+
+  # Epsilon-greedy exploration parameter
+  # 0.15 means 15% random exploration, 85% exploitation based on health
+  epsilon: 0.15
+
+  # Health score weights (must sum to 1.0)
+  accept_weight: 0.6     # Weight for accept_rate in health calculation
+  coverage_weight: 0.4   # Weight for coverage_gap in health calculation
+
+  # Target questions per leaf for coverage calculation
+  target_per_leaf: 3
+
+  # Minimum samples per leaf before applying adaptive logic
+  min_samples_threshold: 5
+
+  # Health score thresholds
+  thresholds:
+    unhealthy: 0.3      # Below this: significantly boost weight
+    healthy: 0.6        # Above this: maintain or slightly reduce weight
+
+  # Boost factors for weight adjustment
+  boost:
+    unhealthy: 2.0      # Multiply weight by this for unhealthy leaves
+    healthy: 0.8        # Multiply weight by this for healthy leaves

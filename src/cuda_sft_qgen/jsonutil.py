@@ -1,3 +1,10 @@
+"""Robust JSON extraction from LLM output (fences, think traces, truncated objects).
+
+Writers often wrap JSON in markdown, leak ``<think>`` traces, or emit raw
+newlines inside strings. This module prefers the last valid object and can
+fall back to field scanning when ``json.loads`` cannot accept the payload.
+"""
+
 from __future__ import annotations
 
 import json
@@ -5,7 +12,7 @@ import re
 from typing import Any
 
 
-_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+_FENCE = re.compile(r"```([a-zA-Z0-9+-]*)\s*(.*?)\s*```", re.DOTALL)
 _CODE_FENCE = re.compile(r"```[\w+-]*\n.*?```", re.DOTALL)
 _THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _KEYS = ("question", "tests_claim", "language")
@@ -77,6 +84,7 @@ def _escape_raw_controls_in_strings(text: str) -> str:
 
 
 def _extract_code_fences(text: str) -> tuple[str, list[str]]:
+    """Replace inner code fences with placeholders so JSON parse can succeed."""
     blocks: list[str] = []
 
     def repl(match: re.Match[str]) -> str:
@@ -87,6 +95,7 @@ def _extract_code_fences(text: str) -> tuple[str, list[str]]:
 
 
 def _restore_code_fences(obj: dict[str, Any], blocks: list[str]) -> dict[str, Any]:
+    """Put extracted fenced code back into string fields after JSON parse."""
     out: dict[str, Any] = {}
     for key, value in obj.items():
         if isinstance(value, str):
@@ -99,6 +108,7 @@ def _restore_code_fences(obj: dict[str, Any], blocks: list[str]) -> dict[str, An
 
 
 def _loads_obj(raw: str) -> dict[str, Any] | None:
+    """Parse a dict (or first dict in a list); return None on decode failure."""
     try:
         obj = json.loads(raw)
     except json.JSONDecodeError:
@@ -114,6 +124,7 @@ def _loads_obj(raw: str) -> dict[str, Any] | None:
 
 
 def _scan_objects(raw: str) -> dict[str, Any] | None:
+    """Walk the text for ``{...}`` objects and return the last successful decode."""
     last: dict[str, Any] | None = None
     decoder = json.JSONDecoder()
     for src in (raw, _escape_raw_controls_in_strings(raw)):
@@ -136,6 +147,7 @@ def _scan_objects(raw: str) -> dict[str, Any] | None:
 
 
 def _unescape_json_string(value: str) -> str:
+    """Undo a minimal set of JSON string escapes used by the field scanner."""
     return (
         value.replace("\\n", "\n")
         .replace("\\t", "\t")
@@ -145,6 +157,7 @@ def _unescape_json_string(value: str) -> str:
 
 
 def _field_start(text: str, key: str) -> int | None:
+    """Index of the value start for a JSON object key, or None if missing."""
     m = re.search(rf'"{re.escape(key)}"\s*:\s*', text)
     if not m:
         return None
@@ -152,6 +165,7 @@ def _field_start(text: str, key: str) -> int | None:
 
 
 def _next_key_index(text: str, start: int, keys: tuple[str, ...]) -> int | None:
+    """Earliest sibling-key boundary after ``start`` (comma or newline form)."""
     found: list[int] = []
     for key in keys:
         m = re.search(rf'"\s*,\s*"{re.escape(key)}"\s*:', text[start:])
@@ -166,6 +180,7 @@ def _next_key_index(text: str, start: int, keys: tuple[str, ...]) -> int | None:
 
 
 def _read_jsonish_value(text: str, start: int, end: int | None) -> str:
+    """Slice a possibly unquoted/truncated string value between key boundaries."""
     chunk = text[start : end if end is not None else len(text)].strip()
     if chunk.startswith('"'):
         chunk = chunk[1:]
@@ -181,6 +196,7 @@ def _read_jsonish_value(text: str, start: int, end: int | None) -> str:
 
 
 def _read_short_token(text: str, start: int) -> str | None:
+    """Read a short unquoted or quoted token such as language ``zh`` / ``en``."""
     m = re.match(r'\s*"([A-Za-z_-]{1,16})"', text[start:])
     if m:
         return m.group(1)
@@ -217,6 +233,7 @@ def _scan_fields(text: str) -> dict[str, Any] | None:
 
 
 def _loose_extract(text: str) -> dict[str, Any] | None:
+    """Last-resort regex extraction of question/tests_claim/language fields."""
     scanned = _scan_fields(text)
     if scanned:
         return scanned
@@ -247,24 +264,47 @@ def _loose_extract(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _json_fence_body(raw: str) -> str | None:
+    """Return the body of a ``` / ```json fence that looks like an object.
+
+    Inner ```cuda / ```cpp fences belong to the question string and must not
+    replace the outer JSON payload.
+    """
+    for match in _FENCE.finditer(raw or ""):
+        lang = (match.group(1) or "").strip().lower()
+        body = (match.group(2) or "").strip()
+        if lang in {"", "json"} and body.startswith("{"):
+            return body
+    return None
+
+
 def parse_json_object(text: str) -> dict[str, Any]:
     """Extract a JSON object from model output (prefers the last valid object)."""
     if not text or not text.strip():
         raise ValueError("empty model output")
     raw = strip_think(text)
-    fenced = _FENCE.search(raw)
-    if fenced:
-        raw = fenced.group(1).strip()
-    placeholders, blocks = _extract_code_fences(raw)
-    obj = (
-        _loads_obj(placeholders)
-        or _scan_objects(placeholders)
-        or _loads_obj(raw)
-        or _scan_objects(raw)
-    )
-    if obj is None:
-        raise ValueError(f"could not parse JSON object from: {text[:400]}")
-    return _restore_code_fences(obj, blocks)
+    candidates = [raw]
+    fenced = _json_fence_body(raw)
+    if fenced and fenced not in candidates:
+        candidates.append(fenced)
+    last_obj: dict[str, Any] | None = None
+    for cand in candidates:
+        placeholders, blocks = _extract_code_fences(cand)
+        obj = (
+            _loads_obj(placeholders)
+            or _scan_objects(placeholders)
+            or _loads_obj(cand)
+            or _scan_objects(cand)
+        )
+        if obj is None:
+            continue
+        obj = _restore_code_fences(obj, blocks)
+        if str(obj.get("question") or "").strip():
+            return obj
+        last_obj = obj
+    if last_obj is not None:
+        return last_obj
+    raise ValueError(f"could not parse JSON object from: {text[:400]}")
 
 
 def parse_question_payload(
@@ -274,25 +314,37 @@ def parse_question_payload(
     min_question_chars: int = 24,
     keep_truncated: bool = True,
 ) -> dict[str, Any] | None:
+    """Parse a writer payload, preferring the longest recovered question text.
+
+    Args:
+        text: Raw model output.
+        fallback_claim: Brief claim used when ``tests_claim`` was truncated.
+        min_question_chars: Minimum length before a truncated payload is kept.
+        keep_truncated: If True, accept a question that lost its claim field.
+
+    Returns:
+        Normalized dict with ``question``, ``tests_claim``, and ``language``,
+        or None if no question text could be recovered.
+    """
     if not text or not text.strip():
         return None
     raw = strip_think(text)
-    fenced = _FENCE.search(raw)
-    if fenced:
-        candidate = fenced.group(1).strip()
-        if '"question"' in candidate:
-            raw = candidate
     placeholders, blocks = _extract_code_fences(raw)
     obj = None
     try:
         obj = parse_json_object(text)
     except ValueError:
-        obj = (
-            _scan_fields(placeholders)
-            or _loose_extract(placeholders)
-            or _scan_fields(raw)
-            or _loose_extract(raw)
-        )
+        obj = None
+    scanned = (
+        _scan_fields(placeholders)
+        or _loose_extract(placeholders)
+        or _scan_fields(raw)
+        or _loose_extract(raw)
+    )
+    parsed_q = str((obj or {}).get("question") or "").strip()
+    scanned_q = str((scanned or {}).get("question") or "").strip()
+    if scanned_q and (not parsed_q or len(scanned_q) > len(parsed_q)):
+        obj = scanned
     if obj is None:
         return None
     obj = _restore_code_fences(obj, blocks)

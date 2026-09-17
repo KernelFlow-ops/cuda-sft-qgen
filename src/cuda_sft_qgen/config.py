@@ -1,6 +1,9 @@
+"""Canonical settings loader: CLI args > environment > profile YAML > defaults."""
+
 from __future__ import annotations
 
 import os
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -12,6 +15,7 @@ from cuda_sft_qgen.keys import parse_api_keys
 
 
 def find_project_root() -> Path:
+    """Walk parents from this file until ``pyproject.toml`` is found."""
     here = Path(__file__).resolve()
     for p in [here.parent, *here.parents]:
         if (p / "pyproject.toml").exists():
@@ -20,24 +24,28 @@ def find_project_root() -> Path:
 
 
 def _as_bool(value: str | None, default: bool = False) -> bool:
+    """Parse env-style booleans (1/true/yes/on); None keeps ``default``."""
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _as_int(value: str | None, default: int) -> int:
+    """Parse an int env value; empty/None keeps ``default``."""
     if value is None or value.strip() == "":
         return default
     return int(value)
 
 
 def _as_float(value: str | None, default: float) -> float:
+    """Parse a float env value; empty/None keeps ``default``."""
     if value is None or value.strip() == "":
         return default
     return float(value)
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
+    """Load a mapping YAML file; missing files yield ``{}``."""
     if not path.exists():
         return {}
     with path.open("r", encoding="utf-8") as f:
@@ -47,11 +55,28 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
+def _merge_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Deep-merge mappings; override scalars replace, nested dicts recurse."""
+    merged = deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_config(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
 @dataclass
 class Settings:
+    """Resolved runtime configuration for one pipeline process.
+
+    Path properties join YAML-relative paths against :attr:`root`. Generation
+    and review knobs also accept environment overrides at load time.
+    """
+
     root: Path
-    nvidia_api_key: str
-    nvidia_api_keys: list[str]
+    nvidia_api_key: str = field(repr=False)
+    nvidia_api_keys: list[str] = field(repr=False)
     nvidia_base_url: str
     nvidia_model: str
     thinking_level: str
@@ -95,9 +120,12 @@ class Settings:
     quotas: dict[str, Any] = field(default_factory=dict)
     personas: dict[str, Any] = field(default_factory=dict)
     data_dir_override: Path | None = None
+    raw_config: dict[str, Any] = field(default_factory=dict)
+    profile: str = "default"
 
     @property
     def data_dir(self) -> Path:
+        """Archive directory; CLI/env override wins over YAML ``paths.data_dir``."""
         if self.data_dir_override is not None:
             return self.data_dir_override
         rel = self.default_yaml.get("paths", {}).get("data_dir", "data")
@@ -105,46 +133,114 @@ class Settings:
 
     @property
     def taxonomy_path(self) -> Path:
+        """Resolved path to the CUDA taxonomy YAML."""
         rel = self.default_yaml.get("paths", {}).get(
             "taxonomy", "configs/taxonomy/cuda.yaml"
         )
         return (self.root / rel).resolve()
 
     @property
+    def quotas_path(self) -> Path:
+        """Resolved path to type/difficulty quota YAML."""
+        return (self.root / self.default_yaml.get("paths", {}).get("quotas", "configs/quotas.yaml")).resolve()
+
+    @property
+    def personas_path(self) -> Path:
+        """Resolved path to writer persona YAML."""
+        return (self.root / self.default_yaml.get("paths", {}).get("personas", "configs/personas.yaml")).resolve()
+
+    @property
     def generation(self) -> dict[str, Any]:
+        """Raw ``generation`` mapping from merged YAML."""
         return self.default_yaml.get("generation", {})
 
     @property
     def review(self) -> dict[str, Any]:
+        """Raw ``review`` mapping from merged YAML."""
         return self.default_yaml.get("review", {})
 
     @property
+    def review_model(self) -> str:
+        """Chair model id; defaults to the writer NVIDIA model."""
+        return str(self.review.get("model") or self.nvidia_model)
+
+    @property
+    def knowledge_cfg(self) -> dict[str, Any]:
+        """Knowledge-store worker settings from YAML."""
+        return self.default_yaml.get("knowledge", {})
+
+    @property
     def taxonomy_manager_cfg(self) -> dict[str, Any]:
+        """Taxonomy manager cadence and expansion caps."""
         return (self.default_yaml.get("taxonomy") or {}).get("manager") or {}
 
     @property
     def evolver_fraction(self) -> float:
+        """Share of briefs assigned to Evolver rather than Writer."""
         return float(self.generation.get("evolver_fraction", 0.30))
 
     @property
     def temperature(self) -> float:
+        """Writer sampling temperature from merged generation YAML."""
         return float(self.generation.get("temperature", 1.0))
 
     @property
     def top_p(self) -> float:
+        """Writer nucleus sampling ``top_p``."""
         return float(self.generation.get("top_p", 0.95))
 
     @property
     def max_tokens(self) -> int:
-        return int(self.generation.get("max_tokens", 4096))
+        """Completion budget; ``MAX_TOKENS`` env overrides YAML."""
+        return _as_int(os.getenv("MAX_TOKENS"), int(self.generation.get("max_tokens", 4096)))
+
+    @property
+    def writer_thinking_level(self) -> str:
+        """Writer thinking level; ``WRITER_THINKING_LEVEL`` overrides YAML."""
+        env = os.getenv("WRITER_THINKING_LEVEL")
+        if env and env.strip():
+            return env.strip().lower()
+        raw = self.generation.get("writer_thinking_level")
+        return str(raw or self.thinking_level).strip().lower()
+
+    @property
+    def min_generate_batch(self) -> int:
+        """Smallest generate wave; leftover holes smaller than this flush review."""
+        env = os.getenv("MIN_GENERATE_BATCH")
+        if env and env.strip():
+            return max(1, int(env))
+        raw = self.generation.get("min_generate_batch")
+        if raw is None or raw == "":
+            return max(1, self.writer_concurrency)
+        return max(1, int(raw))
+
+    @property
+    def salvage_inline(self) -> bool:
+        """If True, salvage runs inside generate instead of a dedicated node."""
+        return _as_bool(
+            os.getenv("SALVAGE_INLINE"),
+            bool(self.generation.get("salvage_inline", False)),
+        )
 
     @property
     def sieve_min_chars(self) -> int:
+        """Alias of :attr:`question_min_chars` for older call sites."""
         return int(self.question_min_chars)
 
     @property
     def max_parse_retries(self) -> int:
+        """Extra writer attempts after a local JSON parse failure."""
         return int(self.generation.get("max_parse_retries", 1))
+
+
+def _resolve_data_dir(data_dir: Path | None) -> Path | None:
+    """CLI data_dir wins, then CUDA_SFT_DATA_DIR, else None (use YAML default)."""
+    if data_dir is not None:
+        return Path(data_dir)
+    env = os.getenv("CUDA_SFT_DATA_DIR")
+    if env and env.strip():
+        return Path(env.strip())
+    return None
 
 
 def load_settings(
@@ -154,19 +250,50 @@ def load_settings(
     review_batch_size: int | None = None,
     env_file: Path | None = None,
     data_dir: Path | None = None,
+    profile: str | None = None,
 ) -> Settings:
+    """Canonical configuration loader: CLI > environment > profile > defaults."""
     root = find_project_root()
     load_dotenv(env_file or (root / ".env"), override=False)
 
     default_yaml = _load_yaml(root / "configs" / "default.yaml")
-    quotas = _load_yaml(root / "configs" / "quotas.yaml")
-    personas_raw = _load_yaml(root / "configs" / "personas.yaml")
-    review_cfg = default_yaml.get("review", {})
-    gen_cfg = default_yaml.get("generation", {})
+    profile_name = profile or os.getenv("CUDA_SFT_PROFILE", "default")
+    profile_path = root / "configs" / "profiles" / f"{profile_name}.yaml"
+    if profile_name != "default" and not profile_path.is_file():
+        raise ValueError(f"Unknown configuration profile: {profile_name}")
+    default_yaml = _merge_config(default_yaml, _load_yaml(profile_path))
+    paths = default_yaml.get("paths", {})
+    quotas = _load_yaml(root / paths.get("quotas", "configs/quotas.yaml"))
+    personas_raw = _load_yaml(root / paths.get("personas", "configs/personas.yaml"))
+    planner_yaml = _merge_config(_load_yaml(root / "configs" / "planner.yaml"), {
+        "adaptive_sampling": default_yaml.get("adaptive_sampling", {})
+    })
+    review_cfg = default_yaml.setdefault("review", {})
+    review_cfg["thinking_level"] = os.getenv("REVIEW_THINKING_LEVEL", str(review_cfg.get("thinking_level", "medium"))).strip().lower()
+    review_cfg["max_tokens"] = _as_int(os.getenv("REVIEW_MAX_TOKENS"), int(review_cfg.get("max_tokens", 8192)))
+    gen_cfg = default_yaml.setdefault("generation", {})
+    for env_name, key in (("TEMPERATURE", "temperature"), ("TOP_P", "top_p")):
+        if os.getenv(env_name):
+            gen_cfg[key] = float(os.environ[env_name])
+    if os.getenv("REVIEW_MODEL"):
+        review_cfg["model"] = os.environ["REVIEW_MODEL"]
+    knowledge_cfg = _merge_config({
+        "enabled": True, "audit_interval_seconds": 86400,
+        "audit_batch_size": 100, "worker_poll_seconds": 5,
+        "official_sources": [],
+    }, default_yaml.get("knowledge", {}))
+    knowledge_cfg["enabled"] = _as_bool(os.getenv("KNOWLEDGE_ENABLED"), knowledge_cfg["enabled"])
+    for key in ("audit_interval_seconds", "audit_batch_size", "worker_poll_seconds"):
+        knowledge_cfg[key] = _as_int(os.getenv(f"KNOWLEDGE_{key.upper()}"), int(knowledge_cfg[key]))
+        if knowledge_cfg[key] < 1:
+            raise ValueError(f"knowledge.{key} must be positive")
+    default_yaml["knowledge"] = knowledge_cfg
 
     thinking = os.getenv("THINKING_LEVEL", "medium").strip().lower()
-    if thinking not in {"none", "medium", "high"}:
-        raise ValueError(f"THINKING_LEVEL must be none|medium|high, got {thinking}")
+    if thinking not in {"none", "low", "low_effort", "medium", "high"}:
+        raise ValueError(
+            f"THINKING_LEVEL must be none|low|medium|high, got {thinking}"
+        )
 
     provider = os.getenv("EMBEDDING_PROVIDER", "nvidia").strip().lower()
     if provider not in {"nvidia", "huggingface", "fake"}:
@@ -186,7 +313,8 @@ def load_settings(
         int(gen_cfg.get("embed_oversub", 2)),
     )
     n_keys = max(1, len(api_keys))
-    writer_concurrency = n_keys * max(1, llm_per_key)
+    writer_concurrency = max(1, _as_int(os.getenv("WRITER_CONCURRENCY"),
+        int(gen_cfg.get("writer_concurrency", n_keys * max(1, llm_per_key)))))
 
     settings = Settings(
         root=root,
@@ -266,7 +394,7 @@ def load_settings(
         salvage_llm_attempts=_as_int(os.getenv("SALVAGE_LLM_ATTEMPTS"), 1),
         salvage_thinking_level=(os.getenv("SALVAGE_THINKING_LEVEL") or "none").strip().lower(),
         salvage_max_tokens=_as_int(os.getenv("SALVAGE_MAX_TOKENS"), 4096),
-        salvage_use_llm=_as_bool(os.getenv("SALVAGE_USE_LLM"), True),
+        salvage_use_llm=_as_bool(os.getenv("SALVAGE_USE_LLM"), False),
         retry_drain_enabled=_as_bool(os.getenv("RETRY_DRAIN_ENABLED"), True),
         retry_max_attempts=_as_int(os.getenv("RETRY_MAX_ATTEMPTS"), 5),
         retry_base_cooldown_sec=_as_float(os.getenv("RETRY_BASE_COOLDOWN_SEC"), 15.0),
@@ -287,7 +415,8 @@ def load_settings(
         default_yaml=default_yaml,
         quotas=quotas,
         personas=personas_raw.get("personas", {}),
-        data_dir_override=Path(data_dir) if data_dir is not None else None,
+        data_dir_override=_resolve_data_dir(data_dir),
+        raw_config=planner_yaml,
+        profile=profile_name,
     )
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
     return settings

@@ -1,3 +1,9 @@
+"""Template fingerprints: skeletonize CUDA questions, then SimHash + Jaccard.
+
+APIs, architectures, numbers, and code fences are replaced with slots so
+near-duplicate stems collide even when literals differ.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -137,18 +143,21 @@ _TOKEN = re.compile(r"\{[A-Z]+\}|[a-zA-Z_]+|[\u4e00-\u9fff]+")
 
 
 def _replace_apis(text: str) -> str:
+    """Replace known CUDA/CUTLASS APIs with ``{API}`` (longest match first)."""
     for api in _CUDA_APIS:
         text = re.sub(re.escape(api), "{API}", text, flags=re.IGNORECASE)
     return text
 
 
 def _replace_arch(text: str) -> str:
+    """Replace SM/arch names with ``{ARCH}``."""
     for pat in _ARCH_PATTERNS:
         text = re.sub(pat, "{ARCH}", text, flags=re.IGNORECASE)
     return text
 
 
 def speech_act(text: str) -> str:
+    """Coarse illocution label (why/how/debug/compare/...) for the skeleton prefix."""
     low = text.lower()
     for cre, label in _SPEECH_ACTS:
         if cre.search(low):
@@ -171,6 +180,7 @@ def _length_bucket(length: int) -> str:
 
 
 def skeletonize(text: str) -> str:
+    """Normalize and slot-replace ``text``; prefix with speech-act and length bucket."""
     text = normalize_text(text)
     text = _CODE_FENCE.sub(" {CODE} ", text)
     text = _replace_apis(text)
@@ -195,10 +205,12 @@ def skeletonize(text: str) -> str:
 
 
 def skeleton_tokens(skeleton: str) -> set[str]:
+    """Token set used by Jaccard and SimHash (slots, Latin words, CJK runs)."""
     return {t for t in _TOKEN.findall(skeleton) if t}
 
 
 def token_jaccard(a: str, b: str) -> float:
+    """Jaccard similarity of skeleton token sets; empty/empty is 1.0."""
     sa, sb = skeleton_tokens(a), skeleton_tokens(b)
     if not sa and not sb:
         return 1.0
@@ -208,6 +220,7 @@ def token_jaccard(a: str, b: str) -> float:
 
 
 def simhash64(text: str) -> int:
+    """64-bit SimHash of skeleton tokens (Blake2b per token)."""
     tokens = skeleton_tokens(text) or {text}
     acc = [0] * 64
     for tok in tokens:
@@ -223,20 +236,25 @@ def simhash64(text: str) -> int:
 
 
 def hamming64(a: int, b: int) -> int:
+    """Hamming distance between two 64-bit SimHash values."""
     return (a ^ b).bit_count()
 
 
 @dataclass(frozen=True)
 class Fingerprint:
+    """L0 exact hash, L1 skeleton string, and 64-bit SimHash."""
+
     exact: str
     skeleton: str
     simhash: int
 
     def hex_simhash(self) -> str:
+        """Zero-padded 16-character hex of the SimHash."""
         return f"{self.simhash:016x}"
 
 
 def fingerprint(question: str) -> Fingerprint:
+    """Build the three-layer fingerprint used by :class:`Deduper`."""
     skel = skeletonize(question)
     return Fingerprint(
         exact=exact_hash(question),

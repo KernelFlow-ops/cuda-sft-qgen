@@ -1,3 +1,9 @@
+"""Live concurrency probes against the NVIDIA API key pool.
+
+Used by ``cuda-sft-qgen probe-concurrency`` to confirm that LLM and embedding
+calls overlap across keys before a long generate run.
+"""
+
 from __future__ import annotations
 
 import json
@@ -14,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def _run_parallel(n: int, fn) -> tuple[float, list]:
+    """Run ``fn(i)`` for ``i in range(n)`` concurrently; return (seconds, results)."""
     t0 = time.monotonic()
     out: list = [None] * n
     with ThreadPoolExecutor(max_workers=n) as ex:
@@ -25,6 +32,11 @@ def _run_parallel(n: int, fn) -> tuple[float, list]:
 
 
 def probe_concurrency(data_dir: Path | None = None) -> dict:
+    """Issue parallel LLM and embedding calls at pool capacity.
+
+    Raises:
+        RuntimeError: If no real API keys are configured (fake mode is refused).
+    """
     settings = load_settings(data_dir=data_dir)
     if settings.fake_llm or not settings.nvidia_api_keys:
         raise RuntimeError("Need real NVIDIA_API_KEY / _2 / _3 in .env")
@@ -104,6 +116,7 @@ def probe_concurrency(data_dir: Path | None = None) -> dict:
 
 
 def probe_pipeline(tmp: Path, *, target: int = 6, batch: int = 6) -> dict:
+    """Run a tiny generate pipeline and report accepted counts plus pool overlap."""
     settings = load_settings(target=target, review_batch_size=batch, data_dir=tmp)
     rt = build_runtime(settings)
     token = set_runtime(rt)

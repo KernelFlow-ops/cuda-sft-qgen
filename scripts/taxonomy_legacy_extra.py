@@ -3,6 +3,7 @@ from __future__ import annotations
 
 
 def L(lid, claim, types, difficulty, kind, hints=None):
+    """Build one extra-leaf record for grafting onto T01–T15."""
     rec = {
         "id": lid,
         "claim": claim,

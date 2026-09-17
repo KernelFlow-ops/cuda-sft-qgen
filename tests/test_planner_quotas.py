@@ -1,3 +1,5 @@
+"""Tests for quota-weighted brief sampling and steering residuals."""
+
 from __future__ import annotations
 
 import random

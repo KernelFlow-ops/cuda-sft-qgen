@@ -1,6 +1,14 @@
+"""Compile the LangGraph pipeline and run it under a data-dir lock.
+
+Prefers the concurrent producer/reviewer coordinator when
+``generation.concurrent_pipeline`` is true (the default). Sequential
+``StateGraph.invoke`` remains available for debugging.
+"""
+
 from __future__ import annotations
 
 import logging
+import fcntl
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
@@ -27,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 def build_graph():
+    """Compile the sequential LangGraph: bootstrap → plan → generate → review."""
     g = StateGraph(PipelineState)
     g.add_node("bootstrap", bootstrap_node)
     g.add_node("architect", architect_node)
@@ -54,6 +63,7 @@ def build_graph():
 
 
 def initial_state(*, rebuild_taxonomy: bool = False) -> PipelineState:
+    """Empty run state; counters and paths are filled by bootstrap."""
     return {
         "rebuild_taxonomy": rebuild_taxonomy,
         "pending": [],
@@ -73,20 +83,76 @@ def run_pipeline(
     rebuild_taxonomy: bool = False,
     runtime: Runtime | None = None,
 ) -> dict[str, Any]:
+    """Run generate+review until target, iteration limit, or pending-only stop.
+
+    Acquires ``data_dir/pipeline.lock`` so two processes cannot share one
+    archive. Starts the knowledge worker when knowledge and taxonomy manager
+    are enabled.
+
+    Args:
+        settings: Loaded runtime settings.
+        rebuild_taxonomy: If True, Architect expands sparse L2 leaves first.
+        runtime: Optional pre-built runtime (tests); otherwise constructed here.
+
+    Returns:
+        Final pipeline state dict with accepted/rejected/pending counts.
+
+    Raises:
+        RuntimeError: If another pipeline already holds the data-dir lock.
+    """
     own_runtime = runtime is None
     rt = runtime or build_runtime(settings)
-    token = set_runtime(rt)
-    app = build_graph()
-    recursion_limit = max(200, settings.max_iterations * 8)
     try:
-        result = app.invoke(
-            initial_state(rebuild_taxonomy=rebuild_taxonomy),
-            {"recursion_limit": recursion_limit},
-        )
+        run_lock = (settings.data_dir / "pipeline.lock").open("a")
+    except Exception:
+        if own_runtime:
+            rt.close()
+        raise
+    try:
+        fcntl.flock(run_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        run_lock.close()
+        if own_runtime:
+            rt.close()
+        raise RuntimeError(f"Another generation pipeline is using {settings.data_dir}") from None
+    token = set_runtime(rt)
+    # Each planner loop can take planner + generate + salvage + drain +
+    # review_score + chair + archive + taxonomy_manager (~8-10 nodes).
+    recursion_limit = max(200, settings.max_iterations * 12)
+    try:
+        rt.refresh_knowledge(force=True)
+        rt.reconcile_index()
+        if (not settings.fake_llm and settings.knowledge_cfg.get("enabled", True)
+                and settings.taxonomy_manager_cfg.get("enabled", True)):
+            from cuda_sft_qgen.knowledge_worker import KnowledgeWorker
+            rt.knowledge_worker = KnowledgeWorker(
+                rt.knowledge, rt.llm, embedder=rt.embedder, settings=settings,
+                taxonomy=rt.taxonomy, archive=rt.store,
+            )
+            rt.knowledge_worker.start()
+        if settings.generation.get("concurrent_pipeline", True):
+            from cuda_sft_qgen.graph.pipeline import run_concurrent
+            result = run_concurrent(rt, initial_state(rebuild_taxonomy=rebuild_taxonomy))
+        else:
+            result = build_graph().invoke(
+                initial_state(rebuild_taxonomy=rebuild_taxonomy),
+                {"recursion_limit": recursion_limit},
+            )
+        rt.refresh_knowledge(force=True)
+        result["accepted_count"] = len(rt.store.load_accepted())
+        result["rejected_count"] = len(rt.store.load_rejected())
+        result["pending"] = [q.model_dump() for q in rt.store.load_pending()]
+        result["done"] = result["accepted_count"] >= settings.target_question_count
+        if not result["done"] and result["pending"]:
+            result["status"] = "review_pending"
         rt.store.compute_stats()
         return result
     finally:
+        if rt.knowledge_worker is not None:
+            rt.knowledge_worker.stop()
         reset_runtime(token)
+        fcntl.flock(run_lock, fcntl.LOCK_UN)
+        run_lock.close()
         if own_runtime:
             closer = getattr(rt, "close", None)
             if callable(closer):

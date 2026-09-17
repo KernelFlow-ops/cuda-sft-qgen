@@ -16,6 +16,9 @@ Existing leaves on this L2 (do NOT restate, retitle, or paraphrase these claims;
 Near-duplicate warnings (omit any candidate that matches these semantically):
 {{near_dup_warnings}}
 
+Pack coverage gaps (cover if missing; skip if already present in existing leaves):
+{{gap_prompts}}
+
 Rules for this call:
 - Prefix every new `l3_id` with `{{l2_id}}_` (snake_case).
 - Copy `domain_id`, `l2_id`, `l2_name` verbatim from this payload (`l2_name` may contain non-English tokens).

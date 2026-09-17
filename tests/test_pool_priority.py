@@ -1,3 +1,5 @@
+"""Tests that the API key pool serves writers ahead of sieve/chair waiters."""
+
 from __future__ import annotations
 
 import threading

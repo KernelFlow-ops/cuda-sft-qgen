@@ -1,3 +1,5 @@
+"""Three-level CUDA taxonomy: Domain → L2 category → L3 claim leaf."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
@@ -18,6 +20,8 @@ LEAF_KINDS = (
 
 @dataclass(frozen=True)
 class Leaf:
+    """One L3 claim: types, difficulty band, kind, sources, and retirement flag."""
+
     domain_id: str
     domain_name: str
     l2_id: str
@@ -29,18 +33,26 @@ class Leaf:
     hints: tuple[str, ...] = ()
     kind: str = ""
     retired: bool = False
+    revision: int = 1
+    status: str = "legacy_unreviewed"
+    sources: tuple[str, ...] = ()
+    applicability: dict[str, Any] = field(default_factory=dict)
 
     @property
     def path(self) -> list[str]:
+        """``[domain_id, l2_id, l3_id]`` navigation path."""
         return [self.domain_id, self.l2_id, self.l3_id]
 
     @property
     def path_key(self) -> str:
+        """Dotted path used as a stable leaf key."""
         return ".".join(self.path)
 
 
 @dataclass
 class Taxonomy:
+    """In-memory taxonomy plus optional per-domain YAML paths for dumps."""
+
     version: int
     name: str
     leaves: list[Leaf]
@@ -49,15 +61,18 @@ class Taxonomy:
     domain_files: dict[str, Path] = field(default_factory=dict)
 
     def leaf_by_key(self, key: str) -> Leaf | None:
+        """Look up a leaf by dotted path or bare ``l3_id``."""
         for leaf in self.leaves:
             if leaf.path_key == key or leaf.l3_id == key:
                 return leaf
         return None
 
     def l1_ids(self) -> list[str]:
+        """Domain ids in YAML order."""
         return [d["id"] for d in self.domains]
 
     def l2_keys(self) -> list[str]:
+        """``domain.l2`` keys in YAML order."""
         keys: list[str] = []
         for d in self.domains:
             for c in d.get("children", []):
@@ -65,6 +80,7 @@ class Taxonomy:
         return keys
 
     def iter_l2(self) -> Iterator[tuple[str, str, dict[str, Any]]]:
+        """Yield ``(domain_id, domain_name, l2_child_dict)`` for every L2 node."""
         for d in self.domains:
             for c in d.get("children", []):
                 yield d["id"], d["name"], c
@@ -93,6 +109,10 @@ def _leaf_from_item(
         hints=tuple(item.get("hints") or []),
         kind=kind,
         retired=bool(item.get("retired") or False),
+        revision=int(item.get("revision") or 1),
+        status=str(item.get("status") or "legacy_unreviewed"),
+        sources=tuple(item.get("sources") or []),
+        applicability=dict(item.get("applicability") or {}),
     )
 
 
@@ -121,6 +141,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 def load_taxonomy(path: Path) -> Taxonomy:
+    """Load the index YAML and any ``include``d domain files into a Taxonomy."""
     raw = _load_yaml(path)
     domain_files: dict[str, Path] = {}
     includes = raw.get("include")
@@ -163,6 +184,7 @@ def _dump_yaml(path: Path, payload: dict[str, Any]) -> None:
 
 
 def dump_taxonomy(taxonomy: Taxonomy, path: Path | None = None) -> None:
+    """Write the index and, when ``domain_files`` is set, each domain YAML."""
     path = path or taxonomy.index_path
     if path is None:
         raise ValueError("dump_taxonomy requires a path")
@@ -216,6 +238,9 @@ def _leaf_record(item: dict[str, Any], l3_id: str, claim: str) -> dict[str, Any]
         rec["hints"] = list(hints)
     if item.get("retired"):
         rec["retired"] = True
+    for key in ("revision", "status", "sources", "applicability"):
+        if item.get(key) is not None:
+            rec[key] = item[key]
     return rec
 
 
@@ -225,6 +250,7 @@ def merge_leaves(
     *,
     allow_new_domains: bool = False,
 ) -> int:
+    """Insert new L3 records into existing L2 nodes. Returns the number added."""
     """Merge architect-produced leaves into the in-memory taxonomy. Returns added count."""
     existing = {leaf.l3_id for leaf in taxonomy.leaves}
     added = 0
@@ -313,7 +339,7 @@ def patch_leaf(
 
 
 def set_leaf_retired(taxonomy: Taxonomy, l3_id: str, retired: bool = True) -> bool:
-    """Set retired on in-memory domains + Leaf list. Return True if found."""
+    """Mark a leaf retired (or restore it) in both the Leaf list and domain YAML."""
     found = False
     for i, leaf in enumerate(taxonomy.leaves):
         if leaf.l3_id == l3_id:
