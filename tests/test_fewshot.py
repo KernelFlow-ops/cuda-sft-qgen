@@ -59,6 +59,16 @@ def _brief(**kwargs) -> QuestionBrief:
     return QuestionBrief.model_validate(data)
 
 
+def test_seed_corpus_loads_bilingual_stems():
+    from cuda_sft_qgen.prompts.fewshot import load_seed_questions
+
+    seeds = load_seed_questions()
+    assert len(seeds) >= 8
+    langs = {q.language for q in seeds}
+    assert "zh" in langs and "en" in langs
+    assert all((q.question or "").strip() and (q.tests_claim or "").strip() for q in seeds)
+
+
 def test_quality_reject_filters_429():
     assert is_quality_reject("sieve_too_short")
     assert is_quality_reject("L1_template")

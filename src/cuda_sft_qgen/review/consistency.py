@@ -321,4 +321,6 @@ def consistency_payload(question: Question) -> dict[str, Any]:
         "tests_claim": (question.tests_claim or ""),
         "question": (question.question or ""),
         "rule_reason": consistency_reason(question),
+        "leaf_soft_suspect": leaf_soft_suspect(question),
+        "tests_claim_alignment": validate_tests_claim_alignment(question),
     }

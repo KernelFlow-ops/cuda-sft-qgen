@@ -31,7 +31,7 @@ cuda-sft-qgen = "cuda_sft_qgen.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-cuda_sft_qgen = ["prompts/*.md", "prompts/*.yaml", "prompts/layers/*.md", "prompts/taxonomy/*.md", "prompts/taxonomy/*.yaml", "viz/*.html"]
+cuda_sft_qgen = ["prompts/*.md", "prompts/*.yaml", "prompts/*.jsonl", "prompts/layers/*.md", "prompts/taxonomy/*.md", "prompts/taxonomy/*.yaml", "viz/*.html"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

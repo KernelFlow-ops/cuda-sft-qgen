@@ -81,6 +81,30 @@ def test_planner_node_with_pending(fake_runtime, sample_question, sample_steerin
     assert result["iteration"] == 3
 
 
+def test_planner_node_generate_room_keeps_writer_pool_size(
+    fake_runtime, sample_question, sample_steering_brief
+):
+    """Concurrent path plans a writer-pool wave, not fill-to-review-batch."""
+    set_runtime(fake_runtime)
+    fake_runtime.settings.target_question_count = 100
+    fake_runtime.settings.review_batch_size = 20
+    pending = [sample_question(id=f"q{i}").to_jsonl() for i in range(6)]
+    result = planner_node(
+        {
+            "accepted_count": 10,
+            "pending": pending,
+            "target": 100,
+            "review_batch_size": 20,
+            "generate_room": 30,
+            "steering_brief": sample_steering_brief().model_dump(),
+            "iteration": 2,
+        }
+    )
+    pool_n = max(fake_runtime.settings.min_generate_batch, fake_runtime.settings.writer_concurrency)
+    assert len(result["batch_briefs"]) == pool_n
+    assert result["status"].startswith("planned_")
+
+
 def test_planner_node_skip_plan_when_full(fake_runtime, sample_question, sample_steering_brief):
     """Test planner node skips when pending is already full."""
     set_runtime(fake_runtime)

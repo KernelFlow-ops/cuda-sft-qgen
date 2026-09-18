@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 
-from cuda_sft_qgen.keys import PRI_SIEVE, PRI_WRITER, build_key_pool
+from cuda_sft_qgen.keys import PRI_CHAIR, PRI_SIEVE, PRI_WRITER, build_key_pool
 from cuda_sft_qgen.llm import FakeLLM
 from cuda_sft_qgen.models import Question
 from cuda_sft_qgen.sieve import llm_sieve
@@ -50,6 +50,48 @@ def test_writer_priority_beats_sieve():
     t_low.join(2)
     assert order, "waiters never acquired"
     assert order[0] == "writer"
+
+
+def test_chair_reserve_takes_a_slot_while_writers_wait():
+    """A reserved chair lane is granted even if a writer is also queued."""
+    pool = build_key_pool(
+        ["k1", "k2"],
+        base_url="https://example.invalid/v1",
+        llm_per_key=1,
+        embed_per_key=1,
+        embed_oversub=1,
+        llm_chair_reserve=1,
+    )
+    held_a = pool.acquire("llm", priority=PRI_WRITER)
+    held_b = pool.acquire("llm", priority=PRI_WRITER)
+    order: list[str] = []
+    started_chair = threading.Event()
+    started_writer = threading.Event()
+
+    def worker(name: str, pri: int, started: threading.Event) -> None:
+        started.set()
+        slot = pool.acquire("llm", priority=pri)
+        order.append(name)
+        time.sleep(0.05)
+        pool.release("llm", slot)
+
+    t_chair = threading.Thread(target=worker, args=("chair", PRI_CHAIR, started_chair))
+    t_writer = threading.Thread(target=worker, args=("writer", PRI_WRITER, started_writer))
+    t_chair.start()
+    started_chair.wait(1)
+    t_writer.start()
+    started_writer.wait(1)
+    for _ in range(80):
+        if pool.waiter_count("llm") >= 2:
+            break
+        time.sleep(0.01)
+    pool.release("llm", held_a)
+    t_chair.join(2)
+    assert order, "no waiter acquired after first release"
+    assert order[0] == "chair"
+    pool.release("llm", held_b)
+    t_writer.join(2)
+    assert "writer" in order
 
 
 def test_llm_sieve_uses_low_priority():

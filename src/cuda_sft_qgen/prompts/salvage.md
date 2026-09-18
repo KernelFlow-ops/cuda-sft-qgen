@@ -22,11 +22,11 @@ Input contains a raw model dump that should have been:
 - If question references code but code is truncated, preserve what exists; do NOT complete it
 
 ### 3. tests_claim Reconstruction
-- If tests_claim is missing or empty, reconstruct from:
-  * Provided CLAIM: {{l3_claim}}
-  * Question content: what mechanism does this question actually test?
+- If tests_claim is present, copy it faithfully. Do not "improve" it.
+- If tests_claim is missing or empty, reconstruct ONLY from the question text (what the stem actually asks).
+- Do NOT copy CLAIM={{l3_claim}} as tests_claim. The leaf claim is background, not the item's tests_claim.
 - tests_claim MUST be a falsifiable sentence (not a title, not a question)
-- tests_claim MUST share at least ONE strong token with CLAIM or question content
+- tests_claim MUST share at least ONE strong token with the question content
 - Strong tokens: cuda* APIs, __* intrinsics, sm_XX, architecture names (Hopper/Ampere), PTX ops, CuTe primitives
 
 Examples:

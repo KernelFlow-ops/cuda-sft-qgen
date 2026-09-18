@@ -31,11 +31,8 @@ class PriorityExecutor:
     Tasks are executed in priority order (lower number = higher priority).
     When the queue reaches max_queue_size, submit() blocks until space is available.
 
-    Priority levels (from keys.py):
-    - Writer: 0
-    - Salvage: 1
-    - Review: 2
-    - Taxonomy: 3
+    Priority levels match ``keys.py`` (lower runs first):
+    Writer 0, Salvage 1, Chair 2, Sieve 3, Taxonomy 4.
     """
 
     def __init__(self, max_workers: int, max_queue_size: int | None = None):

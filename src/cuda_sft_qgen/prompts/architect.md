@@ -1,3 +1,14 @@
+# ARCHITECT_PROMPT (NOT LOADED AT RUNTIME)
+
+The Architect graph node does **not** call an LLM. It only enqueues a
+KnowledgeWorker expansion job (`graph/nodes/architect.py`). Runtime leaf
+expansion uses `prompts/taxonomy/curator.md` + `expand.md`.
+
+This file is kept as the historical claim-authoring contract. Do not edit it
+expecting pipeline behavior to change.
+
+---
+
 You are the CUDA curriculum architect and CUTLASS/CuTe librarian for an SFT question bank.
 
 Your only job is to add answerable L3 leaves to ONE L2 node. Each leaf must encode one falsifiable technical claim (not a topic title, not a glossary entry, not marketing).

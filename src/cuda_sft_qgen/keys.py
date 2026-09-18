@@ -124,6 +124,11 @@ class ApiKeyPool:
     _effective_cap: dict[str, int] = field(default_factory=dict)
     _rl_streak: dict[str, int] = field(default_factory=lambda: {"llm": 0, "embed": 0})
     _ok_streak: dict[str, int] = field(default_factory=lambda: {"llm": 0, "embed": 0})
+    llm_chair_reserve: int = 0
+    inflight_band: dict[str, int] = field(
+        default_factory=lambda: {"writer": 0, "chair": 0, "other": 0}
+    )
+    _hold_pri: dict[tuple[int, str], int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Initialize per-kind acquire counters, waiter heaps, and caps."""
@@ -139,6 +144,9 @@ class ApiKeyPool:
         }
         self._rl_streak = {"llm": 0, "embed": 0}
         self._ok_streak = {"llm": 0, "embed": 0}
+        self.inflight_band = {"writer": 0, "chair": 0, "other": 0}
+        self._hold_pri = {}
+        self.llm_chair_reserve = max(0, int(self.llm_chair_reserve or 0))
 
     @property
     def n_keys(self) -> int:
@@ -207,11 +215,80 @@ class ApiKeyPool:
                 return slot
         return None
 
+    @staticmethod
+    def _band(priority: int) -> str:
+        """Map LLM priority onto writer / chair / other occupancy bands."""
+        if priority <= PRI_SALVAGE:
+            return "writer"
+        if priority == PRI_CHAIR:
+            return "chair"
+        return "other"
+
+    def _active_waiters(self, kind: str) -> list[_Waiter]:
+        """Non-cancelled waiters for ``kind`` (caller holds ``_cv``)."""
+        return [w for w in self._waiters.get(kind, []) if not w.cancelled]
+
+    def _can_grant(self, kind: str, waiter: _Waiter, cap: int) -> bool:
+        """True when ``waiter`` may take a free slot under the current policy.
+
+        Default heap: lower priority number always wins. When
+        ``llm_chair_reserve`` is set, chair waiters keep that many slots even
+        if writers are queued, so generate and review overlap.
+        """
+        if self.inflight[kind] >= cap:
+            return False
+        if kind != "llm":
+            head = self._waiters[kind][0] if self._waiters[kind] else None
+            return head is waiter
+        reserve = 0
+        if self.llm_chair_reserve > 0 and cap >= 2:
+            reserve = min(int(self.llm_chair_reserve), cap - 1)
+        waiters = self._active_waiters("llm")
+        if reserve <= 0:
+            head = min(waiters, key=lambda w: (w.priority, w.seq)) if waiters else None
+            return head is waiter
+        chair_wait = any(w.priority == PRI_CHAIR for w in waiters)
+        writer_wait = any(w.priority <= PRI_SALVAGE for w in waiters)
+        writer_cap = cap - reserve if chair_wait else cap
+
+        def head_of(pred) -> _Waiter | None:
+            cands = [w for w in waiters if pred(w)]
+            if not cands:
+                return None
+            return min(cands, key=lambda w: (w.priority, w.seq))
+
+        band = self._band(waiter.priority)
+        if band == "writer":
+            return (
+                head_of(lambda w: w.priority <= PRI_SALVAGE) is waiter
+                and self.inflight_band["writer"] < writer_cap
+            )
+        if band == "chair":
+            if head_of(lambda w: w.priority == PRI_CHAIR) is not waiter:
+                return False
+            if self.inflight_band["chair"] < reserve:
+                return True
+            return (not writer_wait) or self.inflight_band["writer"] >= writer_cap
+        head = min(waiters, key=lambda w: (w.priority, w.seq)) if waiters else None
+        return head is waiter
+
+    def llm_busy_for_taxonomy(self) -> bool:
+        """True when a taxonomy call would steal a slot from writer or chair."""
+        with self._cv:
+            cap = max(1, int(self._effective_cap.get("llm", self.llm_capacity)))
+            if self.inflight.get("llm", 0) >= cap:
+                return True
+            return any(
+                not w.cancelled and w.priority <= PRI_CHAIR
+                for w in self._waiters.get("llm") or []
+            )
+
     def acquire(self, kind: str, priority: int = 0) -> KeySlot:
         """Block until a slot of ``kind`` is available at this priority.
 
         Embedding waiters ignore ``priority`` (always FIFO). LLM waiters use a
-        heap so writers run ahead of salvage/chair/taxonomy.
+        heap so writers run ahead of salvage/chair/taxonomy, except that
+        ``llm_chair_reserve`` slots stay available to chair waiters.
 
         Args:
             kind: ``llm`` or ``embed``.
@@ -235,12 +312,13 @@ class ApiKeyPool:
                     while self._waiters[kind] and self._waiters[kind][0].cancelled:
                         heapq.heappop(self._waiters[kind])
                     cap = max(1, int(self._effective_cap.get(kind, self.llm_capacity)))
-                    head = self._waiters[kind][0] if self._waiters[kind] else None
-                    if head is waiter and self.inflight[kind] < cap:
+                    if self._can_grant(kind, waiter, cap):
                         slot = self._try_take_unlocked(kind, now)
                         if slot is not None:
                             waiter.cancelled = True
-                            heapq.heappop(self._waiters[kind])
+                            band = self._band(pri)
+                            self.inflight_band[band] = self.inflight_band.get(band, 0) + 1
+                            self._hold_pri[(threading.get_ident(), kind)] = pri
                             return slot
                     soonest: float | None = None
                     for s in self.slots:
@@ -260,7 +338,12 @@ class ApiKeyPool:
     def release(self, kind: str, slot: KeySlot) -> None:
         """Return a slot and wake waiters."""
         slot.sem(kind).release()
+        tid = threading.get_ident()
         with self._cv:
+            pri = self._hold_pri.pop((tid, kind), None)
+            if pri is not None:
+                band = self._band(pri)
+                self.inflight_band[band] = max(0, self.inflight_band.get(band, 0) - 1)
             self.inflight[kind] = max(0, self.inflight[kind] - 1)
             self._cv.notify_all()
 
@@ -341,6 +424,7 @@ def build_key_pool(
     embed_per_key: int,
     embed_oversub: int = 2,
     timeout: float = 600.0,
+    llm_chair_reserve: int = 0,
 ) -> ApiKeyPool:
     """Construct OpenAI-compatible clients and per-key semaphores.
 
@@ -389,9 +473,16 @@ def build_key_pool(
         len(slots) * llm_per_key,
         len(slots) * embed_slots,
     )
+    cap = len(slots) * llm_per_key
+    reserve = max(0, int(llm_chair_reserve or 0))
+    if reserve > 0 and cap >= 2:
+        reserve = min(max(reserve, cap // 3), cap - 1)
+    else:
+        reserve = 0
     return ApiKeyPool(
         slots=slots,
         llm_per_key=llm_per_key,
         embed_per_key=embed_per_key,
         embed_oversub=embed_oversub,
+        llm_chair_reserve=reserve,
     )

@@ -35,7 +35,22 @@ Apply exactly ONE primary operator. Name it in `tests_claim` and in the JSON `op
    - GOOD: "add __ldg loads" → "which counter: l1tex__t_sectors_pipe_lsu_mem_global_op_ld?"
    - BAD: "how would you profile this?" without specific metrics
    - MUST: question names specific Nsight Compute counter or metric category
+   - Only when leaf kind is profiling/mechanism/failure, not syntax-only API trivia
+
+6. **compare** — two architectures, APIs, or layouts; one falsifiable difference
+   - GOOD: "sm_80 cp.async vs sm_90 TMA: which launch is legal for this tensormap?"
+   - BAD: "compare Hopper and Ampere" with no concrete constraint
+   - MUST: name both sides and the observable that differs
+
+7. **counterfactual** — flip one premise and ask what breaks
+   - GOOD: "same kernel, but drop __syncthreads: which race is now possible?"
+   - BAD: "what if we used a different GPU?"
+   - MUST: the flipped premise is explicit and the failure is unique
+
+Match the operator to the leaf kind. Do not apply profiler to a syntax-only API leaf.
 
 Stay answerable and on-leaf. Off-leaf (forbidden): TMA claim + cudaMalloc stem; bank-conflict claim + global-only stem.
+
+The evolved stem must stay internally consistent: code, counts, masks, and `tests_claim` agree; exactly one correct option when a unique answer is requested; no leaked key in format examples.
 
 This layer does not change the JSON schema. Still return `question`, `tests_claim`, `language`, `operator`.

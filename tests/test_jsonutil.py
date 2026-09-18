@@ -94,7 +94,10 @@ def test_truncated_keeps_question():
         keep_truncated=True,
     )
     assert obj is not None
-    assert obj["tests_claim"] == "syncthreads deadlock"
+    assert "json_truncated" in (obj.get("warnings") or [])
+    assert obj["tests_claim"]
+    assert obj["tests_claim"] != "syncthreads deadlock"
+    assert "__syncthreads" in obj["tests_claim"]
 
 
 def test_think_tag_stripped():

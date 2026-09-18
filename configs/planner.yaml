@@ -8,7 +8,8 @@ adaptive_sampling:
   epsilon: 0.15
 
   # Health score weights (must sum to 1.0)
-  accept_weight: 0.6     # Weight for accept_rate in health calculation
+  # accept_weight now scales (1 - easy_score); high accept on easy leaves is penalized.
+  accept_weight: 0.6
   coverage_weight: 0.4   # Weight for coverage_gap in health calculation
 
   # Target questions per leaf for coverage calculation

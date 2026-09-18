@@ -1,4 +1,9 @@
-"""Throughput gate: real 10-question generate+review with knowledge enabled."""
+"""Throughput and quality gate for a 10-question generate+review run.
+
+Compares wall time and accept rate against a baseline, and records error
+taxonomy plus a sample of stems with private reference answers. CUDA
+correctness is the chair's job; this module only measures process health.
+"""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -9,9 +14,11 @@ import os
 import re
 from pathlib import Path
 import time
+from collections import Counter
 from typing import Any
 
 from cuda_sft_qgen.graph.app import run_pipeline
+from cuda_sft_qgen.models import Question
 from cuda_sft_qgen.observability import get_metrics
 from cuda_sft_qgen.runtime import build_runtime
 from cuda_sft_qgen.taxonomy import dump_taxonomy, load_taxonomy
@@ -25,6 +32,29 @@ NODE_P95_RED = 1.30
 ERROR_RE = re.compile(r"\b(ERROR|CRITICAL|Traceback)\b")
 WARN_RE = re.compile(r"\bWARNING\b")
 GATE_NODES = ("planner", "generate", "generate_batch", "salvage", "review_score", "review_chair")
+CHECK_NAMES = (
+    "correctness",
+    "answerability",
+    "claim_alignment",
+    "hardware_compatibility",
+    "answer_leakage",
+    "metadata",
+    "duplication",
+)
+# First matching prefix wins. Keep specific tokens ahead of generic ones.
+REJECT_CLASSES = (
+    ("retry_exhausted", "retry_exhausted"),
+    ("review_exhausted", "review_exhausted"),
+    ("review_error", "review_error"),
+    ("json_parse", "json_parse"),
+    ("generate_error", "generate_error"),
+    ("sieve_", "sieve"),
+    ("corpus_duplicate", "duplicate"),
+    ("batch_neighbor", "duplicate"),
+    ("knowledge_revision", "knowledge_invalidate"),
+    ("429", "rate_limit"),
+    ("rate limit", "rate_limit"),
+)
 
 
 def percentile(values: list[float], p: float) -> float | None:
@@ -80,6 +110,143 @@ def scan_log(path: Path) -> dict[str, Any]:
         "log_warnings": warnings,
         "log_error_samples": errors[:12],
     }
+
+
+def classify_reject_reason(reason: str | None) -> str:
+    """Map a reject/defer reason onto a coarse gate error class."""
+    text = (reason or "").strip()
+    if not text:
+        return "unknown"
+    lowered = text.lower()
+    for token, label in REJECT_CLASSES:
+        if token in lowered:
+            return label
+    return "other"
+
+
+def _classify_item(question: Question) -> str:
+    """Prefer structured prefixes; fall back to the first failed chair check."""
+    labeled = classify_reject_reason(question.reject_reason)
+    if labeled not in {"other", "unknown"}:
+        return labeled
+    checks = (question.review_details or {}).get("checks") or {}
+    if isinstance(checks, dict):
+        for name in CHECK_NAMES:
+            if str(checks.get(name) or "").lower() == "fail":
+                return f"chair_{name}"
+    action = str((question.review_details or {}).get("action") or "").lower()
+    if action == "reject":
+        return "chair_reject"
+    return labeled
+
+
+def _check_histogram(questions: list[Question]) -> dict[str, dict[str, int]]:
+    """Count pass/fail/uncertain for each chair dimension across reviewed items."""
+    hist = {name: Counter() for name in CHECK_NAMES}
+    for question in questions:
+        checks = (question.review_details or {}).get("checks") or {}
+        if not isinstance(checks, dict):
+            continue
+        for name in CHECK_NAMES:
+            value = str(checks.get(name) or "").strip().lower()
+            if value in {"pass", "fail", "uncertain"}:
+                hist[name][value] += 1
+    return {name: dict(counts) for name, counts in hist.items()}
+
+
+def build_quality_report(
+    accepted: list[Question],
+    rejected: list[Question],
+    pending: list[Question],
+) -> dict[str, Any]:
+    """Summarize accept/reject/pending mix, error classes, and chair check fails.
+
+    Args:
+        accepted: Independently accepted questions.
+        rejected: Hard rejects (sieve, dup, chair reject).
+        pending: Mid-review or exhausted items.
+
+    Returns:
+        JSON-serializable quality block for ``gate_report.json``.
+    """
+    total = len(accepted) + len(rejected) + len(pending)
+    reject_classes = Counter(_classify_item(q) for q in rejected)
+    pending_classes = Counter(_classify_item(q) for q in pending)
+    reviewed = [q for q in accepted + rejected + pending if q.review_details]
+    answers = [q for q in accepted if (q.internal_reference_answer or "").strip()]
+    return {
+        "accepted": len(accepted),
+        "rejected": len(rejected),
+        "pending": len(pending),
+        "total": total,
+        "accept_rate": (len(accepted) / total) if total else 0.0,
+        "reject_rate": (len(rejected) / total) if total else 0.0,
+        "pending_rate": (len(pending) / total) if total else 0.0,
+        "reject_classes": dict(reject_classes),
+        "pending_classes": dict(pending_classes),
+        "chair_checks": _check_histogram(reviewed),
+        "reference_answer_rate": (len(answers) / len(accepted)) if accepted else 0.0,
+        "reference_answer_n": len(answers),
+        "salvage_or_json_rejects": int(reject_classes.get("json_parse", 0)),
+        "sieve_rejects": int(reject_classes.get("sieve", 0)),
+        "rate_limit_rejects": int(reject_classes.get("rate_limit", 0)),
+    }
+
+
+def write_quality_sample(
+    accepted: list[Question],
+    rejected: list[Question],
+    pending: list[Question],
+    path: Path,
+    *,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Write up to ``limit`` accepted stems plus chair answers; pad from rejects.
+
+    Returns:
+        The records written to ``path``.
+    """
+    records: list[dict[str, Any]] = []
+    for question in accepted[:limit]:
+        details = question.review_details or {}
+        records.append({
+            "id": question.id,
+            "status": "accepted",
+            "question": question.question,
+            "tests_claim": question.tests_claim,
+            "l3_id": question.l3_id,
+            "action": details.get("action") or "accept",
+            "reason": question.reject_reason or details.get("reason"),
+            "checks": details.get("checks") or {},
+            "internal_reference_answer": question.internal_reference_answer,
+            "language": question.language,
+            "question_type": question.question_type,
+            "warnings": list(question.warnings or []),
+        })
+    if len(records) < limit:
+        for question in list(rejected) + list(pending):
+            if len(records) >= limit:
+                break
+            details = question.review_details or {}
+            records.append({
+                "id": question.id,
+                "status": question.review_status,
+                "question": question.question,
+                "tests_claim": question.tests_claim,
+                "l3_id": question.l3_id,
+                "action": details.get("action") or question.review_status,
+                "reason": question.reject_reason or details.get("reason"),
+                "checks": details.get("checks") or {},
+                "internal_reference_answer": question.internal_reference_answer,
+                "language": question.language,
+                "question_type": question.question_type,
+                "warnings": list(question.warnings or []),
+            })
+    path.write_text(
+        "\n".join(json.dumps(item, ensure_ascii=False) for item in records) + ("\n" if records else ""),
+        encoding="utf-8",
+    )
+    return records
 
 
 def median_baseline(reports: list[dict[str, Any]]) -> dict[str, Any]:
@@ -204,6 +371,13 @@ def write_verdict_md(payload: dict[str, Any], path: Path) -> None:
         f"- knowledge_jobs_done: {report.get('knowledge_jobs_done')} errors: {report.get('knowledge_job_errors')}",
         f"- knowledge_context_chars_p95: {(report.get('knowledge_context_chars') or {}).get('p95')}",
         "",
+        "## Quality",
+        f"- accept_rate: {(report.get('quality') or {}).get('accept_rate')}",
+        f"- reject_classes: {(report.get('quality') or {}).get('reject_classes')}",
+        f"- reference_answer_rate: {(report.get('quality') or {}).get('reference_answer_rate')}",
+        f"- salvage_or_json_rejects: {(report.get('quality') or {}).get('salvage_or_json_rejects')}",
+        f"- sieve_rejects: {(report.get('quality') or {}).get('sieve_rejects')}",
+        "",
         "## Failures",
     ]
     failures = compared.get("failures") or report.get("failures") or []
@@ -324,6 +498,8 @@ def run_gate(
     jobs = knowledge_stats.get("jobs") or {}
     log_info = scan_log(log_path)
     exhausted = sum(1 for q in pending if getattr(q, "review_exhausted", False))
+    quality = build_quality_report(accepted, rejected, pending)
+    write_quality_sample(accepted, rejected, pending, output / "quality_sample.jsonl")
     report = {
         "phase": phase,
         "status": result.get("status"),
@@ -353,6 +529,7 @@ def run_gate(
         "review_model": fixed.review_model,
         "writer_concurrency": fixed.writer_concurrency,
         "metrics": metrics,
+        "quality": quality,
         **log_info,
     }
     baseline = None

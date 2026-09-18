@@ -28,4 +28,15 @@ Off-leaf (forbidden — the chair will reject):
 - Claim is TMA alignment, question uses cudaMalloc host allocation.
 - Claim is shared-memory bank conflicts, question uses only global memory.
 
+## Internal consistency (hard)
+
+The chair rejects internally contradictory stems. Do not write those.
+
+- Code, comments, option labels, and prose MUST agree on the same numbers (lane counts, masks, sizes, occupancy, SM, bytes). If you write `(threadIdx.x & 0xF) != 0`, do not claim "3 lanes".
+- A single-choice item MUST have exactly one correct option under the stated premises. Do not ask for "the unique UB" when no option is UB.
+- `tests_claim` must describe the actual stem, not a different API or the opposite arithmetic.
+- Invented APIs, wrong PTX opcodes, or mixing Ampere MMA (`mma.sync`) with Hopper WGMMA (`wgmma.mma_async`) is a reject.
+- Do not leak the worked answer in hints, "must mention", or format examples (`例如：32, 1` when that is the key).
+- Arch-specific APIs (TMA, wgmma, tcgen05, cluster) require a matching hardware scene, not an Ampere-only setup labeled agnostic.
+
 This layer does not change the JSON schema. Still return one object with `question`, `tests_claim`, `language`.

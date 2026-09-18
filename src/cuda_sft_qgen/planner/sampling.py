@@ -1,4 +1,10 @@
-"""Quota-weighted brief sampling with hardware/leaf compatibility and steering."""
+"""Quota-weighted brief sampling with hardware/leaf compatibility and steering.
+
+Hardware labels stay within architectures compatible with the leaf claim;
+agnostic is always allowed. Residual quota weights and steering briefs
+drive L1/type/difficulty mix. This module does not write questions or
+review them.
+"""
 
 from __future__ import annotations
 
@@ -243,7 +249,7 @@ def plan_briefs(
     persona_ids = list(personas.keys()) or ["cuda_interviewer"]
     leaves_by_l1: dict[str, list[Leaf]] = {}
     for leaf in taxonomy.leaves:
-        if leaf.retired:
+        if leaf.retired or str(getattr(leaf, "status", "") or "") == "quarantined":
             continue
         l2_key = f"{leaf.domain_id}.{leaf.l2_id}"
         if l2_key in blocked_l2:
@@ -253,7 +259,7 @@ def plan_briefs(
     if not usable_l1:
         leaves_by_l1 = {}
         for leaf in taxonomy.leaves:
-            if leaf.retired:
+            if leaf.retired or str(getattr(leaf, "status", "") or "") == "quarantined":
                 continue
             leaves_by_l1.setdefault(leaf.domain_id, []).append(leaf)
         usable_l1 = list(leaves_by_l1)
@@ -266,7 +272,7 @@ def plan_briefs(
     leaf_stats = {}
     # Apply adaptive sampling if enabled, including taxonomy leaves with no samples.
     if adaptive_config and adaptive_config.get("enabled", False):
-        from cuda_sft_qgen.planner_v2 import AdaptiveSampler, compute_leaf_stats
+        from cuda_sft_qgen.planner.adaptive import AdaptiveSampler, compute_leaf_stats
 
         rejected_seq = list(rejected) if rejected else []
         leaf_stats = compute_leaf_stats(
@@ -280,6 +286,7 @@ def plan_briefs(
             epsilon=adaptive_config.get("epsilon", 0.15),
             accept_weight=adaptive_config.get("accept_weight", 0.6),
             coverage_weight=adaptive_config.get("coverage_weight", 0.4),
+            min_samples=int(adaptive_config.get("min_samples_threshold", 5) or 5),
         )
 
         l1_weights = sampler.adjust_weights(l1_weights, leaf_stats, rng=rng)
@@ -336,6 +343,13 @@ def plan_briefs(
             bloom = "apply"
         allowed_hw = leaf_hardware_allowed(leaf)
         hw_filtered = {k: v for k, v in (hw_w or {}).items() if k in allowed_hw}
+        arch_specific = [name for name in ("ampere", "hopper", "blackwell") if name in allowed_hw]
+        # Arch-locked claims still allow agnostic for compare items; otherwise
+        # prefer a named architecture so Ampere stems do not grow TMA.
+        if arch_specific and qtype != "compare":
+            named = {k: v for k, v in hw_filtered.items() if k != "agnostic"}
+            if named:
+                hw_filtered = named
         if hw_filtered:
             hardware = _weighted_choice(rng, hw_filtered)
         elif "agnostic" in allowed_hw:
@@ -393,7 +407,7 @@ def plan_briefs(
             )
         others = [
             c for c in (angle_table.get(qtype) or []) if c.get("ask") != angle
-        ]
+        ][:3]
         if others:
             guide_parts.append(
                 "Other angles (contrast only, do not mix in):\n"

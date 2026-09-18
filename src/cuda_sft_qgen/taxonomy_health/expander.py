@@ -88,6 +88,7 @@ class LeafExpander:
         max_new: int = 10,
         facet_id: str = "mechanism",
         dry_run: bool = False,
+        near_dup_warnings: str = "",
     ) -> list[dict[str, Any]]:
         """Expand a specific L2 node with new leaves."""
         parts = l2_key.split(".", 1)
@@ -128,7 +129,14 @@ class LeafExpander:
         facet_info = self._get_facet_info(facet_id)
         system = self._build_system_prompt(curator, facet_info)
 
-        user = render_expand_user(domain=domain, child=child, facet=facet_info, max_new=max_new, template=template, near_dup_warnings="")
+        user = render_expand_user(
+            domain=domain,
+            child=child,
+            facet=facet_info,
+            max_new=max_new,
+            template=template,
+            near_dup_warnings=near_dup_warnings,
+        )
 
         if dry_run:
             return [{

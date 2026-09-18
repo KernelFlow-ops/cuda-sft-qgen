@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from cuda_sft_qgen.models import Question, QuestionBrief
+
+_SEED_PATH = Path(__file__).parent / "fewshot_seed.jsonl"
 from cuda_sft_qgen.review.fingerprint import hamming64, speech_act
 
 QUALITY_REJECT_PREFIXES = (
@@ -27,6 +31,33 @@ TYPE_TO_ACT = {
     "optimization": "how",
     "conceptual": "why",
 }
+
+
+def load_seed_questions() -> list[Question]:
+    """Frozen golden stems shipped with the package; used on cold start."""
+    if not _SEED_PATH.is_file():
+        return []
+    out: list[Question] = []
+    for line in _SEED_PATH.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+            rec.setdefault("tests_claim", rec.get("l3_claim") or "seed")
+            rec.setdefault("dup_verdict", "unique")
+            rec.setdefault("warnings", [])
+            out.append(Question.model_validate(rec))
+        except Exception:
+            continue
+    return out
+
+
+def _merge_seed_questions(accepted: list[Question]) -> list[Question]:
+    """Prepend seed items whose question text is not already in the archive."""
+    seen = {q.question.strip() for q in accepted if (q.question or "").strip()}
+    seeds = [q for q in load_seed_questions() if q.question.strip() not in seen]
+    return seeds + accepted
 
 
 def is_quality_reject(reason: str | None) -> bool:
@@ -105,7 +136,7 @@ class FewshotCorpus:
     @classmethod
     def from_store(cls, store: Any, *, anti_k: int = 15) -> "FewshotCorpus":
         """Build a corpus from the archive's accepted, quality-rejected, and anti stems."""
-        accepted = list(store.load_accepted())
+        accepted = _merge_seed_questions(list(store.load_accepted()))
         rejected = []
         if hasattr(store, "iter_quality_rejected"):
             rejected = list(store.iter_quality_rejected(limit=200))
@@ -168,6 +199,9 @@ def select_positives(
 ) -> list[FewshotPick]:
     """Pick accepted examples near the brief's leaf/L1 without near-duplicates of the seed."""
     accepted = [q for q in corpus.accepted if _unique_ok(q)]
+    same_lang = [q for q in accepted if (q.language or "") == brief.language]
+    if same_lang:
+        accepted = same_lang
     used: set[str] = set()
     picks: list[FewshotPick] = []
     brief_l1 = brief.topic_path[0] if brief.topic_path else ""

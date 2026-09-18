@@ -82,6 +82,7 @@ def test_taxonomy_prompts_and_facets_load():
         "profiling",
         "arch_migrate",
         "cross_factor",
+        "derivation",
     ]
     raw = load_prompt_yaml("facets")
     assert raw.get("facets")

@@ -8,7 +8,16 @@ from pathlib import Path
 import pytest
 
 from cuda_sft_qgen.cli import build_parser
-from cuda_sft_qgen.gate import compare_gate_reports, median_baseline, percentile, write_verdict_md
+from cuda_sft_qgen.gate import (
+    build_quality_report,
+    classify_reject_reason,
+    compare_gate_reports,
+    median_baseline,
+    percentile,
+    write_quality_sample,
+    write_verdict_md,
+)
+from cuda_sft_qgen.models import Question
 
 
 def _report(**overrides):
@@ -101,6 +110,111 @@ def test_median_baseline_picks_middle_wall():
     verdict = compare_gate_reports(_report(duration_seconds=556, accepted_per_hour=71,
                                            node_seconds={"generate_batch": {"p95": 90}, "review_chair": {"p95": 12}}), merged)
     assert verdict["verdict"] in {"yellow", "green"}
+
+
+def _question(**overrides) -> Question:
+    data = {
+        "id": "q_test",
+        "question": "What is the TMA 128B alignment requirement on Hopper?",
+        "tests_claim": "TMA box stride must be 128B-aligned.",
+        "topic_path": ["T08", "tma"],
+        "l3_id": "tma_align",
+        "question_type": "conceptual",
+        "difficulty": 2,
+        "bloom": "understand",
+        "persona": "exam_writer",
+        "hardware": "hopper",
+        "granularity": "kernel",
+        "language": "en",
+    }
+    data.update(overrides)
+    return Question.model_validate(data)
+
+
+def test_classify_reject_reason_prefixes():
+    assert classify_reject_reason("sieve_too_short") == "sieve"
+    assert classify_reject_reason("retry_exhausted:429") == "retry_exhausted"
+    assert classify_reject_reason("review_error:TimeoutError:x") == "review_error"
+    assert classify_reject_reason("json_parse") == "json_parse"
+    assert classify_reject_reason("HTTP 429 too many requests") == "rate_limit"
+    assert classify_reject_reason("corpus_duplicate") == "duplicate"
+    assert classify_reject_reason("") == "unknown"
+    assert classify_reject_reason("weird_new_reason") == "other"
+
+
+def test_quality_report_rates_and_chair_histogram():
+    accepted = [
+        _question(
+            id="q_ok",
+            internal_reference_answer="128B alignment",
+            review_details={
+                "action": "accept",
+                "checks": {name: "pass" for name in (
+                    "correctness", "answerability", "claim_alignment",
+                    "hardware_compatibility", "answer_leakage", "metadata", "duplication",
+                )},
+            },
+        )
+    ]
+    rejected = [_question(id="q_sieve", reject_reason="sieve_too_vague", review_status="rejected")]
+    pending = [_question(
+        id="q_pend",
+        reject_reason="review_error:ValueError:bad json",
+        review_status="pending",
+        review_details={"action": "pending", "checks": {"correctness": "uncertain", "answerability": "pass"}},
+    )]
+    report = build_quality_report(accepted, rejected, pending)
+    assert report["total"] == 3
+    assert report["accept_rate"] == pytest.approx(1 / 3)
+    assert report["reject_classes"] == {"sieve": 1}
+    assert report["pending_classes"] == {"review_error": 1}
+    assert report["reference_answer_rate"] == 1.0
+    assert report["chair_checks"]["correctness"]["pass"] == 1
+    assert report["chair_checks"]["correctness"]["uncertain"] == 1
+
+
+def test_quality_report_classifies_chair_fail_checks():
+    rejected = [_question(
+        id="q_wrong",
+        reject_reason="arithmetic disagrees with tests_claim",
+        review_status="rejected",
+        review_details={
+            "action": "reject",
+            "checks": {"correctness": "fail", "answerability": "pass"},
+        },
+    )]
+    report = build_quality_report([], rejected, [])
+    assert report["reject_classes"] == {"chair_correctness": 1}
+
+
+def test_quality_sample_writes_jsonl(tmp_path: Path):
+    accepted = [_question(id="q_ok", internal_reference_answer="42")]
+    rejected = [_question(id="q_bad", question="", reject_reason="sieve_too_short", review_status="rejected")]
+    path = tmp_path / "quality_sample.jsonl"
+    records = write_quality_sample(accepted, rejected, [], path, limit=10)
+    assert path.exists()
+    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert lines[0]["id"] == "q_ok"
+    assert lines[0]["internal_reference_answer"] == "42"
+    assert lines[1]["id"] == "q_bad"
+    assert len(records) == 2
+
+
+def test_verdict_markdown_includes_quality(tmp_path: Path):
+    report = _report()
+    report["quality"] = {
+        "accept_rate": 0.8,
+        "reject_classes": {"sieve": 1},
+        "reference_answer_rate": 1.0,
+        "salvage_or_json_rejects": 0,
+        "sieve_rejects": 1,
+    }
+    compared = compare_gate_reports(report, _report())
+    path = tmp_path / "verdict.md"
+    write_verdict_md({"report": report, "compared": compared}, path)
+    text = path.read_text(encoding="utf-8")
+    assert "## Quality" in text
+    assert "accept_rate: 0.8" in text
 
 
 def test_cli_rejects_fake(capsys):

@@ -307,6 +307,21 @@ def parse_json_object(text: str) -> dict[str, Any]:
     raise ValueError(f"could not parse JSON object from: {text[:400]}")
 
 
+def _claim_from_question(question: str) -> str:
+    """One short sentence taken from the stem; never from the planner leaf claim."""
+    text = _THINK.sub(" ", question or "")
+    text = _CODE_FENCE.sub(" ", text)
+    text = " ".join(text.split()).strip()
+    if not text:
+        return ""
+    for sep in ("。", "？", "?", "！", ".", "!"):
+        if sep in text:
+            part = text.split(sep, 1)[0].strip()
+            if len(part) >= 12:
+                return part[:220]
+    return text[:220]
+
+
 def parse_question_payload(
     text: str,
     *,
@@ -318,7 +333,8 @@ def parse_question_payload(
 
     Args:
         text: Raw model output.
-        fallback_claim: Brief claim used when ``tests_claim`` was truncated.
+        fallback_claim: Ignored. Kept so call sites that passed the leaf claim
+            do not break; missing ``tests_claim`` is rebuilt from the stem.
         min_question_chars: Minimum length before a truncated payload is kept.
         keep_truncated: If True, accept a question that lost its claim field.
 
@@ -353,10 +369,14 @@ def parse_question_payload(
         return None
     obj["question"] = question
     claim = str(obj.get("tests_claim") or "").strip()
-    if not claim and fallback_claim and keep_truncated and len(question) >= min_question_chars:
-        obj["tests_claim"] = fallback_claim
-        obj.setdefault("warnings", [])
-        if isinstance(obj["warnings"], list):
-            obj["warnings"].append("json_truncated")
+    if not claim and keep_truncated and len(question) >= min_question_chars:
+        # Reconstruct from the stem only. Never copy the leaf brief (fallback_claim);
+        # that made tests_claim look aligned when the writer omitted it.
+        reconstructed = _claim_from_question(question)
+        if reconstructed:
+            obj["tests_claim"] = reconstructed
+            obj.setdefault("warnings", [])
+            if isinstance(obj["warnings"], list):
+                obj["warnings"].append("json_truncated")
     obj["language"] = normalize_language(obj.get("language"), fallback="zh")
     return obj

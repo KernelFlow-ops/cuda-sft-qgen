@@ -21,7 +21,7 @@ def test_local_knowledge_cli_preserves_yaml_and_claims(tmp_path, capsys, argv):
     paths = list(settings.taxonomy_path.parent.rglob("*.yaml"))
     before = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
     args = cli.build_parser().parse_args(argv)
-    with patch("cuda_sft_qgen.cli.load_settings", return_value=settings), patch(
+    with patch("cuda_sft_qgen.cli.taxonomy.load_settings", return_value=settings), patch(
         "cuda_sft_qgen.llm.FakeLLM.complete_json", side_effect=AssertionError("local inspection must not call LLM")
     ):
         assert args.func(args) == 0

@@ -29,6 +29,14 @@ def _brief(**kwargs) -> QuestionBrief:
     return QuestionBrief.model_validate(data)
 
 
+def test_writer_markdown_is_the_static_prefix():
+    settings = load_settings(fake_llm=True)
+    sp = StructuredPrompt(settings, FewshotCorpus())
+    bundle = sp.build(_brief(), SteeringBrief())
+    assert "WRITER_PROMPT_V2" in bundle.system
+    assert "specialist CUDA examination author" in bundle.system
+
+
 def test_layers_and_json_schema_for_formula():
     settings = load_settings(fake_llm=True)
     settings.default_yaml.setdefault("generation", {})["prompt_cot"] = True

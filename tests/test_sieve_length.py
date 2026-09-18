@@ -36,6 +36,16 @@ def test_sieve_too_short_and_too_long():
     assert rule_sieve(ok, settings) is None
 
 
+def test_sieve_accepts_mdspan_stems():
+    settings = load_settings(fake_llm=True)
+    settings.question_min_chars = 40
+    q = _q(
+        "下面 std::mdspan 的 extents 与 CUDA pitched 布局如何对应？请给出 rank-2 的 stride 公式。"
+    )
+    q.tests_claim = "mdspan extents map onto cudaMallocPitch layout"
+    assert rule_sieve(q, settings) is None
+
+
 def test_sieve_accepts_exam_stems_without_question_mark():
     settings = load_settings(fake_llm=True)
     settings.question_min_chars = 40

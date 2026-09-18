@@ -17,7 +17,7 @@ _CUDA_HINTS = re.compile(
     r"nvcc|ptx|sass|tensor core|cutlass|cute|tma|wgmma|umma|tmem|"
     r"nsight|cublas|nccl|hopper|ampere|blackwell|smem|gmem|"
     r"__syncthreads|coalesc|bank conflict|mma|layout|stride|swizzle|"
-    r"cluster|nvlink|cub::|launch_bounds|__fma|fma|ulp",
+    r"cluster|nvlink|cub::|launch_bounds|__fma|fma|ulp|mdspan|extents",
     re.IGNORECASE,
 )
 

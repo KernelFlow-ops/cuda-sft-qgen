@@ -1,4 +1,9 @@
-"""Typed views of the canonical runtime configuration."""
+"""Typed Pydantic view of ``config.load_settings``; not a second source of truth.
+
+``run_pipeline`` uses :class:`cuda_sft_qgen.config.Settings`. This module maps
+that object for ``validate-config`` / ``estimate-cost`` and tests. Nested
+defaults here must not be read as runtime knobs — YAML+env on Settings wins.
+"""
 from __future__ import annotations
 
 from pathlib import Path

@@ -11,6 +11,7 @@ from cuda_sft_qgen.graph.nodes.generate import generate_batch_node
 from cuda_sft_qgen.graph.nodes.planner import planner_node
 from cuda_sft_qgen.graph.nodes.review import archive_node, review_chair_node, review_score_node
 from cuda_sft_qgen.graph.nodes.salvage import retry_drain_node, salvage_node
+from cuda_sft_qgen.graph.policy import chair_flush_size, chair_review_trigger, pending_room
 from cuda_sft_qgen.observability import get_metrics
 
 logger = logging.getLogger(__name__)
@@ -37,11 +38,13 @@ def run_concurrent(rt, initial: dict) -> dict:
         state.update(architect_node(state))
     settings = rt.settings
     batch = max(1, settings.review_batch_size)
-    review_trigger = min(batch, max(1, int(settings.review.get("chair_max_workers", 4))))
+    review_trigger = chair_review_trigger(settings)
+    flush_n = chair_flush_size(settings)
     capacity = max(batch, int(settings.review.get("queue_capacity", batch * 2)))
     total_capacity = max(capacity, int(settings.review.get("max_pending_total", capacity * 2)))
     generation = None
     last_tick = -1
+    review_error_streak = 0
     start = time.monotonic()
     deadline = float(settings.generation.get("max_runtime_seconds", 0) or 0)
     resumed_this_run: set[str] = set()
@@ -68,9 +71,12 @@ def run_concurrent(rt, initial: dict) -> dict:
             target_hit = state["accepted_count"] >= settings.target_question_count
             expired = bool(deadline and time.monotonic() - start >= deadline)
             active = [q for q in state["pending"] if not q.get("review_exhausted")]
-            retry_room = max(0, capacity - len(active))
-            new_room = min(retry_room, total_capacity - len(state["pending"]))
-            room = max(0, new_room)
+            retry_room, room = pending_room(
+                pending_n=len(state["pending"]),
+                active_n=len(active),
+                capacity=capacity,
+                total_capacity=total_capacity,
+            )
             can_produce = not target_hit and not expired and room > 0
             can_generate = can_produce and state["iteration"] < settings.max_iterations
             if generation is None and retry_room > 0:
@@ -86,7 +92,12 @@ def run_concurrent(rt, initial: dict) -> dict:
                     snapshot = {**state, "pending": [], "review_batch_size": min(batch, retry_room)}
                     generation = producer.submit(copy_context().run, retry_drain_node, snapshot)
                 elif can_generate:
-                    planned = planner_node({**state, "pending": active, "review_batch_size": min(batch, room)})
+                    planned = planner_node({
+                        **state,
+                        "pending": active,
+                        "review_batch_size": batch,
+                        "generate_room": room,
+                    })
                     state.update(planned)
                     briefs = state.get("batch_briefs") or []
                 if briefs:
@@ -104,12 +115,32 @@ def run_concurrent(rt, initial: dict) -> dict:
                      and float(q.get("review_next_at") or 0) <= now]
             if ready and (len(ready) >= review_trigger or generation is None):
                 rt.reconcile_index()
-                reviewing = {**state, "pending": ready[:batch]}
+                reviewing = {**state, "pending": ready[:flush_n]}
                 reviewing.update(review_score_node(reviewing))
                 reviewing.update(review_chair_node(reviewing))
                 state.update(archive_node(reviewing))
                 state["review_rounds"] = reviewing["review_rounds"]
                 refresh()
+                error_n = sum(
+                    1 for q in (reviewing.get("last_diversity") or {}).get("final_decisions") or []
+                    if str(q.get("reason") or "").startswith("review_error")
+                    or str(q.get("reason") or "").startswith("review_worker_error")
+                )
+                if error_n:
+                    review_error_streak += error_n
+                else:
+                    review_error_streak = 0
+                max_streak = int(settings.review.get("circuit_breaker_error_streak", 8) or 0)
+                max_exhausted = int(settings.review.get("circuit_breaker_exhausted", 20) or 0)
+                exhausted_n = sum(1 for q in state["pending"] if q.get("review_exhausted"))
+                if max_streak and review_error_streak >= max_streak:
+                    logger.warning("circuit breaker: review_error_streak=%s", review_error_streak)
+                    state["status"] = "review_pending"
+                    break
+                if max_exhausted and exhausted_n >= max_exhausted:
+                    logger.warning("circuit breaker: exhausted=%s", exhausted_n)
+                    state["status"] = "review_pending"
+                    break
                 rounds = state["review_rounds"]
                 every = max(1, int(settings.taxonomy_manager_cfg.get("every_k_reviews", 5)))
                 if rt.knowledge_worker is not None and rounds != last_tick and rounds % every == 0:

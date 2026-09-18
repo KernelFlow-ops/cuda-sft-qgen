@@ -293,6 +293,8 @@ class FakeLLM(LLMClient):
             if m.get("role") == "user":
                 user = m.get("content") or ""
                 break
+        if "WRITER_GATE_V1" in system:
+            return json.dumps({"ok": True})
         if "QUALITY_REVIEW_V1" in system:
             payload = json.loads(user)
             # Offline fixtures exercise the contract, not CUDA factual correctness.

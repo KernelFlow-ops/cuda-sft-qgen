@@ -37,12 +37,25 @@ def planner_node(state: PipelineState) -> dict:
                 "iteration": int(state.get("iteration") or 0) + 1,
             }
         remaining_target = max(target - accepted_n - len(pending), 0)
-        fill = max(batch - len(pending), 0)
-        n = min(batch, remaining_target, fill)
         min_batch = max(1, rt.settings.min_generate_batch)
-        # Keep the writer pool busy even near target (accepted may overshoot slightly).
-        if 0 < n < min_batch:
+        generate_room = state.get("generate_room")
+        if generate_room is not None:
+            # Concurrent coordinator: keep the writer pool busy up to pending room,
+            # not fill-to-review_batch_size (that 6/14 oscillation idles writers).
+            room = max(0, int(generate_room))
+            pool_n = max(min_batch, int(rt.settings.writer_concurrency))
+            n = min(pool_n, remaining_target, room)
+        else:
+            fill = max(batch - len(pending), 0)
+            n = min(batch, remaining_target, fill)
+            # Sequential path: pad leftover holes so the writer pool stays busy.
+            if 0 < n < min_batch:
+                n = min_batch
+        if 0 < n < min_batch and remaining_target > 0 and (
+            generate_room is None or int(generate_room) >= min_batch
+        ):
             n = min_batch
+        fill = n
         if n <= 0:
             logger.info(
                 "planner skip_plan accepted=%s pending=%s target=%s fill=%s",

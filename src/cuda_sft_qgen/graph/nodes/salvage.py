@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import copy_context
 from typing import Any
 
-from cuda_sft_qgen.graph.nodes.generate import (
+from cuda_sft_qgen.graph.nodes.generate_core import (
     apply_outcome,
     enqueue_retry,
     generate_or_salvage,

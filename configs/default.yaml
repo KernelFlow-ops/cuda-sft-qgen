@@ -31,13 +31,18 @@ generation:
   backpressure_sleep: 0.5
   # Never emit 1-2 brief batches that idle the writer pool.
   min_generate_batch: null
-  # Stagger writer submits so 6 streams do not hit the gateway in the same 200ms.
-  submit_stagger_sec: 0.8
+  # Stagger writer submits so a full pool does not hit the gateway in the same 200ms.
+  submit_stagger_sec: 0.35
   # Salvage JSON in the salvage node, not on the writer thread.
   salvage_inline: false
   pending_save_every: 1
   # Inherit THINKING_LEVEL unless set. Prefer low/none for throughput.
   writer_thinking_level: null
+  # Pre-chair consistency gate: local high-precision checks, then a cheap LLM
+  # critic. Certain defects rewrite once; still-broken drafts never reach chair.
+  writer_consistency_gate: true
+  writer_gate_rewrite: true
+  writer_gate_max_tokens: 512
 
 knowledge:
   enabled: true
@@ -77,7 +82,7 @@ taxonomy:
 
 review:
   thinking_level: medium
-  max_tokens: 8192
+  max_tokens: 2048
   batch_size: 20
   top_k: 8
   semantic_dup_threshold: 0.94      # Was 0.93 - more strict semantic similarity
@@ -98,3 +103,13 @@ review:
   parallel_enabled: true            # Enable parallel LLM chair decisions
   chair_max_workers: 4              # Max parallel workers for chair decisions
   chair_batch_size: 10              # Batch size for gray items processing
+  # Concurrent chair wave size. 20 blocked the next generate for minutes.
+  chair_flush_max: 8
+  # LLM slots writers may not take while a chair waiter exists (capacity>=2).
+  chair_slot_reserve: 1
+  # Writer=0 Salvage=1 Chair=2 Sieve=3 Taxonomy=4. Do not default Chair to Writer.
+  priority: 2
+  # Second independent chair call when first pass is uncertain on formula/debug/layout/code.
+  second_pass_on_uncertain: true
+  circuit_breaker_error_streak: 8
+  circuit_breaker_exhausted: 20

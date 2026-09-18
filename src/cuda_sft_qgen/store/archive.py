@@ -310,11 +310,11 @@ class Archive:
         return out
 
     def load_accepted(self) -> list[Question]:
-        """Accepted questions (cached after first read)."""
+        """Load accepted questions from SQLite (no in-memory cache)."""
         return self._load_status("accepted")
 
     def load_rejected(self) -> list[Question]:
-        """Rejected questions (cached after first read)."""
+        """Load rejected questions from SQLite (no in-memory cache)."""
         return self._load_status("rejected")
 
     def load_pending(self) -> list[Question]:

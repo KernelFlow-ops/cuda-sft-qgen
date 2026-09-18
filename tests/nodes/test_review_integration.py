@@ -122,8 +122,8 @@ class TestReviewChairIntegration:
             "review_rounds": 0,
         }
 
-        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime_full):
-            with patch("cuda_sft_qgen.graph.nodes.review.load_prompt", return_value="Test prompt"):
+        with patch("cuda_sft_qgen.graph.nodes.review_chair.get_runtime", return_value=mock_runtime_full):
+            with patch("cuda_sft_qgen.graph.nodes.review_chair.load_prompt", return_value="Test prompt"):
                 result = review_chair_node(state)
 
                 # Verify result structure
@@ -174,8 +174,8 @@ class TestReviewChairIntegration:
             "review_rounds": 0,
         }
 
-        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime_full):
-            with patch("cuda_sft_qgen.graph.nodes.review.load_prompt", return_value="Test prompt"):
+        with patch("cuda_sft_qgen.graph.nodes.review_chair.get_runtime", return_value=mock_runtime_full):
+            with patch("cuda_sft_qgen.graph.nodes.review_chair.load_prompt", return_value="Test prompt"):
                 result = review_chair_node(state)
 
                 # Verify result
@@ -219,8 +219,8 @@ class TestReviewChairIntegration:
 
         mock_runtime_full.store.recent_rejected_skeletons.return_value = [f"skel-{i}" for i in range(30)]
 
-        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime_full):
-            with patch("cuda_sft_qgen.graph.nodes.review.load_prompt", return_value="Test prompt"):
+        with patch("cuda_sft_qgen.graph.nodes.review_chair.get_runtime", return_value=mock_runtime_full):
+            with patch("cuda_sft_qgen.graph.nodes.review_chair.load_prompt", return_value="Test prompt"):
                 result = review_chair_node(state)
 
                 # Verify enhanced steering was applied
@@ -297,8 +297,8 @@ class TestReviewChairIntegration:
             "review_rounds": 0,
         }
 
-        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime_full):
-            with patch("cuda_sft_qgen.graph.nodes.review.load_prompt", return_value="Test prompt"):
+        with patch("cuda_sft_qgen.graph.nodes.review_chair.get_runtime", return_value=mock_runtime_full):
+            with patch("cuda_sft_qgen.graph.nodes.review_chair.load_prompt", return_value="Test prompt"):
                 result = review_chair_node(state)
 
                 # Verify suspects were identified and processed

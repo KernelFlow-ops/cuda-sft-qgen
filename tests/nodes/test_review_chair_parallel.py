@@ -11,6 +11,13 @@ from cuda_sft_qgen.graph.nodes.review import (
     _parallel_chair_decision,
     _parallel_chair_decisions,
 )
+from cuda_sft_qgen.graph.nodes.review_chair import (
+    _chair_priority,
+    _compact_knowledge,
+    _compact_neighbors,
+    _needs_second_pass,
+)
+from cuda_sft_qgen.keys import PRI_CHAIR, PRI_WRITER
 from cuda_sft_qgen.models import DiversityReport, Question, SteeringBrief
 
 
@@ -56,6 +63,7 @@ def mock_runtime():
                               "granularity": "api", "language": "en"},
     }
     rt.store.recent_rejected_skeletons.return_value = ["template1", "template2"]
+    rt.store.load_rejected.return_value = []
     rt.settings.quotas = {
         "question_types": {"conceptual": 0.3, "debug": 0.2},
         "difficulty": {"1": 0.2, "2": 0.4, "3": 0.3, "4": 0.1},
@@ -64,13 +72,28 @@ def mock_runtime():
     return rt
 
 
+def test_compact_neighbors_truncates_stems():
+    neighbors = _compact_neighbors(
+        [{"id": "n1", "question": "x" * 500, "similarity": 0.2, "l3_id": "leaf"}]
+    )
+    assert len(neighbors) == 1
+    assert len(neighbors[0]["question"]) == 400
+    assert neighbors[0]["id"] == "n1"
+
+
+def test_compact_knowledge_empty_is_not_reject_signal():
+    slim = _compact_knowledge({"claims": [], "evidence": []})
+    assert slim["status"] == "missing"
+    assert slim["evidence"] == []
+
+
 class TestParallelChairDecision:
     """Test single chair decision processing."""
 
     def test_accept_decision(self, mock_question, mock_runtime):
         """Test that accept decision is returned correctly."""
-        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime):
-            with patch("cuda_sft_qgen.graph.nodes.review.load_prompt", return_value="Test prompt"):
+        with patch("cuda_sft_qgen.graph.nodes.review_chair.get_runtime", return_value=mock_runtime):
+            with patch("cuda_sft_qgen.graph.nodes.review_chair.load_prompt", return_value="Test prompt"):
                 item = {
                     "question": mock_question.model_dump(),
                     "decision": {"verdict": "gray", "nearest_cosine": 0.92},
@@ -88,8 +111,8 @@ class TestParallelChairDecision:
         mock_runtime.llm.complete_json.return_value.update(action="reject", reason="duplicate question")
         mock_runtime.llm.complete_json.return_value["checks"]["duplication"] = "fail"
 
-        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime):
-            with patch("cuda_sft_qgen.graph.nodes.review.load_prompt", return_value="Test prompt"):
+        with patch("cuda_sft_qgen.graph.nodes.review_chair.get_runtime", return_value=mock_runtime):
+            with patch("cuda_sft_qgen.graph.nodes.review_chair.load_prompt", return_value="Test prompt"):
                 item = {
                     "question": mock_question.model_dump(),
                     "decision": {"verdict": "gray"},
@@ -106,8 +129,8 @@ class TestParallelChairDecision:
         """Test that LLM failure remains pending."""
         mock_runtime.llm.complete_json.side_effect = Exception("LLM error")
 
-        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime):
-            with patch("cuda_sft_qgen.graph.nodes.review.load_prompt", return_value="Test prompt"):
+        with patch("cuda_sft_qgen.graph.nodes.review_chair.get_runtime", return_value=mock_runtime):
+            with patch("cuda_sft_qgen.graph.nodes.review_chair.load_prompt", return_value="Test prompt"):
                 item = {
                     "question": mock_question.model_dump(),
                     "decision": {"verdict": "gray"},
@@ -130,8 +153,8 @@ class TestParallelChairDecisions:
 
     def test_parallel_processing(self, mock_question, mock_runtime):
         """Test that multiple items are processed in parallel."""
-        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime):
-            with patch("cuda_sft_qgen.graph.nodes.review.load_prompt", return_value="Test prompt"):
+        with patch("cuda_sft_qgen.graph.nodes.review_chair.get_runtime", return_value=mock_runtime):
+            with patch("cuda_sft_qgen.graph.nodes.review_chair.load_prompt", return_value="Test prompt"):
                 items = []
                 for i in range(5):
                     q = mock_question.model_copy()
@@ -153,8 +176,8 @@ class TestParallelChairDecisions:
 
     def test_deterministic_results(self, mock_question, mock_runtime):
         """Test that same input produces same output (determinism)."""
-        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime):
-            with patch("cuda_sft_qgen.graph.nodes.review.load_prompt", return_value="Test prompt"):
+        with patch("cuda_sft_qgen.graph.nodes.review_chair.get_runtime", return_value=mock_runtime):
+            with patch("cuda_sft_qgen.graph.nodes.review_chair.load_prompt", return_value="Test prompt"):
                 items = []
                 for i in range(3):
                     q = mock_question.model_copy()
@@ -200,7 +223,7 @@ class TestEnhancedSteering:
             notes=[],
         )
 
-        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime):
+        with patch("cuda_sft_qgen.graph.nodes.review_chair.get_runtime", return_value=mock_runtime):
             steering = _enhanced_steering(report, mock_runtime.settings.quotas, ["t1", "t2"], anti_cap=15)
 
             assert isinstance(steering, SteeringBrief)
@@ -230,7 +253,7 @@ class TestEnhancedSteering:
             notes=[],
         )
 
-        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime):
+        with patch("cuda_sft_qgen.graph.nodes.review_chair.get_runtime", return_value=mock_runtime):
             steering = _enhanced_steering(report, mock_runtime.settings.quotas, [], anti_cap=15)
 
             # Should contain top-3 scarcest: Debug (2), Profiling (3), Kernel (5)
@@ -261,7 +284,7 @@ class TestEnhancedSteering:
 
         mock_runtime.store.recent_rejected_skeletons.return_value = [f"skel-{i}" for i in range(30)]
 
-        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime):
+        with patch("cuda_sft_qgen.graph.nodes.review_chair.get_runtime", return_value=mock_runtime):
             steering = _enhanced_steering(report, mock_runtime.settings.quotas, [], anti_cap=15)
 
             # Should expand forbidden templates
@@ -292,7 +315,7 @@ class TestEnhancedSteering:
 
         mock_runtime.store.recent_rejected_skeletons.return_value = [f"skel-{i}" for i in range(30)]
 
-        with patch("cuda_sft_qgen.graph.nodes.review.get_runtime", return_value=mock_runtime):
+        with patch("cuda_sft_qgen.graph.nodes.review_chair.get_runtime", return_value=mock_runtime):
             steering = _enhanced_steering(report, mock_runtime.settings.quotas, [], anti_cap=15)
 
             # Both enhancements should be present
@@ -300,3 +323,41 @@ class TestEnhancedSteering:
             assert len(steering.forbidden_templates) > 15  # Expanded templates
             assert "High KL divergence" in steering.style_notes
             assert "Low entropy" in steering.style_notes
+
+
+def test_chair_priority_defaults_behind_writer():
+    from types import SimpleNamespace
+
+    assert _chair_priority(SimpleNamespace(review={})) == PRI_CHAIR
+    assert PRI_CHAIR > PRI_WRITER
+    assert _chair_priority(SimpleNamespace(review={"priority": 0})) == 0
+
+
+def test_second_pass_for_uncertain_debug_not_reject():
+    from types import SimpleNamespace
+
+    q = Question(
+        id="q_debug",
+        question="What race occurs if this kernel omits __syncthreads?",
+        tests_claim="Missing barrier causes a shared-memory race.",
+        topic_path=["compute"],
+        l3_id="barrier",
+        question_type="debug",
+        difficulty=3,
+        bloom="analyze",
+        persona="x",
+        hardware="hopper",
+        granularity="kernel",
+        language="en",
+    )
+    settings = SimpleNamespace(review={"second_pass_on_uncertain": True})
+    pending_uncertain = {
+        "action": "pending",
+        "review": {"checks": {"correctness": "uncertain", "answerability": "pass"}},
+    }
+    assert _needs_second_pass(q, pending_uncertain, settings) is True
+    q.question_type = "conceptual"
+    assert _needs_second_pass(q, pending_uncertain, settings) is False
+    q.question_type = "debug"
+    assert _needs_second_pass(q, {"action": "accept", "review": {"checks": {"correctness": "pass"}}}, settings) is False
+    assert _needs_second_pass(q, {"action": "pending", "review": {"checks": {"correctness": "fail"}}}, settings) is False

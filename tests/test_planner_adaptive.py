@@ -79,36 +79,40 @@ def test_leaf_health_score_coverage():
 
 
 def test_adaptive_sampler_health_score():
-    """Test health score computation."""
-    sampler = AdaptiveSampler(epsilon=0.15, accept_weight=0.6, coverage_weight=0.4)
+    """Coverage gaps score higher than easy saturated leaves."""
+    sampler = AdaptiveSampler(epsilon=0.15, accept_weight=0.6, coverage_weight=0.4, min_samples=5)
 
-    # High accept_rate, low coverage_gap (healthy)
-    leaf = LeafHealthScore(
+    easy_full = LeafHealthScore(
         l3_id="cuda.memory.l3_001",
-        accepted=3,
+        accepted=8,
         rejected=0,
-        total_generated=3,
+        total_generated=8,
         avg_difficulty=2.0,
         target_quota=3,
     )
-    health = sampler.compute_health_score(leaf)
-    # accept_rate=1.0, coverage=1.0, gap=0.0
-    # health = 1.0*0.6 + 0.0*0.4 = 0.6
-    assert health == pytest.approx(0.6)
+    # gap=0, easy=1.0 → score 0
+    assert sampler.compute_health_score(easy_full) == pytest.approx(0.0)
 
-    # Low accept_rate, high coverage_gap (unhealthy)
-    leaf = LeafHealthScore(
+    unseen = LeafHealthScore(
+        l3_id="cuda.memory.l3_003",
+        accepted=0,
+        rejected=0,
+        total_generated=0,
+        avg_difficulty=2.0,
+        target_quota=3,
+    )
+    assert sampler.compute_health_score(unseen) == pytest.approx(1.0)
+
+    undercovered = LeafHealthScore(
         l3_id="cuda.memory.l3_002",
         accepted=1,
-        rejected=4,
+        rejected=1,
         total_generated=5,
-        avg_difficulty=2.0,
+        avg_difficulty=3.0,
         target_quota=3,
     )
-    health = sampler.compute_health_score(leaf)
-    # accept_rate=0.2, coverage=1/3, gap=2/3
-    # health = 0.2*0.6 + (2/3)*0.4 = 0.12 + 0.267 = 0.387
-    assert health == pytest.approx(0.387, rel=1e-2)
+    # gap=2/3, easy=0.5*0.5=0.25 → 0.4*(2/3)+0.6*0.75
+    assert sampler.compute_health_score(undercovered) > sampler.compute_health_score(easy_full)
 
 
 def test_adaptive_sampler_adjust_weights():
@@ -155,13 +159,9 @@ def test_adaptive_sampler_adjust_weights():
 
     adjusted = sampler.adjust_weights(base_weights, health_scores, rng=rng)
 
-    # cuda has low accept_rate (0.2) and coverage (1/3), so health ~0.387
-    # Adjusted weight = 1.0 * (0.5 + 0.387) = 0.887
-    assert adjusted["cuda"] < base_weights["cuda"]
-
-    # memory has high accept_rate (1.0) and full coverage, so health = 0.6
-    # Adjusted weight = 1.0 * (0.5 + 0.6) = 1.1
-    assert adjusted["memory"] > base_weights["memory"]
+    # Easy fully-covered memory must not outrank unseen compute or under-covered cuda.
+    assert adjusted["memory"] < adjusted["compute"]
+    assert adjusted["cuda"] > adjusted["memory"]
 
 
 def test_adaptive_sampler_epsilon_exploration():
@@ -278,39 +278,35 @@ def test_compute_leaf_stats():
 
 
 def test_low_accept_rate_reduces_weight():
-    """Integration test: low accept_rate leaves should get lower weight."""
-    sampler = AdaptiveSampler(epsilon=0.0, accept_weight=0.6, coverage_weight=0.4)
+    """Reject storms are down-weighted versus under-covered moderate-accept leaves."""
+    sampler = AdaptiveSampler(epsilon=0.0, accept_weight=0.6, coverage_weight=0.4, min_samples=5)
     rng = random.Random(42)
 
-    base_weights = {"domain_healthy": 1.0, "domain_unhealthy": 1.0}
+    base_weights = {"domain_reject_storm": 1.0, "domain_undercovered": 1.0}
 
     health_scores = {
-        # Healthy domain: high accept rate, good coverage
-        "domain_healthy.l2.l3_001": LeafHealthScore(
-            l3_id="domain_healthy.l2.l3_001",
-            domain_id="domain_healthy",
-            accepted=9,
-            rejected=1,
-            total_generated=10,
-            avg_difficulty=2.0,
-            target_quota=3,
-        ),
-        # Unhealthy domain: low accept rate
-        "domain_unhealthy.l2.l3_002": LeafHealthScore(
-            l3_id="domain_unhealthy.l2.l3_002",
-            domain_id="domain_unhealthy",
+        "domain_reject_storm.l2.l3_001": LeafHealthScore(
+            l3_id="domain_reject_storm.l2.l3_001",
+            domain_id="domain_reject_storm",
             accepted=1,
             rejected=9,
             total_generated=10,
             avg_difficulty=2.0,
             target_quota=3,
         ),
+        "domain_undercovered.l2.l3_002": LeafHealthScore(
+            l3_id="domain_undercovered.l2.l3_002",
+            domain_id="domain_undercovered",
+            accepted=2,
+            rejected=3,
+            total_generated=5,
+            avg_difficulty=3.0,
+            target_quota=8,
+        ),
     }
 
     adjusted = sampler.adjust_weights(base_weights, health_scores, rng=rng)
-
-    # Unhealthy domain should have lower weight
-    assert adjusted["domain_unhealthy"] < adjusted["domain_healthy"]
+    assert adjusted["domain_reject_storm"] < adjusted["domain_undercovered"]
 
 
 def test_uncovered_leaves_increase_weight():
@@ -345,9 +341,7 @@ def test_uncovered_leaves_increase_weight():
 
     adjusted = sampler.adjust_weights(base_weights, health_scores, rng=rng)
 
-    # Uncovered domain should have higher weight due to coverage_gap
-    # covered: health = 1.0*0.6 + 0.0*0.4 = 0.6, weight = 1.0*(0.5+0.6) = 1.1
-    # uncovered: health = 0.5*0.6 + 1.0*0.4 = 0.7, weight = 1.0*(0.5+0.7) = 1.2
+    # Uncovered/unseen domain should outrank a fully covered easy leaf.
     assert adjusted["domain_uncovered"] > adjusted["domain_covered"]
 
 

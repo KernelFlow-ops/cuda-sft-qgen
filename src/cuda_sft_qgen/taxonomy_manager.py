@@ -645,38 +645,22 @@ class TaxonomyManager:
         max_new: int,
         near_dup_warnings: str = "",
     ) -> list[dict[str, Any]]:
-        try:
-            system = self._system_for_facet(facet)
-            template = load_prompt("expand")
-        except FileNotFoundError:
-            logger.warning("taxonomy expand prompt missing")
-            return []
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("taxonomy expand prompt failed: %s", exc)
-            return []
-        user = render_expand_user(
-            domain=domain,
-            child=child,
-            facet=facet,
+        from cuda_sft_qgen.keys import PRI_TAXONOMY
+        from cuda_sft_qgen.taxonomy_health.expander import LeafExpander
+
+        expander = LeafExpander(
+            self.taxonomy,
+            self.llm,
+            embedder=self.embedder,
+            priority=PRI_TAXONOMY,
+        )
+        l2_key = f"{domain.get('id')}.{child.get('id')}"
+        facet_id = str(facet.get("id") or "mechanism")
+        return expander.expand_l2(
+            l2_key,
             max_new=max_new,
+            facet_id=facet_id,
             near_dup_warnings=near_dup_warnings,
-            template=template,
-        )
-        obj = self._complete_json(
-            [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ]
-        )
-        raw = _new_leaves(obj)
-        logger.info(
-            "taxonomy llm returned %s new_leaves for %s.%s",
-            len(raw),
-            domain.get("id"),
-            child.get("id"),
-        )
-        return self._validate_and_filter(
-            raw, domain=domain, child=child, max_new=max_new
         )
 
     def llm_health_review(

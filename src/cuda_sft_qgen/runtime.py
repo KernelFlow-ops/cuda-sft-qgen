@@ -212,6 +212,7 @@ def build_runtime(settings: Settings) -> Runtime:
             llm_per_key=settings.llm_per_key_concurrency,
             embed_per_key=settings.embed_per_key_concurrency,
             embed_oversub=settings.embed_oversub,
+            llm_chair_reserve=int(settings.review.get("chair_slot_reserve", 1) or 0),
         )
     llm = build_llm(settings, pool)
     review_model = getattr(settings, "review_model", settings.nvidia_model)
