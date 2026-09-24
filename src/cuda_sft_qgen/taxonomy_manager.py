@@ -10,12 +10,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+import numpy as np
+
 from cuda_sft_qgen.keys import PRI_TAXONOMY
 from cuda_sft_qgen.llm import LLMClient
 from cuda_sft_qgen.models import DiversityReport, Question
 from cuda_sft_qgen.prompts import load_prompt, load_prompt_yaml
 from cuda_sft_qgen.taxonomy import Taxonomy, dump_taxonomy, merge_leaves, patch_leaf
 from cuda_sft_qgen.taxonomy_embed import TaxonomyEmbedIndex
+from cuda_sft_qgen.store.knowledge import official_url
 from cuda_sft_qgen.taxonomy_expand import (
     existing_leaves_payload,
     normalize_leaf_item,
@@ -122,6 +125,9 @@ class TaxonomyHealthReport:
     health_score: float
     question_coverage: float = 0.0
     knowledge_gap_l2: list[str] | None = None
+    external_coverage: float = 1.0
+    external_uncovered: list[str] | None = None
+    external_hard_trigger: bool = False
 
 
 def manager_from_runtime(rt: Any) -> "TaxonomyManager":
@@ -149,6 +155,7 @@ class TaxonomyManager:
         embedder: Any = None,
         embed_index: TaxonomyEmbedIndex | None = None,
         settings: Any = None,
+        external_inventory: Sequence[dict[str, Any]] | None = None,
         target_leaves_per_l2: int = 30,
         min_leaves_per_l2: int = 10,
         max_leaves_per_l2: int = 50,
@@ -175,6 +182,14 @@ class TaxonomyManager:
         self.allow_new_domains = bool(mgr.get("allow_new_domains", False))
         facets = mgr.get("facets") or list(DEFAULT_FACET_IDS)
         self.facet_ids = [str(x) for x in facets] or list(DEFAULT_FACET_IDS)
+        # External inventory is a recall signal, not an authority.  Claims
+        # proposed from it remain provisional until KnowledgeWorker audits them.
+        self.external_inventory = list(external_inventory or []) if external_inventory else []
+        self.external_coverage_threshold = float(mgr.get("external_coverage_threshold", 0.80))
+        self.external_hard_trigger = bool(mgr.get("external_hard_trigger", True))
+        self.external_cosine_threshold = float(mgr.get("external_cosine_threshold", 0.84))
+        self.external_top_k = max(1, int(mgr.get("external_top_k", 5) or 5))
+        self.external_candidate_cap = max(8, int(mgr.get("external_candidate_cap", 64) or 64))
 
         self.embed_index = embed_index
         if self.embed_index is None and embedder is not None and settings is not None:
@@ -196,6 +211,253 @@ class TaxonomyManager:
         self._facets_cache: list[dict[str, Any]] | None = None
         self._last_gray_pairs: list[dict[str, Any]] = []
         self._last_dropped = 0
+
+    @staticmethod
+    def _inventory_text(item: dict[str, Any]) -> str:
+        return " ".join(str(item.get(key) or "") for key in ("id", "concept", "label", "section", "tokens"))
+
+    @staticmethod
+    def _technical_tokens(text: str) -> set[str]:
+        """Identifiers/version tokens whose provenance must be explicit."""
+        out: set[str] = set()
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", str(text)):
+            if (
+                "_" in token
+                or "-" in token
+                or re.search(r"\d", token)
+                or re.search(r"[a-z][A-Z]", token)
+                or (len(token) >= 3 and token.isupper())
+            ):
+                out.add(token.lower().replace("-", "_"))
+        return out
+
+    def external_coverage_report(
+        self,
+        inventory: Sequence[dict[str, Any]] | None = None,
+        *,
+        threshold: float | None = None,
+    ) -> dict[str, Any]:
+        """Compare an external concept inventory with active taxonomy claims.
+
+        This is intentionally lexical and conservative.  It identifies recall
+        gaps for a later critic; it never treats a token match as evidence.
+        """
+        items = [x for x in (inventory if inventory is not None else self.external_inventory) if isinstance(x, dict)]
+        active_leaves = [
+            leaf for leaf in self.taxonomy.leaves
+            if not leaf.retired and str(getattr(leaf, "status", "") or "") != "provisional"
+        ]
+        claims = [str(leaf.claim).lower() for leaf in active_leaves]
+        vectors = None
+        embedded_indices: list[int] = []
+        inventory_texts = [self._inventory_text(item) for item in items]
+        claim_token_sets = [
+            set(re.findall(r"[a-z][a-z0-9_.:-]{2,}", claim)) for claim in claims
+        ]
+        inventory_token_sets = [
+            {tok for tok in re.findall(r"[a-z][a-z0-9_.:-]{2,}", text.lower()) if len(tok) >= 3}
+            for text in inventory_texts
+        ]
+        lexical_rows = [
+            [len(tokens & claim_tokens) / max(len(tokens), 1) for claim_tokens in claim_token_sets]
+            for tokens in inventory_token_sets
+        ]
+        if self.embedder is not None and claims and inventory_texts:
+            try:
+                from cuda_sft_qgen.embeddings import l2_normalize
+                shortlist: set[int] = set()
+                for lexical in lexical_rows:
+                    shortlist.update(
+                        int(idx) for idx in np.argsort(np.asarray(lexical))[::-1][: self.external_candidate_cap]
+                    )
+                embedded_indices = sorted(shortlist)
+                claim_vectors = l2_normalize(np.asarray(
+                    self.embedder.embed([claims[idx] for idx in embedded_indices]),
+                    dtype=np.float32,
+                ))
+                query_vectors = l2_normalize(np.asarray(self.embedder.embed(inventory_texts), dtype=np.float32))
+                vectors = query_vectors @ claim_vectors.T
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("external coverage embedding failed: %s", exc)
+        covered, uncovered = [], []
+        for row, item in enumerate(items):
+            concept = self._inventory_text(item).lower()
+            tokens = {tok for tok in re.findall(r"[a-z][a-z0-9_.:-]{2,}", concept) if len(tok) >= 3}
+            # Require either a full phrase or two technical tokens in one claim.
+            phrase = " ".join(str(item.get("concept") or item.get("label") or "").lower().split())
+            lexical = lexical_rows[row]
+            hit = any(phrase and phrase in claim for claim in claims)
+            if not hit and tokens:
+                hit = any(score >= 0.6 for score in lexical)
+            candidate_rows: list[dict[str, Any]] = []
+            if claims:
+                scores = vectors[row] if vectors is not None else np.asarray(lexical, dtype=np.float32)
+                for idx in np.argsort(scores)[::-1][: self.external_top_k]:
+                    leaf_idx = embedded_indices[int(idx)] if vectors is not None else int(idx)
+                    candidate_rows.append({
+                        "l3_id": active_leaves[leaf_idx].l3_id,
+                        "l2_key": f"{active_leaves[leaf_idx].domain_id}.{active_leaves[leaf_idx].l2_id}",
+                        "status": str(getattr(active_leaves[leaf_idx], "status", "legacy_unreviewed")),
+                        "cosine": float(scores[int(idx)]) if vectors is not None else None,
+                        "lexical": float(lexical[leaf_idx]) if lexical else 0.0,
+                    })
+                if vectors is not None and candidate_rows and candidate_rows[0]["cosine"] >= self.external_cosine_threshold:
+                    hit = True
+            enriched = dict(item)
+            enriched["top_candidates"] = candidate_rows
+            (covered if hit else uncovered).append(enriched)
+        total = len(items)
+        ratio = len(covered) / total if total else 1.0
+        limit = self.external_coverage_threshold if threshold is None else float(threshold)
+        return {
+            "total": total,
+            "covered": len(covered),
+            "coverage": ratio,
+            "uncovered": uncovered,
+            "threshold": limit,
+            "hard_trigger": self.external_hard_trigger and bool(items) and ratio < limit,
+        }
+
+    def _external_critic(
+        self,
+        inventory: Sequence[dict[str, Any]],
+        coverage: dict[str, Any],
+        *,
+        max_new: int,
+    ) -> dict[str, Any]:
+        """Ask an independent taxonomy critic to route inventory gaps.
+
+        The critic may suggest a new axis, but this pipeline only applies
+        proposals mapped to an existing L2.  New-axis suggestions are returned
+        for human/offline review and are never silently inserted.
+        """
+        if max_new <= 0:
+            return {"status": "zero_leaf_budget"}
+        if self._in_tick and self._llm_calls >= self.max_llm_calls_per_tick:
+            return {"status": "llm_budget_exhausted"}
+        try:
+            prompt = load_prompt("critic")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("taxonomy critic prompt missing: %s", exc)
+            return {}
+        active_by_id = {
+            leaf.l3_id: {"l2": f"{leaf.domain_id}.{leaf.l2_id}", "l3_id": leaf.l3_id, "claim": leaf.claim, "kind": leaf.kind}
+            for leaf in self.taxonomy.leaves if not leaf.retired
+        }
+        relevant_ids = {
+            candidate["l3_id"]
+            for item in inventory
+            for candidate in (item.get("top_candidates") or [])[: self.external_top_k]
+            if candidate.get("l3_id") in active_by_id
+        }
+        active = [active_by_id[key] for key in sorted(relevant_ids)]
+        obj = self._complete_json([
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": _dumps({
+                "inventory": list(inventory)[:200],
+                "coverage": {key: coverage.get(key) for key in ("total", "covered", "coverage", "threshold")},
+                "active_l2": sorted({row["l2"] for row in active}),
+                "relevant_claims": active,
+                "max_new": max_new,
+            })},
+        ], count=True)
+        if not isinstance(obj, dict) or not obj:
+            raise RuntimeError("taxonomy critic returned no valid result")
+        return obj
+
+    def external_critic(
+        self,
+        inventory: Sequence[dict[str, Any]] | None = None,
+        *,
+        max_new: int = 12,
+    ) -> dict[str, Any]:
+        """Return coverage and critic proposals without mutating taxonomy."""
+        items = list(inventory if inventory is not None else self.external_inventory)
+        coverage = self.external_coverage_report(items)
+        if not coverage["hard_trigger"]:
+            return {"coverage": coverage, "proposals": [], "new_axes": [], "status": "covered"}
+        notes = self._external_critic(coverage["uncovered"], coverage, max_new=max_new)
+        if notes.get("status") in {"zero_leaf_budget", "llm_budget_exhausted"}:
+            return {
+                "coverage": coverage,
+                "proposals": [],
+                "new_axes": [],
+                "split": [],
+                "merge": [],
+                "health_notes": [],
+                "status": notes["status"],
+            }
+        return {
+            "coverage": coverage,
+            "proposals": list(notes.get("proposals") or notes.get("new_leaves") or []),
+            "new_axes": list(notes.get("new_axes") or notes.get("new_l2") or []),
+            "split": list(notes.get("split") or notes.get("splits") or []),
+            "merge": list(notes.get("merge") or notes.get("merges") or []),
+            "health_notes": list(notes.get("health_notes") or []),
+            "status": "gap_detected",
+        }
+
+    def _validate_external_proposals(
+        self,
+        proposals: Sequence[dict[str, Any]],
+        *,
+        max_new: int,
+    ) -> list[dict[str, Any]]:
+        """Keep only critic proposals routed to an existing L2."""
+        accepted: list[dict[str, Any]] = []
+        inventory_by_id = {
+            str(item.get("id") or ""): item
+            for item in self.external_inventory
+            if isinstance(item, dict) and item.get("id")
+        }
+        inventory_urls = {
+            str(item.get("url") or "")
+            for item in inventory_by_id.values()
+            if official_url(str(item.get("url") or ""))
+        }
+        for proposal in proposals:
+            if not isinstance(proposal, dict):
+                continue
+            l2_key = str(proposal.get("l2_key") or "")
+            if not l2_key:
+                domain_id = str(proposal.get("domain_id") or "")
+                l2_id = str(proposal.get("l2_id") or "")
+                l2_key = f"{domain_id}.{l2_id}" if domain_id and l2_id else ""
+            pair = self._lookup_l2(l2_key)
+            if pair is None:
+                continue
+            domain, child = pair
+            item = dict(proposal)
+            item["domain_id"] = domain["id"]
+            item["domain_name"] = domain.get("name", domain["id"])
+            item["l2_id"] = child["id"]
+            item["l2_name"] = child.get("name", child["id"])
+            item.setdefault("source", "external_inventory")
+            inventory_id = str(item.get("inventory_id") or "")
+            source_item = inventory_by_id.get(inventory_id)
+            source_url = str(
+                (source_item or {}).get("url")
+                or item.get("source_url")
+                or item.get("url")
+                or ""
+            )
+            if not source_url or not official_url(source_url) or source_url not in inventory_urls:
+                continue
+            unsupported_tokens = self._technical_tokens(str(item.get("claim") or "")) - self._technical_tokens(
+                str((source_item or {}).get("concept") or "")
+            )
+            if unsupported_tokens:
+                logger.info(
+                    "drop external proposal %s: unsupported source tokens %s",
+                    item.get("l3_id"), sorted(unsupported_tokens),
+                )
+                continue
+            item["inventory_id"] = inventory_id or str((source_item or {}).get("id") or "")
+            item["sources"] = list(dict.fromkeys([*(item.get("sources") or []), source_url])) if source_url else list(item.get("sources") or [])
+            accepted.extend(self._validate_and_filter([item], domain=domain, child=child, max_new=1))
+            if len(accepted) >= max(0, int(max_new)):
+                break
+        return accepted
 
     def analyze_health(
         self,
@@ -292,6 +554,7 @@ class TaxonomyManager:
             short_claims, kind_imbalance, no_questions
         )
 
+        external = self.external_coverage_report()
         return TaxonomyHealthReport(
             total_leaves=total_leaves,
             total_l2_nodes=len(l2_leaf_counts),
@@ -312,6 +575,9 @@ class TaxonomyManager:
             health_score=score,
             question_coverage=(1.0 - len(no_questions) / total_leaves) if accepted_questions is not None and total_leaves else 0.0,
             knowledge_gap_l2=empty_l2 + [key for key, _ in sparse_l2],
+            external_coverage=external.get("coverage", 1.0),
+            external_uncovered=[str(x.get("concept") or x.get("label") or x.get("id") or "") for x in external.get("uncovered", [])],
+            external_hard_trigger=bool(external.get("hard_trigger")),
         )
 
     def _find_generic_claims(self) -> list[str]:
@@ -550,6 +816,9 @@ class TaxonomyManager:
             "l1_imbalance_ratio": health.l1_imbalance_ratio,
             "question_coverage": health.question_coverage,
             "knowledge_gap_l2": health.knowledge_gap_l2,
+            "external_coverage": health.external_coverage,
+            "external_uncovered": health.external_uncovered or [],
+            "external_hard_trigger": health.external_hard_trigger,
         }
 
     def _validate_and_filter(
@@ -1091,7 +1360,9 @@ class TaxonomyManager:
             facet = self.choose_facet(health, last_facet)
             underrep = self._underrep_keys(diversity_report)
             empty_or_sparse = bool(health.empty_l2_nodes or health.sparse_l2_nodes)
-            if health.leaves_with_high_reject_rate or (underrep and empty_or_sparse):
+            if health.external_hard_trigger:
+                mission = "external_coverage"
+            elif health.leaves_with_high_reject_rate or (underrep and empty_or_sparse):
                 mission = "gap_search"
             elif self._pick_expand_l2(health):
                 mission = "expand"
@@ -1103,7 +1374,12 @@ class TaxonomyManager:
             if data_dir is not None:
                 self.persist_health(payload, Path(data_dir) / "taxonomy_health.json")
 
-            if fake_llm or not self.enabled or health.health_score >= self.health_expand_threshold:
+            # External gaps are a hard trigger: a healthy existing tree must
+            # not suppress discovery of concepts absent from the taxonomy.
+            if fake_llm or not self.enabled or (
+                health.health_score >= self.health_expand_threshold
+                and mission != "external_coverage"
+            ):
                 return self._tick_result(
                     health=health,
                     total_added=0,
@@ -1126,7 +1402,22 @@ class TaxonomyManager:
             )
             leaf_cap = max(0, min(leaf_cap, 20))
 
-            if mission == "expand":
+            if mission == "external_coverage":
+                inventory = list(self.external_inventory)
+                critic = self.external_critic(inventory, max_new=min(leaf_cap, 20))
+                external_proposals = self._validate_external_proposals(
+                    critic.get("proposals") or [], max_new=min(leaf_cap, 20)
+                )
+                n = self._commit_leaves(external_proposals, apply=apply)
+                total_added += n
+                expansions.append({
+                    "mission": "external_coverage",
+                    "added": n,
+                    "new_axes": critic.get("new_axes") or [],
+                    "uncovered": len((critic.get("coverage") or {}).get("uncovered") or []),
+                })
+                llm_notes = critic
+            elif mission == "expand":
                 l2_key = self._pick_expand_l2(health)
                 if l2_key:
                     pair = self._lookup_l2(l2_key)

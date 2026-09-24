@@ -103,9 +103,48 @@ def test_positive_slots_cover_dimensions():
     ids = [p.question.id for p in picks]
     assert "a6" not in ids
     slots = {p.slot for p in picks}
-    assert "A" in slots
+    # Cross-domain seeds are intentionally excluded; same-L3 remains valid.
+    assert "B" in slots
     assert len(ids) == len(set(ids))
-    assert len(picks) >= 4
+    # The T08 domain has only one usable seed; do not backfill from another
+    # domain just to satisfy a fixed few-shot count.
+    assert len(picks) >= 1
+
+
+def test_positive_seed_bucket_is_preferred():
+    exact = _q(
+        id="bucket",
+        l3_id="tma_desc",
+        question_type="debug",
+        kind="failure",
+        hardware="hopper",
+        topic_path=["T08", "tma", "tma_desc"],
+        question="TMA descriptor failure: which launch path is invalid?",
+    )
+    other = _q(
+        id="other",
+        l3_id="other_leaf",
+        question_type="debug",
+        kind="failure",
+        hardware="hopper",
+        question="Another debug question about a different leaf.",
+    )
+    picks = select_positives(_brief(), FewshotCorpus(accepted=[other, exact]), FewshotCfg())
+    assert picks[0].question.id == "bucket"
+    assert picks[0].slot == "S"
+
+
+def test_empty_domain_bucket_does_not_mix_cross_domain_seed():
+    other = _q(
+        id="other-domain",
+        topic_path=["T99", "other", "leaf"],
+        l3_id="other_leaf",
+        question_type="debug",
+        kind="failure",
+        hardware="hopper",
+    )
+    picks = select_positives(_brief(), FewshotCorpus(accepted=[other]), FewshotCfg())
+    assert picks == []
 
 
 def test_negatives_prefer_same_l3_and_skip_empty_429():

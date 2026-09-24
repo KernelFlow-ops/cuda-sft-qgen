@@ -200,6 +200,7 @@ class Archive:
                     if hasattr(q, "review_details"):
                         q.review_details = {"action": "pending", "reason": reason}
                         q.internal_reference_answer = None
+                        q.verification_evidence = {}
                     for name, value in (("review_attempts", 0), ("review_next_at", 0.0),
                                         ("review_exhausted", False)):
                         if hasattr(q, name):
@@ -217,13 +218,10 @@ class Archive:
             rows = self._db.execute("SELECT payload FROM corrections ORDER BY rowid").fetchall()
         return [json.loads(row[0]) for row in rows]
 
-    def export_training(self, path: Path) -> dict[str, Any]:
-        """Write accepted, independently reviewed questions for SFT (no private answers)."""
+    def _exportable_questions(self) -> tuple[list[Question], int]:
+        """Revalidate every accepted row through the same gate for all exports."""
         from cuda_sft_qgen.models import QualityReview
 
-        path = Path(path)
-        if path.resolve() in {self.accepted_path.resolve(), self.rejected_path.resolve(), self.pending_path.resolve()}:
-            raise ValueError("Training export must not replace the archive's compatibility files")
         rows: list[Question] = []
         skipped = 0
         for q in self.load_accepted():
@@ -242,9 +240,26 @@ class Archive:
                     raise ValueError("review identity/action mismatch")
                 if not details.get("reviewer_independent", True):
                     raise ValueError("review is not independently produced")
+                evidence = q.verification_evidence or details.get("verification_evidence") or {}
+                if q.draft_validation_errors:
+                    raise ValueError("invalid generation contract")
+                if (q.verification_spec or q.draft_plan or q.generation_provenance.get("structured_cot")) and evidence.get("status") != "pass":
+                    raise ValueError("structured question requires independent verification")
+                if evidence and evidence.get("status") not in {"pass", "disabled"}:
+                    raise ValueError("verification not passed")
                 rows.append(q)
             except Exception:
                 skipped += 1
+        return rows, skipped
+
+    def export_training(self, path: Path) -> dict[str, Any]:
+        """Write accepted, independently reviewed questions for SFT (no private answers)."""
+        from cuda_sft_qgen.models import QualityReview
+
+        path = Path(path)
+        if path.resolve() in {self.accepted_path.resolve(), self.rejected_path.resolve(), self.pending_path.resolve(), self.database_path.resolve()}:
+            raise ValueError("Training export must not replace the archive's compatibility files")
+        rows, skipped = self._exportable_questions()
         export_id = uuid.uuid4().hex
         write_jsonl(path, [q.to_jsonl() for q in rows])
         with self._lock, self._db:
@@ -254,6 +269,77 @@ class Archive:
                     "created_at": time.time(), "corrections": self.corrections()}
         path.with_suffix(path.suffix + ".manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.export_curriculum_manifest(path.with_suffix(path.suffix + ".curriculum.json"), member_ids={q.id for q in rows})
+        return manifest
+
+    def export_curriculum_manifest(self, path: Path, *, member_ids: set[str] | None = None) -> dict[str, Any]:
+        """Write a mode/difficulty curriculum index beside an SFT export.
+
+        ``mixup_mode`` is intentionally orthogonal to assessed difficulty.  A
+        training consumer can therefore follow decomposed → original → hybrid
+        while still balancing CUDA difficulty, hardware, and taxonomy coverage.
+        """
+        rows, skipped = self._exportable_questions()
+        if member_ids is not None:
+            rows = [q for q in rows if q.id in member_ids]
+        stages = {"decomposed": 0, "original": 0, "hybrid": 0, "unmarked": 0}
+        buckets: dict[str, int] = {}
+        members: list[dict[str, Any]] = []
+        # Union parent edges before assigning a deterministic split. Otherwise
+        # a hybrid can leak either training parent into validation/test.
+        import hashlib
+        roots: dict[str, str] = {}
+        def root(qid: str) -> str:
+            roots.setdefault(qid, qid)
+            if roots[qid] != qid:
+                roots[qid] = root(roots[qid])
+            return roots[qid]
+        for q in rows:
+            for parent in q.parent_ids:
+                left, right = root(q.id), root(parent)
+                roots[max(left, right)] = min(left, right)
+        for question in rows:
+            mode = str(getattr(question, "mixup_mode", None) or "original")
+            if mode not in stages:
+                mode = "unmarked"
+            stages[mode] += 1
+            difficulty = int(getattr(question, "difficulty", 0) or 0)
+            key = "|".join((mode, str(difficulty), ".".join(question.topic_path[:2]), question.kind, question.hardware, question.language))
+            buckets[key] = buckets.get(key, 0) + 1
+            family = root(question.id)
+            fold = int(hashlib.sha256(family.encode()).hexdigest()[:8], 16) % 100
+            split = "train" if fold < 80 else "validation" if fold < 90 else "test"
+            members.append({"id": question.id, "stage": mode, "difficulty": difficulty, "bucket": key,
+                            "family_id": family, "split": split, "parent_ids": question.parent_ids,
+                            "requested_difficulty": question.requested_metadata.get("difficulty"),
+                            "difficulty_raw_score": question.difficulty_raw_score})
+        # Produce a reproducible stratified audit queue; generating this queue
+        # is not a claim that a human has reviewed its members. Small buckets
+        # retain at least one sample so rare CUDA subjects are represented.
+        audit_ids = []
+        for bucket in sorted(buckets):
+            group = sorted((m["id"] for m in members if m["bucket"] == bucket),
+                           key=lambda qid: hashlib.sha256(qid.encode()).hexdigest())
+            audit_ids.extend(group[:max(1, (len(group) + 9) // 10)])
+        manifest = {
+            "created_at": time.time(),
+            "questions": len(rows),
+            "stage_order": ["decomposed", "original", "hybrid"],
+            "skipped_unverified": skipped,
+            "split_policy": "parent-family hash 80/10/10; split before further synthesis; never use held-out seeds",
+            "large_family_warning": max(Counter(m["family_id"] for m in members).values(), default=0) > max(1, len(rows) // 2),
+            "stages": stages,
+            "buckets": buckets,
+            "members": members,
+            "human_audit": {"status": "not_performed", "fraction": 0.10, "question_ids": audit_ids},
+            "path": str(path),
+        }
+        path = Path(path)
+        if path.resolve() in {p.resolve() for p in (self.accepted_path, self.rejected_path, self.pending_path, self.database_path)}:
+            raise ValueError("Curriculum manifest must not replace the archive")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.chmod(0o600)
         return manifest
 
     def requeue_reviews(self, *, include_exhausted: bool = False) -> int:

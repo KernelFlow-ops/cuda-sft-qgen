@@ -9,15 +9,10 @@ __pycache__/
 .ruff_cache/
 dist/
 build/
-data/*.jsonl
-data/*.json
-data/*.npz
-data/*.db
-data/*.index
-data/*.log
-!data/.gitkeep
 .agents/
 .coverage
 htmlcov/
 data/
 logs/
+paper/
+.zip

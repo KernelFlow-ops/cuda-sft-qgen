@@ -23,6 +23,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 hf = ["sentence-transformers>=3.0.0"]
+verify = ["sympy>=1.12"]
 
 [project.scripts]
 cuda-sft-qgen = "cuda_sft_qgen.cli:main"

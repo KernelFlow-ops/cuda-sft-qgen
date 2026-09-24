@@ -96,6 +96,8 @@ def planner_node(state: PipelineState) -> dict:
                 adaptive_config=adaptive_config,
                 rejected=rejected,
                 knowledge=getattr(rt, "knowledge", None),
+                embedder=getattr(rt, "embedder", None),
+                mixup_config=(getattr(rt.settings, "default_yaml", {}) or {}).get("mixup"),
             )
         except Exception as exc:
             raise PlannerError(

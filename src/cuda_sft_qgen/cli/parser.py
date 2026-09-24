@@ -5,6 +5,7 @@ import argparse
 
 from cuda_sft_qgen.cli.config_cmds import cmd_estimate_cost, cmd_gate, cmd_review_benchmark, cmd_validate_config
 from cuda_sft_qgen.cli.generate import cmd_benchmark, cmd_export, cmd_generate, cmd_probe_concurrency, cmd_resume, cmd_stats
+from cuda_sft_qgen.cli.generate import cmd_agent_pilot
 from cuda_sft_qgen.cli.knowledge import cmd_knowledge
 from cuda_sft_qgen.cli.taxonomy import (
     cmd_expand_taxonomy,
@@ -50,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_stats)
 
     kb = sub.add_parser("knowledge", help="query, audit, and export the versioned knowledge graph")
-    kb.add_argument("action", choices=["stats", "query", "audit", "impact", "export", "graph", "viz", "ingest-pack", "expand", "relate"])
+    kb.add_argument("action", choices=["stats", "query", "audit", "impact", "export", "graph", "viz", "ingest-pack", "expand", "relate", "inventory"])
     kb.add_argument("--data-dir", default=None)
     kb.add_argument("--claim", default=None)
     kb.add_argument("--output", default=None)
@@ -65,6 +66,14 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--data-dir", default=None)
     export.add_argument("--output", required=True)
     export.set_defaults(func=cmd_export)
+
+    pilot = sub.add_parser("agent-pilot", help="bounded real API synthesis/review ablation in isolated archives")
+    pilot.add_argument("--output", required=True)
+    pilot.add_argument("--samples", type=int, default=2)
+    pilot.add_argument("--max-calls", type=int, default=120)
+    pilot.add_argument("--timeout", type=float, default=1800)
+    pilot.add_argument("--groups", nargs="+", choices=["A", "B", "C", "D"], default=["A", "B", "C", "D"])
+    pilot.set_defaults(func=cmd_agent_pilot)
 
     bench = sub.add_parser("benchmark", help="run an isolated fixed-snapshot generation benchmark")
     bench.add_argument("--output", required=True)
@@ -182,5 +191,3 @@ def build_parser() -> argparse.ArgumentParser:
     te.set_defaults(func=cmd_taxonomy_expand)
 
     return p
-
-

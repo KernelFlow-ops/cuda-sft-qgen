@@ -96,6 +96,23 @@ quotes, calculations, code locations, or supplied source IDs. Never manufacture 
 source citation. The reference answer and evidence are internal audit material.
 
 Return exactly one JSON object with these required fields and no extra keys.
+When required_construction_checks is nonempty, also return construction_checks:
+a mapping from each required name to pass|fail|uncertain. Otherwise omit it.
+For oracle_alignment, inspect whether the Writer-proposed verification_spec
+actually encodes the public question's premises and requested result; the spec
+is untrusted. A program that compiles is not proof of correct CUDA semantics.
+For parent_claim_alignment and mode_validity, check both supplied parent claims
+contribute to a hybrid; a decomposed question preserves the harder parent's
+core mechanism while simplifying a dependency. Do not require it to be easier
+than the easier parent: decomposed difficulty belongs BETWEEN the two parents.
+For difficulty_order, assess independently of the requested label. A hybrid
+must exceed the harder parent's difficulty, except a saturated level-4 label.
+For complexity_change, name a substantive dependency removed (decomposed) or
+added (hybrid); longer wording and a bigger number alone do not establish it.
+Solver votes and execution outputs are fallible evidence. Never infer absence
+of a race or undefined behavior from a single successful execution, or infer a
+deadlock solely from a timeout. Match expected compilation FAILURE as well as
+success to the question. Unsupported toolkit/architecture is inconclusive.
 Keep `reason` ≤ 400 characters. At most 3 evidence strings, each ≤ 200 characters.
 Do not paste the full stem into reason or evidence. `internal_reference_answer`
 ≤ 400 characters.

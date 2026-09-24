@@ -17,6 +17,12 @@ from typing import Any, Sequence
 import yaml
 
 from cuda_sft_qgen.models import Question, QuestionBrief, SteeringBrief
+from cuda_sft_qgen.planner.pair_mining import (
+    PairCandidate,
+    env_mixup_enabled,
+    mine_pairs,
+    mixup_payload,
+)
 from cuda_sft_qgen.review.diversity import residual_weights
 from cuda_sft_qgen.taxonomy import Leaf, Taxonomy
 
@@ -153,6 +159,97 @@ def _count_axis(questions: Sequence[Question], attr: str) -> dict[str, int]:
     return dict(Counter(str(getattr(q, attr)) for q in questions))
 
 
+def _load_mixup_config() -> dict[str, Any]:
+    """Load the planner-level mixup feature flag without importing runtime config."""
+    try:
+        from cuda_sft_qgen.config import find_project_root
+
+        path = find_project_root() / "configs" / "default.yaml"
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        value = raw.get("mixup") or {}
+        return dict(value) if isinstance(value, dict) else {}
+    except (OSError, TypeError, ValueError, yaml.YAMLError):
+        return {}
+
+
+def _resolve_mixup_config(
+    explicit: dict[str, Any] | None,
+    adaptive_config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Resolve explicit, runtime, file, and environment mixup settings."""
+    if explicit is not None:
+        config = dict(explicit)
+    else:
+        config = _load_mixup_config()
+        nested = (adaptive_config or {}).get("mixup")
+        if isinstance(nested, dict):
+            config.update(nested)
+    config["enabled"] = env_mixup_enabled(bool(config.get("enabled", False)))
+    return config
+
+
+def _mixup_specs(
+    seed_pool: Sequence[Question],
+    *,
+    n: int,
+    config: dict[str, Any],
+    embedder: Any | None = None,
+    active_claims: dict[str, Leaf] | None = None,
+    parent_reuse_counts: dict[str, int] | None = None,
+    knowledge: Any | None = None,
+) -> list[tuple[PairCandidate, str]]:
+    """Build bounded mode/pair assignments for the next writer batch."""
+    if not config.get("enabled", False) or not seed_pool:
+        return []
+    modes = [str(mode).strip().lower() for mode in (config.get("modes") or ["decomposed", "hybrid"])]
+    modes = [mode for mode in modes if mode in {"decomposed", "hybrid"}]
+    if not modes:
+        return []
+    fraction = min(1.0, max(0.0, float(config.get("fraction", 0.30))))
+    wanted = min(int(round(max(0, n) * fraction)), int(config.get("max_batch_items", n)))
+    if wanted <= 0:
+        return []
+    pairs = mine_pairs(
+        seed_pool,
+        # Production planning uses the configured embedding service.  The
+        # hashed fallback remains deterministic for offline tests only.
+        embedder=embedder,
+        min_similarity=float(config.get("pair_similarity_min", 0.80)),
+        max_similarity=float(config.get("pair_similarity_max", 0.995)),
+        top_k=max(1, int(config.get("pair_top_k", 8))),
+        max_pairs=max(1, int(config.get("max_pairs", wanted))),
+        max_pairs_per_item=max(1, int(config.get("max_pairs_per_item", 1))),
+        parent_reuse_counts=parent_reuse_counts,
+        max_parent_reuse=max(1, int(config.get("max_parent_reuse", 3))),
+        min_difficulty_gap=max(1, int(config.get("min_difficulty_gap", 1))),
+        same_l2=bool(config.get("same_l2", True)),
+        related_claims=({q.l3_id: set(knowledge.related_claim_ids(q.l3_id)) for q in seed_pool}
+                        if knowledge is not None and not config.get("same_l2", True) else None),
+        same_language=bool(config.get("same_language", True)),
+        same_granularity=bool(config.get("same_granularity", True)),
+        active_claims=active_claims,
+        lsh_tables=max(1, int(config.get("lsh_tables", 6))),
+        lsh_bits=max(2, int(config.get("lsh_bits", 12))),
+        lsh_max_bucket_size=max(2, int(config.get("lsh_max_bucket_size", 64))),
+        lsh_max_candidates=max(4, int(config.get("lsh_max_candidates", 128))),
+        lsh_seed=int(config.get("lsh_seed", 17)),
+    )
+    specs: list[tuple[PairCandidate, str]] = []
+    reuse = dict(parent_reuse_counts or {})
+    cap = max(1, int(config.get("max_parent_reuse", 3)))
+    for pair in pairs:
+        for mode in modes:
+            if len(specs) >= wanted:
+                return specs
+            parent_ids = [pair.low.id, pair.high.id]
+            if any(reuse.get(qid, 0) >= cap for qid in parent_ids):
+                continue
+            specs.append((pair, mode))
+            for qid in parent_ids:
+                reuse[qid] = reuse.get(qid, 0) + 1
+    return specs
+
+
 def plan_briefs(
     *,
     n: int,
@@ -170,6 +267,8 @@ def plan_briefs(
     adaptive_config: dict[str, Any] | None = None,
     rejected: Sequence[Question] | None = None,
     knowledge: Any | None = None,
+    mixup_config: dict[str, Any] | None = None,
+    embedder: Any | None = None,
 ) -> list[QuestionBrief]:
     """Sample ``n`` writer/evolver briefs from residual quotas and steering.
 
@@ -178,6 +277,26 @@ def plan_briefs(
     health. Knowledge context is attached when a store is provided.
     """
     rng = rng or random.Random()
+    resolved_mixup = _resolve_mixup_config(mixup_config, adaptive_config)
+    active_claims = {
+        leaf.l3_id: leaf
+        for leaf in taxonomy.leaves
+        if not leaf.retired and str(getattr(leaf, "status", "") or "").lower()
+        not in {"retired", "quarantined", "provisional"}
+    }
+    parent_reuse_counts: Counter[str] = Counter()
+    for existing in list(accepted) + list(pending):
+        for parent_id in getattr(existing, "parent_ids", ()) or ():
+            parent_reuse_counts[str(parent_id)] += 1
+    mixup_specs = _mixup_specs(
+        seed_pool,
+        n=n,
+        config=resolved_mixup,
+        embedder=embedder,
+        active_claims=active_claims,
+        parent_reuse_counts=dict(parent_reuse_counts),
+        knowledge=knowledge,
+    )
     raw_angles = angles if angles is not None else load_angles()
     angle_table: dict[str, list[dict[str, Any]]] = {
         k: [_as_angle_card(x) for x in (v or [])] for k, v in raw_angles.items()
@@ -249,7 +368,7 @@ def plan_briefs(
     persona_ids = list(personas.keys()) or ["cuda_interviewer"]
     leaves_by_l1: dict[str, list[Leaf]] = {}
     for leaf in taxonomy.leaves:
-        if leaf.retired or str(getattr(leaf, "status", "") or "") == "quarantined":
+        if leaf.retired or str(getattr(leaf, "status", "") or "") in {"quarantined", "provisional"}:
             continue
         l2_key = f"{leaf.domain_id}.{leaf.l2_id}"
         if l2_key in blocked_l2:
@@ -259,7 +378,7 @@ def plan_briefs(
     if not usable_l1:
         leaves_by_l1 = {}
         for leaf in taxonomy.leaves:
-            if leaf.retired or str(getattr(leaf, "status", "") or "") == "quarantined":
+            if leaf.retired or str(getattr(leaf, "status", "") or "") in {"quarantined", "provisional"}:
                 continue
             leaves_by_l1.setdefault(leaf.domain_id, []).append(leaf)
         usable_l1 = list(leaves_by_l1)
@@ -314,7 +433,9 @@ def plan_briefs(
                    for leaf_id in by_id}
         return by_id[_weighted_choice(rng, weights)]
 
+    leaf_by_id = {leaf.l3_id: leaf for leaf in all_leaves}
     for i in range(n):
+        mixup_spec = mixup_specs[i] if i < len(mixup_specs) else None
         l1 = _weighted_choice(rng, l1_weights)
         candidates = leaves_by_l1[l1]
         unused = [lf for lf in candidates if lf.l3_id not in used_l3]
@@ -325,6 +446,16 @@ def plan_briefs(
             leaf = choose_leaf(pool_unused or candidates)
         else:
             leaf = choose_leaf(candidates)
+        if mixup_spec is not None:
+            pair, _mode = mixup_spec
+            # The generated question remains anchored to the lower-difficulty
+            # parent's leaf; the second parent is supplied as a compatible
+            # constraint in the evolver seed/context below.
+            anchored = leaf_by_id.get(str(getattr(pair.high, "l3_id", "")))
+            if anchored is None:
+                anchored = leaf_by_id.get(str(getattr(pair.low, "l3_id", "")))
+            if anchored is not None:
+                leaf = anchored
         # Prefer leaf-native types if they have residual mass.
         native = [t for t in leaf.types if t in type_w]
         if native and rng.random() < 0.7:
@@ -337,6 +468,10 @@ def plan_briefs(
             difficulty = int(_weighted_choice(rng, {d: diff_w.get(d, 0.05) for d in native_d}))
         else:
             difficulty = int(_weighted_choice(rng, diff_w))
+        if mixup_spec is not None:
+            # Use a deterministic target as a request; independent review may
+            # revise the assessed difficulty later.
+            difficulty = int(mixup_payload(*mixup_spec)["difficulty_target"])
         bloom = _weighted_choice(rng, bloom_w) if bloom_w else rng.choice(BLOOMS)
         # Definition-only remember+conceptual is allowed but rare.
         if bloom == "remember" and qtype == "conceptual" and rng.random() < 0.7:
@@ -358,11 +493,31 @@ def plan_briefs(
             hardware = next(iter(allowed_hw))
         granularity = _weighted_choice(rng, gran_w) if gran_w else "kernel"
         language = _weighted_choice(rng, lang_w) if lang_w else "zh"
+        if mixup_spec is not None:
+            # Pair compatibility is wasted if the subsequent quota draw assigns
+            # a different language/architecture to its child. Carry the parents'
+            # common environment into the synthesis request.
+            parent = mixup_spec[0].high
+            hardware = parent.hardware
+            granularity = parent.granularity
+            language = parent.language
         persona = rng.choice(persona_ids)
         role: str = "writer"
         seed_q = None
         seed_id = None
-        if i < n_evolver:
+        mixup_context: dict[str, Any] | None = None
+        if mixup_spec is not None:
+            pair, mode = mixup_spec
+            mixup_context = mixup_payload(pair, mode)
+            role = "evolver"
+            # Pair identity is retained for seed tracing; mode and parent
+            # metadata live in the structured fields below.
+            seed_id = mixup_context["pair_id"]
+            seed_q = (
+                f"PARENT A (lower difficulty):\n{getattr(pair.low, 'question', '')}\n\n"
+                f"PARENT B (higher difficulty):\n{getattr(pair.high, 'question', '')}"
+            ).strip()
+        if mixup_spec is None and i < n_evolver:
             seed_candidates = [q for q in seed_pool if q.l3_id == leaf.l3_id]
             if not seed_candidates and knowledge is not None:
                 related = set(knowledge.related_claim_ids(leaf.l3_id))
@@ -373,6 +528,19 @@ def plan_briefs(
                 seed_q = seed.question
                 seed_id = seed.id
         hint = _instance_hint(leaf, rng)
+        if mixup_context is not None:
+            parent_claims = [
+                str(getattr(mixup_context_item, "tests_claim", "") or "").strip()
+                for mixup_context_item in (mixup_spec[0].low, mixup_spec[0].high)
+            ]
+            hint = (
+                f"MIXUP_MODE={mixup_context['mode']}; target difficulty="
+                f"{mixup_context['difficulty_target']}; raw target="
+                f"{mixup_context['difficulty_raw_score']}. "
+                f"{mixup_context['difficulty_policy']} Parent claims: "
+                + " | ".join(claim for claim in parent_claims if claim)
+                + f". Concrete instance: {hint}"
+            )
         card = _pick_angle(rng, qtype, angle_table, kind=leaf.kind or None)
         angle = str(card.get("ask") or "")
         if (leaf.l3_id, angle) in used_pair:
@@ -413,6 +581,22 @@ def plan_briefs(
                 "Other angles (contrast only, do not mix in):\n"
                 + "\n".join(f"- {c.get('ask')}" for c in others)
             )
+        context = (
+            knowledge.context_for_generation(
+                leaf.l3_id, revision=getattr(leaf, "revision", 1), max_claims=6
+            )
+            if knowledge is not None and hasattr(knowledge, "context_for_generation")
+            else (
+                knowledge.context_for_claim(leaf.l3_id, revision=getattr(leaf, "revision", 1))
+                if knowledge is not None
+                else {}
+            )
+        )
+        if not isinstance(context, dict):
+            context = {}
+        if mixup_context is not None:
+            context = dict(context)
+            context["mixup"] = mixup_context
         briefs.append(
             QuestionBrief(
                 topic_path=list(leaf.path),
@@ -440,21 +624,20 @@ def plan_briefs(
                 breadth_or_depth=breadth_signal,
                 claim_revision=getattr(leaf, "revision", 1),
                 source_ids=list(getattr(leaf, "sources", ())),
-                knowledge_context=(
-                    knowledge.context_for_generation(
-                        leaf.l3_id, revision=getattr(leaf, "revision", 1), max_claims=6
-                    )
-                    if knowledge is not None and hasattr(knowledge, "context_for_generation")
-                    else (
-                        knowledge.context_for_claim(leaf.l3_id, revision=getattr(leaf, "revision", 1))
-                        if knowledge is not None
-                        else {}
-                    )
+                knowledge_context=context,
+                mixup_mode=(mixup_context or {}).get("mode") if mixup_context else None,
+                parent_ids=list((mixup_context or {}).get("parent_ids") or []),
+                parent_difficulties=list((mixup_context or {}).get("parent_difficulties") or []),
+                difficulty_target=(mixup_context or {}).get("difficulty_target") if mixup_context else None,
+                difficulty_raw_score=(
+                    float((mixup_context or {}).get("difficulty_raw_score"))
+                    if mixup_context and (mixup_context.get("difficulty_raw_score")) is not None
+                    else None
                 ),
             )
         )
         # Light recency penalty so a batch does not collapse onto one L1.
-        l1_weights[l1] *= 0.7
+        l1_weights[leaf.domain_id] = l1_weights.get(leaf.domain_id, 1.0) * 0.7
         l2_key = f"{leaf.domain_id}.{leaf.l2_id}"
         l2_counts[l2_key] = l2_counts.get(l2_key, 0) + 1
     rng.shuffle(briefs)

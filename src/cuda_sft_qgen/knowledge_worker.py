@@ -8,6 +8,7 @@ import logging
 import re
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 import httpx
@@ -17,31 +18,67 @@ from cuda_sft_qgen.store.knowledge import KnowledgeStore, official_url
 
 logger = logging.getLogger(__name__)
 DEFAULT_SOURCE = "https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html"
+DEFAULT_INVENTORY_SOURCES = (
+    ("guide", DEFAULT_SOURCE),
+    ("headers", "https://docs.nvidia.com/cuda/cuda-runtime-api/index.html"),
+    ("release_notes", "https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html"),
+    ("nsight", "https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html"),
+)
 
 
 class _DocumentText(HTMLParser):
     """Strip script/style and collect visible text from official HTML docs."""
+
+    _BLOCKS = {"p", "li", "dt", "dd", "pre", "tr", *(f"h{i}" for i in range(1, 7))}
 
     def __init__(self):
         """Initialize the HTMLParser and visible-text buffers."""
         super().__init__()
         self.parts: list[str] = []
         self.hidden = 0
+        self.block_tag: str | None = None
+        self.block_parts: list[str] = []
+
+    def _flush_block(self) -> None:
+        text = " ".join(" ".join(self.block_parts).split())
+        if text:
+            if self.block_tag and re.fullmatch(r"h[1-6]", self.block_tag):
+                self.parts.append("# " + text)
+            self.parts.append(text)
+        self.block_tag = None
+        self.block_parts = []
 
     def handle_starttag(self, tag, attrs):
         """Ignore nested script/style sections."""
         if tag in {"script", "style"}:
             self.hidden += 1
+            return
+        if not self.hidden and tag in self._BLOCKS:
+            if self.block_tag is not None:
+                self._flush_block()
+            self.block_tag = tag
 
     def handle_endtag(self, tag):
         """Leave a hidden script/style section."""
         if tag in {"script", "style"}:
             self.hidden = max(0, self.hidden - 1)
+            return
+        if not self.hidden and tag == self.block_tag:
+            self._flush_block()
 
     def handle_data(self, data):
         """Append visible text runs, collapsing inner whitespace."""
         if not self.hidden and data.strip():
-            self.parts.append(" ".join(data.split()))
+            text = " ".join(data.split())
+            if self.block_tag is not None:
+                self.block_parts.append(text)
+            elif len(text) >= 4:
+                self.parts.append(text)
+
+    def close(self) -> None:
+        super().close()
+        if self.block_tag is not None:
+            self._flush_block()
 
 
 def fetch_official_document(url: str) -> str:
@@ -72,6 +109,7 @@ def fetch_official_document(url: str) -> str:
                 text = b"".join(chunks).decode("utf-8", errors="replace")
                 parser = _DocumentText()
                 parser.feed(text)
+                parser.close()
                 return "\n".join(parser.parts)
     raise ValueError("too many documentation redirects")
 
@@ -138,6 +176,7 @@ class KnowledgeWorker:
             try:
                 if time.monotonic() - self._last_schedule >= 60:
                     self.store.enqueue_daily_audits(int(self.config.get("audit_batch_size", 100)), interval_seconds=float(self.config.get("audit_interval_seconds", 86400)))
+                    self.enqueue_external_inventory()
                     self._last_schedule = time.monotonic()
                 if self.run_once():
                     self._stop.wait(max(0.1, float(self.config.get("worker_poll_seconds", 5))))
@@ -158,8 +197,216 @@ class KnowledgeWorker:
             )
         return self.store.enqueue("expand", {"last_facet": last_facet, "review_round": review_round}, "taxonomy:expansion")
 
+    def _inventory_sources(self) -> list[dict[str, str]]:
+        """Resolve typed, allowlisted documents used for coverage discovery."""
+        configured = self.config.get("inventory_sources") or self.config.get("official_sources") or []
+        if isinstance(configured, str):
+            configured = [configured]
+        rows: list[dict[str, str]] = []
+        for item in configured:
+            if isinstance(item, dict):
+                url = str(item.get("url") or "")
+                kind = str(item.get("kind") or "document")
+            else:
+                url = str(item)
+                kind = "document"
+            if official_url(url):
+                rows.append({"kind": kind, "url": url})
+        if not rows and bool(self.config.get("use_default_inventory_sources", True)):
+            rows = [{"kind": kind, "url": url} for kind, url in DEFAULT_INVENTORY_SOURCES]
+        return list({row["url"]: row for row in rows}.values())
+
+    @staticmethod
+    def _extract_inventory(
+        document: str,
+        url: str,
+        *,
+        source_kind: str = "document",
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Extract conservative concept candidates from headings and CUDA symbols."""
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw in document.splitlines():
+            heading = raw.lstrip().startswith(("#", "<h"))
+            line = " ".join(raw.split()).strip(" #-:")
+            if len(line) < 4 or len(line) > 180:
+                continue
+            symbols = re.findall(
+                r"(?:__\w+|cuda[A-Z]\w+|CUDA\s+\d+(?:\.\d+)*|cu(?:BLAS|FFT|DNN|SPARSE)|"
+                r"NVRTC|nvcc|nvJitLink|PTX|CUB|cp\.async(?:\.bulk)?(?:\.tensor)?|"
+                r"mbarrier|wgmma|umma|tmem|TMA|sm_?\d+|Hopper|Blackwell|"
+                r"Nsight|l1tex__\w+)",
+                line,
+                flags=re.I,
+            )
+            if not heading and not symbols:
+                continue
+            concept = line
+            key = re.sub(r"[^a-z0-9]+", " ", concept.lower()).strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            rows.append({
+                "id": "ext_" + re.sub(r"[^a-z0-9]+", "_", key)[:80].strip("_"),
+                "concept": concept,
+                "label": concept,
+                "section": ("# " + concept) if heading else "",
+                "tokens": sorted(set(symbols)),
+                "url": url,
+                "source_kind": source_kind,
+                "source": "official_inventory",
+                "specificity": len(set(symbols)) * 10
+                + (3 if re.search(r"\d", concept) else 0)
+                + (1 if heading else 0),
+            })
+        rows.sort(key=lambda row: (-int(row["specificity"]), str(row["id"])))
+        return rows[:limit]
+
+    def enqueue_external_inventory(self, *, force: bool = False) -> int | None:
+        """Schedule a durable inventory refresh when enabled and stale."""
+        if not self.config.get("external_inventory_enabled", False) and not force:
+            return None
+        stamp = float(self.store.get_metadata("external_inventory_at", 0) or 0)
+        ttl = max(60.0, float(self.config.get("external_inventory_interval_seconds", 86400)))
+        if not force and stamp and time.time() - stamp < ttl:
+            return None
+        return self.store.enqueue(
+            "external_inventory",
+            {"force": bool(force)},
+            "taxonomy:external_inventory",
+        )
+
+    def refresh_external_inventory(self, *, force: bool = False) -> list[dict[str, Any]]:
+        """Refresh and persist the external concept inventory when configured.
+
+        Inventory extraction is a recall aid only.  No claim is verified here;
+        proposals enter the existing provisional audit queue later.
+        """
+        sources = self._inventory_sources()
+        if not sources:
+            return list(self.store.get_metadata("external_concept_inventory", []) or [])
+        stamp = float(self.store.get_metadata("external_inventory_at", 0) or 0)
+        ttl = max(60.0, float(self.config.get("external_inventory_interval_seconds", 86400)))
+        cached = list(self.store.get_metadata("external_concept_inventory", []) or [])
+        if cached and not force and time.time() - stamp < ttl:
+            return cached
+        inventory: list[dict[str, Any]] = []
+        failures: list[str] = []
+        for source in sources[: int(self.config.get("external_inventory_max_sources", 8) or 8)]:
+            url = source["url"]
+            try:
+                cached_doc = self._documents.get(url)
+                document = cached_doc[1] if cached_doc else self.fetcher(url)
+                self._documents[url] = (time.time(), document)
+                inventory.extend(self._extract_inventory(document, url, source_kind=source["kind"]))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("external inventory fetch failed for %s: %s", url, exc)
+                failures.append(f"{url}:{type(exc).__name__}")
+        # Stable ids make metadata diffs and critic prompts reproducible.
+        unique = {str(item.get("id")): item for item in inventory if item.get("id")}
+        inventory = list(unique.values())[: int(self.config.get("external_inventory_max_concepts", 500) or 500)]
+        if not inventory:
+            raise RuntimeError(
+                "external inventory refresh produced no concepts"
+                + (": " + "; ".join(failures) if failures else "")
+            )
+        self.store.set_metadata("external_concept_inventory", inventory)
+        self.store.set_metadata("external_inventory_at", time.time())
+        self.store.set_metadata("external_inventory_sources", sources)
+        return inventory
+
+    ensure_external_inventory = refresh_external_inventory
+
+    # CLI-facing read/refresh interface.  Network work belongs here or in the
+    # durable job, never in ordinary taxonomy expansion.
+    def external_inventory_once(
+        self,
+        *,
+        force: bool = False,
+        apply: bool = True,
+        max_leaves: int | None = None,
+        max_calls: int | None = None,
+    ) -> dict[str, Any]:
+        """Refresh inventory, run coverage/critic, and optionally publish claims."""
+        inventory = self.refresh_external_inventory(force=force)
+        return self.process_external_inventory(
+            inventory,
+            apply=apply,
+            max_leaves=max_leaves,
+            max_calls=max_calls,
+        )
+
+    inventory_once = external_inventory_once
+    schedule_external_inventory = enqueue_external_inventory
+
+    def process_external_inventory(
+        self,
+        inventory: list[dict[str, Any]],
+        *,
+        apply: bool = True,
+        max_leaves: int | None = None,
+        max_calls: int | None = None,
+    ) -> dict[str, Any]:
+        """Run the critic against cached inventory and publish only provisional leaves."""
+        if self.taxonomy is None:
+            return {"status": "no_taxonomy", "coverage": {"total": len(inventory)}}
+        from cuda_sft_qgen.taxonomy_manager import TaxonomyManager
+
+        taxonomy = self.store.overlay_taxonomy(self.taxonomy)
+        tax_cfg = (getattr(self.settings, "default_yaml", {}) or {}).get("taxonomy") or {}
+        manager = TaxonomyManager(
+            taxonomy,
+            self.llm,
+            embedder=self.embedder,
+            embed_index=self._taxonomy_index,
+            settings=self.settings,
+            external_inventory=inventory,
+            target_leaves_per_l2=int(tax_cfg.get("target_leaves_per_l2", 30) or 30),
+        )
+        if max_calls is not None:
+            manager.max_llm_calls_per_tick = max(0, int(max_calls))
+        manager._in_tick = True
+        manager._llm_calls = 0
+        try:
+            report = manager.external_critic(
+                inventory,
+                max_new=min(
+                    max(0, int(max_leaves if max_leaves is not None else manager.max_leaves_per_tick)),
+                    20,
+                ),
+            )
+        finally:
+            manager._in_tick = False
+        proposals = manager._validate_external_proposals(
+            report.get("proposals") or [],
+            max_new=min(max(0, int(max_leaves if max_leaves is not None else manager.max_leaves_per_tick)), 20),
+        )
+        existing = {leaf.l3_id for leaf in taxonomy.leaves}
+        if proposals:
+            manager._commit_leaves(proposals, apply=False)
+        new_proposals = [dict(vars(leaf)) for leaf in taxonomy.leaves if leaf.l3_id not in existing]
+        structure = {
+            "new_axes": report.get("new_axes") or [],
+            "split": report.get("split") or report.get("splits") or [],
+            "merge": report.get("merge") or report.get("merges") or [],
+            "health_notes": report.get("health_notes") or [],
+        }
+        if apply:
+            self.store.set_metadata("taxonomy_structure_suggestions", structure)
+        added = self.publish_proposals(new_proposals) if apply else 0
+        return {
+            "status": report.get("status") or "gap_detected",
+            "coverage": report.get("coverage") or {},
+            "proposed": len(new_proposals),
+            "total_added": added,
+            "proposals": new_proposals,
+            "structure_suggestions": structure,
+            "llm_calls": manager._llm_calls,
+            "applied": apply,
+        }
+
     def _packs_dir(self) -> Path | None:
-        from pathlib import Path
         root = getattr(self.settings, "root", None)
         if root is None:
             return None
@@ -191,14 +438,23 @@ class KnowledgeWorker:
         self.deliver_impacts()
         pool = getattr(self.llm, "pool", None)
         busy = getattr(pool, "llm_busy_for_taxonomy", None)
-        if callable(busy) and busy():
-            return False
+        # Test doubles and lightweight clients may expose arbitrary callable
+        # attributes; only an explicit boolean ``True`` means taxonomy slots
+        # are busy.
+        if callable(busy):
+            busy_value = busy()
+            if isinstance(busy_value, bool) and busy_value:
+                return False
         job = self.store.take_job()
         if job is None:
             return False
         try:
             if job["kind"] == "audit":
                 self._audit(job["payload"])
+            elif job["kind"] == "external_inventory":
+                self.external_inventory_once(
+                    force=bool(job["payload"].get("force")), apply=True
+                )
             elif job["kind"] in {"expand", "expand_pack"}:
                 self._expand(job["payload"])
             elif job["kind"] == "relate":
@@ -253,6 +509,31 @@ class KnowledgeWorker:
         document = dict(retrieved).get(url, "")
         if verdict != "insufficient" and (not quote or quote not in document):
             verdict = "insufficient"
+        if verdict == "supported":
+            # A real quote can still support only half a generated assertion.
+            # Require literal coverage of material identifiers and numbers
+            # before asking an independent auditor about the semantic clauses.
+            from cuda_sft_qgen.taxonomy_manager import TaxonomyManager
+            material = TaxonomyManager._technical_tokens(claim["claim"])
+            material.update(re.findall(r"\b\d+(?:\.\d+)?\b", claim["claim"]))
+            quoted = TaxonomyManager._technical_tokens(quote)
+            quoted.update(re.findall(r"\b\d+(?:\.\d+)?\b", quote))
+            if material - quoted:
+                verdict = "insufficient"
+                review["reason"] = "quoted_evidence_missing_material_identifiers_or_numbers"
+            else:
+                confirmation = self.llm.complete_json([
+                    {"role": "system", "content": load_prompt("audit") +
+                     "\nIndependently check EVERY material clause using only this retrieved excerpt. "
+                     "Do not infer unstated constraints. Return supported only if all clauses follow."},
+                    {"role": "user", "content": json.dumps({"claim": claim,
+                     "documents": [{"url": url, "text": quote}]}, ensure_ascii=False)},
+                ], retries=0, priority=PRI_TAXONOMY)
+                second_quote = str(confirmation.get("quote") or "").strip()
+                if (confirmation.get("verdict") != "supported" or confirmation.get("url") != url
+                        or not second_quote or second_quote not in quote):
+                    verdict = "insufficient"
+                    review["reason"] = "independent_audit_not_confirmed"
         before = self.store.impact_events()
         event_cursor = before[-1]["id"] if before else 0
         applicability = review.get("applicability")
@@ -309,9 +590,13 @@ class KnowledgeWorker:
             return {"total_added": 0, "proposals": []}
         from cuda_sft_qgen.taxonomy_manager import TaxonomyManager
         taxonomy = self.store.overlay_taxonomy(self.taxonomy)
+        # Expansion must be CPU/local and durable; scheduled inventory jobs own
+        # all network fetching and refreshes.
+        inventory = list(self.store.get_metadata("external_concept_inventory", []) or [])
         tax_config = (getattr(self.settings, "default_yaml", {}) or {}).get("taxonomy") or {}
         manager = TaxonomyManager(taxonomy, self.llm, embedder=self.embedder, embed_index=self._taxonomy_index,
-                                  settings=self.settings, target_leaves_per_l2=int(target_per_l2 or tax_config.get("target_leaves_per_l2", 30)))
+                                  settings=self.settings, external_inventory=inventory,
+                                  target_leaves_per_l2=int(target_per_l2 or tax_config.get("target_leaves_per_l2", 30)))
         if not manager.enabled:
             return {"total_added": 0, "proposals": [], "reason": "disabled"}
         if max_calls is not None:

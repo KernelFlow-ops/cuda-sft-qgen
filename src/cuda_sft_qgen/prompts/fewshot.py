@@ -210,10 +210,24 @@ def select_positives(
     def recency_first(items: Sequence[Question]) -> list[Question]:
         return list(reversed(items))
 
+    # Start with a coherent seed bucket before widening to style examples.
+    same_bucket = [
+        q
+        for q in recency_first(accepted)
+        if q.l3_id == brief.l3_id
+        and q.question_type == brief.question_type
+        and (not kind or (q.kind or "mechanism") == kind)
+        and (q.hardware in {brief.hardware, "agnostic"} or brief.hardware == "agnostic")
+    ]
+    picks.extend(_take(same_bucket, 2, used, "S", "same seed bucket"))
+
     same_type = [
         q
         for q in recency_first(accepted)
-        if q.question_type == brief.question_type and q.l3_id != brief.l3_id
+        if q.question_type == brief.question_type
+        and q.l3_id != brief.l3_id
+        and (_l1(q) == brief_l1 or not brief_l1)
+        and (q.hardware in {brief.hardware, "agnostic"} or brief.hardware == "agnostic")
     ]
     if kind:
         same_type.sort(
@@ -229,14 +243,18 @@ def select_positives(
     same_l3 = [
         q
         for q in recency_first(accepted)
-        if q.l3_id == brief.l3_id and q.question_type != brief.question_type
+        if q.l3_id == brief.l3_id
+        and q.question_type != brief.question_type
+        and (q.hardware in {brief.hardware, "agnostic"} or brief.hardware == "agnostic")
     ]
     picks.extend(_take(same_l3, 1, used, "B", "same l3, different type"))
 
     same_diff_bloom = [
         q
         for q in recency_first(accepted)
-        if int(q.difficulty) == int(brief.difficulty) and q.bloom == brief.bloom
+        if int(q.difficulty) == int(brief.difficulty)
+        and q.bloom == brief.bloom
+        and (_l1(q) == brief_l1 or not brief_l1)
     ]
     same_diff_bloom.sort(key=lambda q: _cosine_rank(q, cfg.max_nn_cosine, cfg.nn_cosine_fallback))
     picks.extend(_take(same_diff_bloom, 1, used, "C", "same difficulty+bloom"))
@@ -244,36 +262,17 @@ def select_positives(
     anchor_hash = seed_simhash
     if anchor_hash is None and picks:
         anchor_hash = int(picks[0].question.simhash)
-    want_act = TYPE_TO_ACT.get(brief.question_type, "ask")
-    cross: list[Question] = []
-    if anchor_hash is not None:
-        scored: list[tuple[int, Question]] = []
-        for q in accepted:
-            if q.id in used:
-                continue
-            if _l1(q) == brief_l1 or not _l1(q):
-                continue
-            ham = hamming64(int(q.simhash), int(anchor_hash))
-            if cfg.simhash_gray_hamming < ham <= cfg.simhash_hamming_max:
-                scored.append((ham, q))
-        scored.sort(key=lambda t: t[0])
-        cross = [q for _, q in scored]
-    if not cross:
-        for q in recency_first(accepted):
-            if q.id in used:
-                continue
-            if _l1(q) == brief_l1:
-                continue
-            skel = q.template_fingerprint or ""
-            act = speech_act(q.question or "")
-            if skel.startswith(f"[{want_act}]") or act == want_act:
-                cross.append(q)
-            elif q.granularity == brief.granularity:
-                cross.append(q)
-    picks.extend(_take(cross, 1, used, "D", "cross-L1 similar structure"))
+    # Never use a different L1/domain as a positive seed.  An empty domain
+    # bucket is a normal cold-start condition; the writer receives no seed
+    # rather than an unrelated cross-domain mixture.
+    same_domain_fill = [
+        q for q in recency_first(accepted)
+        if (_l1(q) == brief_l1 or not brief_l1) and q.id not in used
+    ]
+    picks.extend(_take(same_domain_fill, 1, used, "D", "same domain bootstrap"))
 
     if len(picks) < cfg.positives:
-        fill = recency_first(accepted)
+        fill = [q for q in recency_first(accepted) if _l1(q) == brief_l1 or not brief_l1]
         picks.extend(_take(fill, cfg.positives - len(picks), used, "F", "recency fill"))
     return picks[: cfg.positives]
 
@@ -291,9 +290,18 @@ def select_negatives(
         for q in corpus.rejected_quality
         if (q.question or "").strip() and is_quality_reject(q.reject_reason)
     ]
-    same_l3 = [q for q in quality if q.l3_id == brief.l3_id]
-    same_type = [q for q in quality if q.question_type == brief.question_type]
-    ordered = same_l3 + [q for q in same_type if q.id not in {x.id for x in same_l3}] + quality
+    same_bucket = [
+        q for q in quality
+        if q.l3_id == brief.l3_id
+        and q.question_type == brief.question_type
+        and (q.kind or "mechanism") == (brief.kind or "mechanism")
+        and (q.hardware in {brief.hardware, "agnostic"} or brief.hardware == "agnostic")
+    ]
+    bucket_ids = {x.id for x in same_bucket}
+    same_l3 = [q for q in quality if q.l3_id == brief.l3_id and q.id not in bucket_ids]
+    l3_ids = bucket_ids | {x.id for x in same_l3}
+    same_type = [q for q in quality if q.question_type == brief.question_type and q.id not in l3_ids]
+    ordered = same_bucket + same_l3 + same_type + quality
     return _take(ordered, cfg.negatives, used, "N", "quality reject")
 
 
@@ -327,8 +335,9 @@ def format_positives(picks: Sequence[FewshotPick], cfg: FewshotCfg) -> str:
         nn = q.nearest_cosine
         nn_s = "null" if nn is None else f"{nn:.2f}"
         lines.append(
-            f"[POS slot={p.slot} type={q.question_type} l3={q.l3_id} "
-            f"diff={q.difficulty} bloom={q.bloom} nn={nn_s}]"
+            f"[POS slot={p.slot} type={q.question_type} kind={q.kind or 'mechanism'} "
+            f"hardware={q.hardware} l3={q.l3_id} diff={q.difficulty} "
+            f"bloom={q.bloom} nn={nn_s}]"
         )
         lines.append(_snippet(q.question, cfg.snippet_chars))
         if p.note:

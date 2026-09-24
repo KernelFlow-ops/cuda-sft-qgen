@@ -18,7 +18,15 @@ from cuda_sft_qgen.errors import JsonSalvageNeeded, RateLimitError
 from cuda_sft_qgen.jsonutil import normalize_language, parse_question_payload
 from cuda_sft_qgen.keys import PRI_SALVAGE, PRI_WRITER
 from cuda_sft_qgen.llm import NvidiaLLM
-from cuda_sft_qgen.models import Question, QuestionBrief, SteeringBrief
+from cuda_sft_qgen.models import (
+    PairPlan,
+    Question,
+    QuestionBrief,
+    SeedAnalysis,
+    SteeringBrief,
+    VerificationEvidence,
+    VerificationSpec,
+)
 from cuda_sft_qgen.observability import get_metrics
 from cuda_sft_qgen.prompts import load_prompt
 from cuda_sft_qgen.prompts.fewshot import FewshotCorpus
@@ -64,13 +72,120 @@ def question_from_obj(
     obj: dict[str, Any],
     *,
     source: str,
+    generation_provenance: dict[str, Any] | None = None,
 ) -> Question:
     """Build a pending :class:`Question` from parsed writer JSON and the brief."""
     question_text = str(obj.get("question") or "").strip()
     tests_claim = str(obj.get("tests_claim") or "").strip()
     language = normalize_language(obj.get("language"), fallback=brief.language)
     warnings = obj.get("warnings") if isinstance(obj.get("warnings"), list) else []
+    raw_plan = obj.get("draft_plan")
+    if isinstance(raw_plan, dict):
+        draft_plan = {str(key): value for key, value in raw_plan.items()}
+    elif isinstance(raw_plan, str) and raw_plan.strip():
+        draft_plan = {"plan": raw_plan.strip()}
+    else:
+        draft_plan = None
+    raw_target = obj.get("draft_target")
+    if raw_target is None:
+        draft_target = None
+    elif isinstance(raw_target, str):
+        draft_target = raw_target.strip() or None
+    else:
+        draft_target = json.dumps(raw_target, ensure_ascii=False, sort_keys=True)
+    mixup = brief.knowledge_context.get("mixup") if isinstance(brief.knowledge_context, dict) else None
+    mixup = mixup if isinstance(mixup, dict) else {}
+    validation_errors: list[str] = []
+    draft_plan = draft_plan or {}
+    seed_analysis = draft_plan.get("seed_analysis")
+    pair_plan = draft_plan.get("pair_plan")
+    if not draft_plan:
+        validation_errors.append("missing_draft_plan")
+    elif not isinstance(seed_analysis, dict):
+        validation_errors.append("missing_seed_analysis")
+    else:
+        try:
+            analyzed = SeedAnalysis.model_validate(seed_analysis)
+            expected_domain = brief.topic_path[0] if brief.topic_path else ""
+            if analyzed.domain_id and expected_domain and analyzed.domain_id != expected_domain:
+                validation_errors.append("seed_domain_mismatch")
+        except Exception as exc:
+            validation_errors.append(f"invalid_seed_analysis:{type(exc).__name__}")
+    if not isinstance(pair_plan, dict):
+        validation_errors.append("missing_pair_plan")
+    else:
+        try:
+            checked_plan = PairPlan.model_validate(pair_plan)
+            expected_mode = brief.mixup_mode or mixup.get("mode")
+            if expected_mode and checked_plan.mode != expected_mode:
+                validation_errors.append("mixup_plan_mode_mismatch")
+            if expected_mode and set(checked_plan.parent_ids) != set(brief.parent_ids or mixup.get("parent_ids") or []):
+                validation_errors.append("mixup_plan_parent_mismatch")
+        except Exception as exc:
+            validation_errors.append(f"invalid_pair_plan:{type(exc).__name__}")
+    if not draft_target:
+        validation_errors.append("missing_draft_target")
+    raw_spec = obj.get("verification_spec")
+    verification_spec = dict(raw_spec) if isinstance(raw_spec, dict) else {}
+    if not verification_spec:
+        validation_errors.append("missing_verification_spec")
+    else:
+        try:
+            VerificationSpec.model_validate(verification_spec)
+        except Exception as exc:
+            validation_errors.append(f"invalid_verification_spec:{type(exc).__name__}")
+    # Evidence is produced only by the independent verifier.  In particular a
+    # Writer claiming its program already passed compilation cannot authorize
+    # export, even if the rest of its JSON contract is perfectly valid.
+    verification_evidence = {"status": "not_run"}
+    mixup = brief.knowledge_context.get("mixup") if isinstance(brief.knowledge_context, dict) else None
+    mixup = mixup if isinstance(mixup, dict) else {}
+    provenance = dict(generation_provenance or {})
+    if provenance.get("structured_cot") is False:
+        # Explicit baseline/legacy Writer mode does not request private fields.
+        # Malformed fields that *are* supplied remain visible for review.
+        validation_errors = [e for e in validation_errors if not e.startswith("missing_")]
+    provenance.setdefault("task_id", brief.task_id)
+    provenance.setdefault("role", brief.role)
+    provenance.setdefault("seed_id", brief.seed_id)
+    provenance.setdefault("seed_domain_id", brief.topic_path[0] if brief.topic_path else "")
+    provenance.setdefault("claim_revision", brief.claim_revision)
+    provenance.setdefault("source_ids", list(brief.source_ids))
+    provenance["mixup_context"] = mixup
+    provenance["draft_validation_errors"] = list(validation_errors)
+    brief_snapshot = {
+        "task_id": brief.task_id,
+        "topic_path": list(brief.topic_path),
+        "l3_id": brief.l3_id,
+        "l3_claim": brief.l3_claim,
+        "question_type": brief.question_type,
+        "difficulty": brief.difficulty,
+        "bloom": brief.bloom,
+        "hardware": brief.hardware,
+        "granularity": brief.granularity,
+        "language": brief.language,
+        "kind": brief.kind,
+        "role": brief.role,
+        "seed_id": brief.seed_id,
+        "angle_id": brief.angle_id,
+        "claim_revision": brief.claim_revision,
+        "source_ids": list(brief.source_ids),
+        "mixup_mode": brief.mixup_mode,
+        "parent_ids": list(brief.parent_ids),
+        "parent_difficulties": list(brief.parent_difficulties),
+        "difficulty_target": brief.difficulty_target,
+        "mixup_context": mixup,
+    }
     fp = fingerprint(question_text)
+    dependencies: list[dict[str, Any]] = []
+    for claim in (brief.knowledge_context.get("claims", []) if isinstance(brief.knowledge_context, dict) else []):
+        if isinstance(claim, dict) and claim.get("id"):
+            dependencies.append({"claim_id": claim["id"], "revision": claim.get("revision", 1)})
+    for parent in mixup.get("parents", []) if isinstance(mixup.get("parents"), list) else []:
+        if isinstance(parent, dict) and parent.get("l3_id"):
+            dependencies.append({"claim_id": parent["l3_id"], "revision": parent.get("claim_revision", 1)})
+    seen_dependencies = set()
+    dependencies = [d for d in dependencies if not ((d["claim_id"], d["revision"]) in seen_dependencies or seen_dependencies.add((d["claim_id"], d["revision"])))]
     return Question(
         id="q_" + (brief.task_id or uuid.uuid4().hex),
         question=question_text,
@@ -101,10 +216,24 @@ def question_from_obj(
         angle_id=brief.angle_id,
         claim_revision=brief.claim_revision,
         source_ids=list(brief.source_ids),
-        knowledge_dependencies=[
-            {"claim_id": claim["id"], "revision": claim.get("revision", 1)}
-            for claim in brief.knowledge_context.get("claims", []) if claim.get("id")
-        ],
+        knowledge_dependencies=dependencies,
+        draft_plan=draft_plan,
+        draft_target=draft_target,
+        verification_spec=verification_spec,
+        verification_evidence=verification_evidence,
+        draft_validation_errors=validation_errors,
+        generation_provenance=provenance,
+        mixup_context=mixup,
+        brief_snapshot=brief_snapshot,
+        mixup_mode=brief.mixup_mode or mixup.get("mode"),
+        parent_ids=list(brief.parent_ids or mixup.get("parent_ids") or []),
+        parent_difficulties=list(brief.parent_difficulties or mixup.get("parent_difficulties") or []),
+        difficulty_target=brief.difficulty_target or mixup.get("difficulty_target"),
+        difficulty_raw_score=(
+            brief.difficulty_raw_score
+            if brief.difficulty_raw_score is not None
+            else mixup.get("difficulty_raw_score")
+        ),
     )
 
 
@@ -158,7 +287,10 @@ def generate_from_brief(
     )
     if obj is None or not str(obj.get("question") or "").strip():
         raise JsonSalvageNeeded(raw, brief.model_dump())
-    question = question_from_obj(brief, obj, source=source)
+    question = question_from_obj(
+        brief, obj, source=source,
+        generation_provenance=getattr(bundle, "generation_provenance", None),
+    )
     if len(question.question) > rt.settings.question_max_chars:
         raise JsonSalvageNeeded(
             json.dumps(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -102,6 +103,7 @@ class PromptBundle:
     user: str
     static_prefix: str = ""
     cache_key: str = ""
+    generation_provenance: dict[str, Any] | None = None
 
 
 class StructuredPrompt:
@@ -206,6 +208,10 @@ class StructuredPrompt:
             "breadth_or_depth_signal": brief.breadth_or_depth,
             "breadth_or_depth_guidance": self._breadth_guidance(brief),
             "strong_token_examples": self._example_strong_tokens(brief),
+            "seed_bucket": (
+                f"l3={brief.l3_id}; kind={kind}; type={brief.question_type}; "
+                f"hardware={brief.hardware}; language={brief.language}"
+            ),
         }
 
         role_key = "evolver" if brief.role == "evolver" and brief.seed_question else "writer"
@@ -237,6 +243,11 @@ class StructuredPrompt:
         dynamic_parts = [
             _render(self._constraints, mapping).strip(),
             _render(self._quality, mapping).strip(),
+            (
+                "Seed bucket policy: use the same-l3/type/kind/hardware positives "
+                "as the primary style anchors. Cross-bucket examples are contrast "
+                "only; do not merge their mechanisms into this item."
+            ),
         ]
         if use_cot:
             dynamic_parts.append(_render(self._cot, mapping).strip())
@@ -253,6 +264,8 @@ class StructuredPrompt:
         system = PromptCache.compose(static_prefix, semi, *dynamic_parts)
 
         user_lines = [
+            f"TOPIC_PATH: {'.'.join(brief.topic_path)}",
+            f"L3_ID: {brief.l3_id}",
             f"CLAIM: {brief.l3_claim}",
             f"INSTANCE: {mapping['instance_hint']}",
             f"ANGLE: {brief.angle}",
@@ -265,6 +278,7 @@ class StructuredPrompt:
             f"LANGUAGE: {brief.language}",
             f"MUST_INCLUDE: {mapping['must_include']}",
             f"MUST_AVOID: {mapping['must_avoid']}",
+            f"SEED_BUCKET: {mapping['seed_bucket']}",
         ]
         if brief.knowledge_context:
             user_lines.append(
@@ -277,11 +291,29 @@ class StructuredPrompt:
         else:
             user_lines.append("Write the JSON now.")
         user = "\n".join(user_lines)
+        mixup = brief.knowledge_context.get("mixup") if isinstance(brief.knowledge_context, dict) else {}
+        mixup = mixup if isinstance(mixup, dict) else {}
+        provenance = {
+            "structured_cot": use_cot,
+            "prompt_sha256": hashlib.sha256(system.encode()).hexdigest(),
+            "writer_model": getattr(self.settings, "nvidia_model", "unknown"),
+            "task_id": brief.task_id,
+            "role": brief.role,
+            "seed_id": brief.seed_id,
+            "source_seed_ids": [p.question.id for p in pos[:5]],
+            "seed_domain_id": brief.topic_path[0] if brief.topic_path else "",
+            "source_l3_ids": sorted({p.question.l3_id for p in pos[:5] if p.question.l3_id}),
+            "seed_bucket": mapping["seed_bucket"],
+            "mixup_context": mixup,
+            "claim_revision": brief.claim_revision,
+            "source_ids": list(brief.source_ids),
+        }
         return PromptBundle(
             system=system,
             user=user,
             static_prefix=static_prefix,
             cache_key=f"{role_key}:{brief.persona}:{brief.question_type}:{kind}",
+            generation_provenance=provenance,
         )
 
     def _static_prefix(self, role_key: str, min_chars: str, max_chars: str) -> str:

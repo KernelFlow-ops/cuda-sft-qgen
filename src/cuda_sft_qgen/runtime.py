@@ -54,6 +54,22 @@ class Runtime:
     knowledge: KnowledgeStore | None = None
     knowledge_worker: object | None = None
     _knowledge_refreshed_at: float = 0.0
+    _verification_lock: threading.Lock = field(default_factory=threading.Lock)
+    _verification_calls: int = 0
+
+    def reserve_verification_call(self) -> bool:
+        """Atomically enforce the run-wide solver/judge call ceiling.
+
+        The normal key pool bounds concurrency, not cumulative spend. This
+        separate counter includes retried reviews and is shared by all Chair
+        workers; exhausting it defers candidates instead of bypassing gates.
+        """
+        limit = int(self.settings.review.get("verification_run_max_calls", 600))
+        with self._verification_lock:
+            if self._verification_calls >= max(0, limit):
+                return False
+            self._verification_calls += 1
+            return True
 
     def reconcile_index(self) -> None:
         """Rebuild the cosine index and deduper from accepted questions."""
@@ -209,6 +225,7 @@ def build_runtime(settings: Settings) -> Runtime:
         pool = build_key_pool(
             settings.nvidia_api_keys,
             base_url=settings.nvidia_base_url,
+            timeout=float(settings.generation.get("request_timeout_seconds", 90)),
             llm_per_key=settings.llm_per_key_concurrency,
             embed_per_key=settings.embed_per_key_concurrency,
             embed_oversub=settings.embed_oversub,

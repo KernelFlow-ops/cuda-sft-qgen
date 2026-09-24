@@ -4,6 +4,26 @@ paths:
   personas: configs/personas.yaml
   data_dir: data
 
+# Canonical Mixup settings. Runtime resolves profile/environment overrides
+# once and passes this block to the planner; no parallel config namespace.
+mixup:
+  enabled: false
+  fraction: 0.30
+  modes: [decomposed, hybrid]
+  pair_similarity_min: 0.80
+  pair_similarity_max: 0.995
+  pair_top_k: 8
+  max_pairs: 32
+  max_pairs_per_item: 1
+  max_parent_reuse: 3
+  same_language: true
+  same_granularity: true
+  lsh_max_candidates: 128
+  lsh_max_bucket_size: 64
+  min_difficulty_gap: 1
+  same_l2: true
+  max_batch_items: 64
+
 generation:
   temperature: 1.0
   top_p: 0.95
@@ -23,7 +43,11 @@ generation:
   fewshot_max_nn_cosine: 0.50
   fewshot_nn_cosine_fallback: 0.80
   fewshot_simhash_hamming_max: 20
+  # Pilot quality gates are not yet qualified. Enable explicitly for evaluation;
+  # private generation artifacts never enter the public question export.
   prompt_cot: false
+  request_timeout_seconds: 90
+  request_max_attempts: 3
   sieve_min_chars: 24
   max_parse_retries: 1
   priority_queue_size: 200
@@ -51,6 +75,13 @@ knowledge:
   worker_poll_seconds: 5
   expansion_cooldown_seconds: 300
   official_sources: []
+  # External inventory is opt-in because it performs network retrieval.  When
+  # enabled, inventory gaps trigger a critic but never directly activate claims.
+  external_inventory_enabled: false
+  inventory_sources: []
+  external_inventory_interval_seconds: 86400
+  external_inventory_max_sources: 8
+  external_inventory_max_concepts: 500
 
 taxonomy:
   target_leaves_per_l2: 30
@@ -79,6 +110,8 @@ taxonomy:
     allow_refine_in_pipeline: false
     allow_merge_in_pipeline: false
     allow_new_domains: false
+    external_coverage_threshold: 0.80
+    external_hard_trigger: true
 
 review:
   thinking_level: medium
@@ -109,6 +142,22 @@ review:
   chair_slot_reserve: 1
   # Writer=0 Salvage=1 Chair=2 Sieve=3 Taxonomy=4. Do not default Chair to Writer.
   priority: 2
+  # Real runs use independent low-temperature solver calls for candidates that
+  # carry a private target. FakeLLM tests intentionally bypass this expensive gate.
+  answer_consistency_enabled: false
+  answer_consistency_k: 3
+  answer_consistency_min_agreement: 0.60
+  answer_consistency_high_risk_k: 5
+  solver_thinking_level: none
+  solver_max_tokens: 1024
+  verification_max_calls: 6
+  verification_run_max_calls: 600
+  execution_enabled: true
+  execution_timeout_seconds: 20
+  # RIP selection compares candidates only within a topic/kind/hardware bucket.
+  rip_enabled: true
+  rip_keep_per_bucket: 1
+  compile_timeout_seconds: 20
   # Second independent chair call when first pass is uncertain on formula/debug/layout/code.
   second_pass_on_uncertain: true
   circuit_breaker_error_streak: 8

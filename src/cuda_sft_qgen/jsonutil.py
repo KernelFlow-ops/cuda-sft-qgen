@@ -16,6 +16,7 @@ _FENCE = re.compile(r"```([a-zA-Z0-9+-]*)\s*(.*?)\s*```", re.DOTALL)
 _CODE_FENCE = re.compile(r"```[\w+-]*\n.*?```", re.DOTALL)
 _THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _KEYS = ("question", "tests_claim", "language")
+_PRIVATE_KEYS = ("draft_plan", "draft_target", "verification_spec", "verification_evidence")
 _LANG_TOKEN = re.compile(r"^[\"']?(en|zh|cn)(?:glish|inese)?", re.IGNORECASE)
 
 
@@ -95,16 +96,22 @@ def _extract_code_fences(text: str) -> tuple[str, list[str]]:
 
 
 def _restore_code_fences(obj: dict[str, Any], blocks: list[str]) -> dict[str, Any]:
-    """Put extracted fenced code back into string fields after JSON parse."""
-    out: dict[str, Any] = {}
-    for key, value in obj.items():
+    """Restore code recursively, including the private verification contract.
+
+    Writer JSON can contain fenced source inside nested oracle fields. Leaving
+    placeholders there would test a different program than the model supplied.
+    """
+    def restore(value: Any) -> Any:
         if isinstance(value, str):
             for i, block in enumerate(blocks):
                 value = value.replace(f"__CODE_{i}__", block)
-            out[key] = value
-        else:
-            out[key] = value
-    return out
+            return value
+        if isinstance(value, dict):
+            return {key: restore(child) for key, child in value.items()}
+        if isinstance(value, list):
+            return [restore(child) for child in value]
+        return value
+    return restore(obj)
 
 
 def _loads_obj(raw: str) -> dict[str, Any] | None:
@@ -360,7 +367,15 @@ def parse_question_payload(
     parsed_q = str((obj or {}).get("question") or "").strip()
     scanned_q = str((scanned or {}).get("question") or "").strip()
     if scanned_q and (not parsed_q or len(scanned_q) > len(parsed_q)):
-        obj = scanned
+        # Field scanning is intentionally lossy. Preserve structured private
+        # artifacts recovered by a valid JSON parse when replacing a shorter
+        # question field from the scanner.
+        if obj is not None:
+            merged = dict(obj)
+            merged.update({key: value for key, value in scanned.items() if key in _KEYS})
+            obj = merged
+        else:
+            obj = scanned
     if obj is None:
         return None
     obj = _restore_code_fences(obj, blocks)

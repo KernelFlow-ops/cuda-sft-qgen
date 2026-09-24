@@ -1,7 +1,7 @@
 """NVIDIA chat-completions client, FakeLLM, and JSON-completion helper.
 
-Streaming is required so usage and reasoning tokens can be recorded. Empty
-``content`` with non-empty ``reasoning_content`` is recovered as the reply.
+Streaming records provider usage. Reasoning-only/truncated replies are errors;
+private reasoning is never substituted for the final answer.
 """
 
 from __future__ import annotations
@@ -86,7 +86,7 @@ class LLMClient:
                 return parse_json_object(text)
             except Exception as exc:  # noqa: BLE001
                 last_err = exc
-                logger.warning("JSON parse failed (attempt %s): %s", attempt + 1, exc)
+                logger.warning("JSON parse failed (attempt %s): %s", attempt + 1, type(exc).__name__)
                 messages = list(messages) + [
                     {
                         "role": "user",
@@ -96,7 +96,9 @@ class LLMClient:
                         ),
                     }
                 ]
-        raise ValueError(f"failed to parse JSON: {last_err}")
+        # Parser messages can contain the model's private output. Persist an
+        # error type for retry/metrics, never the response body in normal logs.
+        raise ValueError(f"failed to parse JSON: {type(last_err).__name__}")
 
 
 class NvidiaLLM(LLMClient):
@@ -175,7 +177,7 @@ class NvidiaLLM(LLMClient):
         """Acquire a key, stream, and rotate on 429 until per-key budget is spent."""
         per_key = max(1, int(self.settings.llm_rate_limit_retries_per_call))
         max_rate = per_key * max(1, self.pool.n_keys)
-        hard_retries = retries if retries is not None else max(max_rate, 6)
+        hard_retries = retries if retries is not None else max(1, int(self.settings.generation.get("request_max_attempts", 3)))
         rate_hits = [0] * max(1, self.pool.n_keys)
         last: Exception | None = None
         for attempt in range(hard_retries):
@@ -224,12 +226,21 @@ class NvidiaLLM(LLMClient):
         raise RuntimeError(f"LLM call failed after retries: {last}")
 
     def _stream_once(self, client: Any, payload: dict[str, Any]) -> str:
-        """Consume one streamed completion; recover content from reasoning if empty."""
+        """Consume a bounded stream and require a separate final answer."""
         stream = client.chat.completions.create(**payload)
+        deadline = time.monotonic() + float(self.settings.generation.get("stream_timeout_seconds", 180))
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         finish_reason = None
         for chunk in stream:
+            # HTTP read timeout alone resets on each arriving chunk. Bound a
+            # continuously streaming response too, releasing its pool slot on
+            # timeout instead of starving all other Agents indefinitely.
+            if time.monotonic() >= deadline:
+                closer = getattr(stream, "close", None)
+                if callable(closer):
+                    closer()
+                raise TimeoutError("LLM streaming wall-clock budget exhausted")
             usage = getattr(chunk, "usage", None)
             if usage is not None:
                 labels = {"model": str(payload["model"])}
@@ -251,20 +262,11 @@ class NvidiaLLM(LLMClient):
         content = strip_think("".join(content_parts))
         reasoning = "".join(reasoning_parts)
         if self.settings.log_reasoning and reasoning:
-            logger.info("reasoning: %s", reasoning[:2000])
+            logger.info("reasoning_tokens_present chars=%s (contents omitted)", len(reasoning))
         if not content and reasoning:
-            recovered = strip_think(reasoning)
-            if recovered:
-                logger.warning(
-                    "empty content after stream; recovered %s chars from reasoning (finish=%s)",
-                    len(recovered),
-                    finish_reason,
-                )
-                return recovered
-            logger.warning(
-                "empty content after stream; reasoning tokens were present finish=%s",
-                finish_reason,
-            )
+            # Private reasoning is not a final JSON answer. Reinterpreting it
+            # as content both leaks internals and hides max-token truncation.
+            raise ValueError("model returned reasoning without final content; increase token budget")
         elif finish_reason and finish_reason not in {"stop", "None", None}:
             logger.info("llm_finish reason=%s content_chars=%s", finish_reason, len(content))
         return content

@@ -57,6 +57,90 @@ class AssessedMetadata(BaseModel):
 CheckResult = Literal["pass", "fail", "uncertain"]
 
 
+class SeedAnalysis(BaseModel):
+    """Short, auditable seed summary; never a free-form reasoning trace."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_seed_ids: list[str] = Field(default_factory=list)
+    domain_id: str = ""
+    l3_ids: list[str] = Field(default_factory=list)
+    shared_mechanism: str = Field(min_length=1, max_length=400)
+    reusable_constraints: list[str] = Field(default_factory=list, max_length=8)
+    differences: list[str] = Field(default_factory=list, max_length=8)
+
+
+class PairPlan(BaseModel):
+    """Declarative construction plan for a single seed or MathMixup pair."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["single", "evolve", "original", "decomposed", "hybrid"]
+    parent_ids: list[str] = Field(default_factory=list, max_length=2)
+    retained_claim: str = Field(min_length=1, max_length=400)
+    transferred_constraint: str = Field(default="", max_length=400)
+    construction: str = Field(min_length=1, max_length=500)
+    expected_difficulty: int = Field(ge=1, le=4)
+
+
+class VerificationSpec(BaseModel):
+    """Writer-proposed oracle contract, validated before independent review."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["scalar", "symbolic", "open", "compile", "runtime"]
+    answer_type: Literal["number", "enum", "text", "expression"]
+    expected_behavior: str = Field(min_length=1, max_length=500)
+    rubric: list[str] = Field(min_length=1, max_length=8)
+    expression: str | None = None
+    variables: dict[str, Any] | None = None
+    code: str | None = None
+    architecture: str | None = None
+    expected_compile: Literal["success", "failure"] | None = None
+    expected_diagnostic: str | None = None
+    expected_stdout: str | None = None
+    sanitizer: Literal["none", "memcheck", "racecheck"] | None = None
+    expected_runtime_outcome: Literal["success", "sanitizer_error"] = "success"
+    expected_sanitizer_diagnostic: str | None = None
+    toolkit_version: str | None = None
+
+    @model_validator(mode="after")
+    def validate_mode_contract(self) -> "VerificationSpec":
+        if not self.expected_behavior.strip() or any(not item.strip() for item in self.rubric):
+            raise ValueError("verification requires nonempty behavior and rubric criteria")
+        if self.mode == "symbolic" and not (self.expression or "").strip():
+            raise ValueError("symbolic verification requires expression")
+        if self.mode in {"compile", "runtime"}:
+            if not (self.code or "").strip():
+                raise ValueError(f"{self.mode} verification requires a complete translation unit")
+            if not (self.architecture or "").strip():
+                raise ValueError(f"{self.mode} verification requires architecture")
+        if self.mode == "compile" and self.expected_compile is None:
+            raise ValueError("compile verification requires expected_compile")
+        if self.mode == "runtime":
+            if self.expected_compile != "success":
+                raise ValueError("runtime verification requires expected_compile=success")
+            if self.expected_stdout is None:
+                raise ValueError("runtime verification requires expected_stdout")
+            if self.sanitizer is None:
+                raise ValueError("runtime verification requires sanitizer")
+            if self.expected_runtime_outcome == "sanitizer_error" and (
+                self.sanitizer == "none" or not (self.expected_sanitizer_diagnostic or "").strip()
+            ):
+                raise ValueError("negative runtime oracle requires a sanitizer and specific diagnostic")
+        return self
+
+
+class VerificationEvidence(BaseModel):
+    """Independent verifier results; Writer output may not claim these results."""
+
+    model_config = ConfigDict(extra="allow")
+
+    status: Literal["not_run", "pass", "fail", "pending", "disabled"] = "not_run"
+    checks: list[str] = Field(default_factory=list)
+    observations: list[str] = Field(default_factory=list)
+
+
 class QualityChecks(BaseModel):
     """Independent pass/fail/uncertain verdicts for a single question."""
 
@@ -83,6 +167,9 @@ class QualityReview(BaseModel):
     evidence: list[str] = Field(min_length=1)
     internal_reference_answer: str | None
     assessed_metadata: AssessedMetadata | None
+    # Only structured-generation candidates require these additional checks.
+    # Optional on legacy reviews so resuming an old archive remains possible.
+    construction_checks: dict[str, CheckResult] | None = None
 
     @model_validator(mode="after")
     def validate_decision(self) -> "QualityReview":
@@ -132,14 +219,21 @@ class QuestionBrief(BaseModel):
     source_ids: list[str] = Field(default_factory=list)
     knowledge_context: dict[str, Any] = Field(default_factory=dict)
     breadth_or_depth: str = "BREADTH"  # "BREADTH" | "DEPTH"
+    # MathMixup provenance is orthogonal to the requested difficulty.  Keeping
+    # it on the handoff makes parent usage auditable without parsing seed_id.
+    mixup_mode: Literal["original", "decomposed", "hybrid"] | None = None
+    parent_ids: list[str] = Field(default_factory=list)
+    parent_difficulties: list[int] = Field(default_factory=list)
+    difficulty_target: int | None = Field(default=None, ge=1, le=4)
+    difficulty_raw_score: float | None = None
 
 
 class Question(BaseModel):
     """Generated candidate plus review, fingerprint, and knowledge provenance.
 
-    ``internal_reference_answer`` is review-only and is stripped from JSONL
-    export. ``review_status`` stays pending until an independent chair accept
-    or a hard reject.
+    ``draft_plan``, ``draft_target``, and ``internal_reference_answer`` are
+    review-only and stripped from JSONL export. ``review_status`` stays pending
+    until an independent chair accept or a hard reject.
     """
 
     id: str
@@ -177,10 +271,26 @@ class Question(BaseModel):
     source_ids: list[str] = Field(default_factory=list)
     knowledge_dependencies: list[dict[str, Any]] = Field(default_factory=list)
     review_details: dict[str, Any] = Field(default_factory=dict)
+    # Writer-only self-instruction artifacts.  They are carried through review
+    # so the Chair can compare the generated target, but never exported.
+    draft_plan: dict[str, Any] | None = None
+    draft_target: str | None = None
+    verification_spec: dict[str, Any] = Field(default_factory=dict)
+    verification_evidence: dict[str, Any] = Field(default_factory=dict)
+    draft_validation_errors: list[str] = Field(default_factory=list)
+    generation_provenance: dict[str, Any] = Field(default_factory=dict)
+    mixup_context: dict[str, Any] = Field(default_factory=dict)
+    brief_snapshot: dict[str, Any] = Field(default_factory=dict)
     internal_reference_answer: str | None = None
     review_attempts: int = 0
     review_next_at: float = 0.0
     review_exhausted: bool = False
+    mixup_mode: Literal["original", "decomposed", "hybrid"] | None = None
+    parent_ids: list[str] = Field(default_factory=list)
+    parent_difficulties: list[int] = Field(default_factory=list)
+    difficulty_target: int | None = Field(default=None, ge=1, le=4)
+    difficulty_raw_score: float | None = None
+    generation_round: int | None = None
 
     @field_validator("language", mode="before")
     @classmethod
@@ -194,8 +304,16 @@ class Question(BaseModel):
         return "zh"
 
     def to_jsonl(self) -> dict[str, Any]:
-        """Serialize for archive export; drop the private reference answer."""
-        record = self.model_dump(exclude={"internal_reference_answer"})
+        """Serialize public training data without private generation artifacts."""
+        record = self.model_dump(exclude={
+            "internal_reference_answer", "draft_plan", "draft_target",
+            "verification_spec", "verification_evidence", "draft_validation_errors",
+            "generation_provenance", "mixup_context", "brief_snapshot",
+            # The existing question-only JSONL schema remains stable; synthesis
+            # lineage and curriculum labels live in the export manifest.
+            "mixup_mode", "parent_ids", "parent_difficulties", "difficulty_target",
+            "difficulty_raw_score", "generation_round",
+        })
         record["review_details"] = {
             key: value for key, value in self.review_details.items()
             if key in {"action", "checks", "reviewer_model"}

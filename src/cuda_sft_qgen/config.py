@@ -289,6 +289,34 @@ def load_settings(
             raise ValueError(f"knowledge.{key} must be positive")
     default_yaml["knowledge"] = knowledge_cfg
 
+    # One canonical precedence path for new agent controls: explicit environment
+    # overrides profile YAML which overrides repository defaults. Nodes should
+    # consume resolved settings, not re-read environment in worker threads.
+    mixup_cfg = default_yaml.setdefault("mixup", {})
+    for env, mapping, key, fallback in (
+        ("STRUCTURED_COT", gen_cfg, "prompt_cot", False),
+        ("ANSWER_CONSISTENCY_ENABLED", review_cfg, "answer_consistency_enabled", False),
+        ("CUDA_EXECUTION_ENABLED", review_cfg, "execution_enabled", True),
+        ("CUDA_MIXUP_ENABLED", mixup_cfg, "enabled", False),
+        ("EXTERNAL_INVENTORY_ENABLED", knowledge_cfg, "external_inventory_enabled", False),
+    ):
+        mapping[key] = _as_bool(os.getenv(env), bool(mapping.get(key, fallback)))
+    for env, mapping, key, fallback in (
+        ("SOLVER_K", review_cfg, "answer_consistency_k", 3),
+        ("SOLVER_HIGH_RISK_K", review_cfg, "answer_consistency_high_risk_k", 5),
+        ("VERIFIER_MAX_CALLS", review_cfg, "verification_max_calls", 6),
+        ("VERIFIER_RUN_MAX_CALLS", review_cfg, "verification_run_max_calls", 600),
+        ("SOLVER_MAX_TOKENS", review_cfg, "solver_max_tokens", 1024),
+        ("CUDA_VERIFY_TIMEOUT", review_cfg, "execution_timeout_seconds", 20),
+        ("LLM_REQUEST_TIMEOUT", gen_cfg, "request_timeout_seconds", 90),
+        ("LLM_MAX_RETRIES", gen_cfg, "request_max_attempts", 3),
+    ):
+        mapping[key] = _as_int(os.getenv(env), int(mapping.get(key, fallback)))
+        if mapping[key] < 1:
+            raise ValueError(f"{key} must be positive")
+    review_cfg["solver_thinking_level"] = os.getenv("SOLVER_THINKING_LEVEL", str(review_cfg.get("solver_thinking_level", "none")))
+    planner_yaml["mixup"] = dict(mixup_cfg)
+
     thinking = os.getenv("THINKING_LEVEL", "medium").strip().lower()
     if thinking not in {"none", "low", "low_effort", "medium", "high"}:
         raise ValueError(

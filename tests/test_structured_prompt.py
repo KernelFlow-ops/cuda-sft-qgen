@@ -52,6 +52,12 @@ def test_layers_and_json_schema_for_formula():
     assert "KIND: formula" in bundle.user
     assert "Write the JSON now." in bundle.user
     assert "reason privately" in bundle.system.lower() or "Do NOT write the reasoning" in bundle.system
+    assert "Analyze" in bundle.system
+    assert "Construct" in bundle.system
+    assert "Self-check" in bundle.system
+    assert '"draft_plan"' in bundle.system
+    assert '"draft_target"' in bundle.system
+    assert "SEED_BUCKET:" in bundle.user
     assert "BREADTH" in bundle.system
     assert "strong token" in bundle.system.lower() or "Strong tokens" in bundle.system
 

@@ -187,10 +187,59 @@ def test_self_declared_claim_cannot_hide_off_leaf_stem(sample_question):
 def test_generation_keeps_lineage_and_passes_graph_to_writer(fake_settings, sample_brief):
     brief = sample_brief(task_id="stable-task", seed_id="seed", angle_id="angle", claim_revision=3,
                          source_ids=["source-1"], knowledge_context={"claims": [{"id": "related", "revision": 2}]})
-    q = question_from_obj(brief, {"question": "CUDA question?", "tests_claim": "claim", "operator": "deepen"}, source="evolver")
+    q = question_from_obj(
+        brief,
+        {
+            "question": "CUDA question?",
+            "tests_claim": "claim",
+            "operator": "deepen",
+            "draft_plan": {"analyze": "claim", "plan": "scene", "self_check": "pass"},
+            "draft_target": "128B",
+        },
+        source="evolver",
+    )
     assert q.id == "q_stable-task"
     assert (q.seed_id, q.angle_id, q.operator, q.claim_revision) == ("seed", "angle", "deepen", 3)
     assert q.knowledge_dependencies == [{"claim_id": "related", "revision": 2}]
+    assert q.draft_plan["plan"] == "scene"
+    assert q.draft_target == "128B"
+    assert "draft_target" not in q.to_jsonl()
     assert q.requested_metadata["difficulty"] == brief.difficulty
     prompt = StructuredPrompt(fake_settings).build(brief, SteeringBrief())
     assert '"id": "related"' in prompt.user
+
+
+def test_generation_missing_private_contract_is_recorded(sample_brief):
+    q = question_from_obj(
+        sample_brief(knowledge_context={"claims": [{"id": "claim", "revision": 3}]}),
+        {"question": "CUDA question?", "tests_claim": "claim", "language": "en"},
+        source="writer",
+    )
+    assert "missing_draft_plan" in q.draft_validation_errors
+    assert "missing_draft_target" in q.draft_validation_errors
+    assert "missing_verification_spec" in q.draft_validation_errors
+    assert q.verification_evidence["status"] == "not_run"
+
+
+def test_generation_records_mixup_parent_revisions(sample_brief):
+    context = {
+        "claims": [{"id": "anchor", "revision": 4}],
+        "mixup": {
+            "mode": "hybrid",
+            "parent_ids": ["p1", "p2"],
+            "parents": [
+                {"id": "p1", "l3_id": "parent_a", "claim_revision": 2},
+                {"id": "p2", "l3_id": "parent_b", "claim_revision": 7},
+            ],
+        },
+    }
+    q = question_from_obj(
+        sample_brief(knowledge_context=context),
+        {"question": "CUDA question?", "tests_claim": "claim", "language": "en"},
+        source="evolver",
+    )
+    assert {tuple(sorted(d.items())) for d in q.knowledge_dependencies} == {
+        (("claim_id", "anchor"), ("revision", 4)),
+        (("claim_id", "parent_a"), ("revision", 2)),
+        (("claim_id", "parent_b"), ("revision", 7)),
+    }

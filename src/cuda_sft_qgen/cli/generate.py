@@ -94,6 +94,19 @@ def cmd_stats(_args) -> int:
     return 0
 
 
+def cmd_agent_pilot(args) -> int:
+    """Run reproducible ablations; FakeLLM cannot establish Agent quality."""
+    from cuda_sft_qgen.agent_pilot import run_agent_pilot
+    settings = load_settings(fake_llm=False)
+    if (code := _require_keys(settings)) is not None:
+        return code
+    report = run_agent_pilot(settings, Path(args.output), samples=args.samples,
+                             max_calls=args.max_calls, groups=args.groups,
+                             deadline_seconds=args.timeout)
+    _json_print(report.get("summary", report))
+    return 0 if report.get("status") == "completed" else 1
+
+
 def cmd_probe_concurrency(args) -> int:
     """Hit the live API pool to confirm LLM/embed overlap across keys."""
     from cuda_sft_qgen.probe import probe_concurrency, probe_pipeline

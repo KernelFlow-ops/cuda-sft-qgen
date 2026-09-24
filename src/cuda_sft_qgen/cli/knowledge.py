@@ -83,8 +83,16 @@ def cmd_knowledge(args: argparse.Namespace) -> int:
             while processed < args.limit and worker.run_once():
                 processed += 1
             _json_print({"queued": queued, "processed": processed, "stats": rt.knowledge.stats()})
+        elif args.action == "inventory":
+            # Inventory refresh is deliberately explicit: it performs network
+            # retrieval and then runs the taxonomy critic only on cached source
+            # concepts.  ``--apply`` publishes provisional claims and queues
+            # their official evidence audits; without it this is a preview.
+            worker = KnowledgeWorker(rt.knowledge, rt.review_llm or rt.llm,
+                                     embedder=rt.embedder, settings=settings,
+                                     taxonomy=rt.taxonomy, archive=rt.store)
+            _json_print(worker.external_inventory_once(force=True, apply=bool(args.apply)))
     finally:
         rt.close()
     return 0
-
 

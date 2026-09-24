@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import threading
 
 from cuda_sft_qgen.graph.app import run_pipeline
@@ -103,3 +104,45 @@ def test_review_starts_before_writer_batch_finishes(fake_runtime, sample_questio
     result = run_pipeline(fake_runtime.settings, runtime=fake_runtime)
     assert reviewed.is_set() and generated.is_set()
     assert result["accepted_count"] == 1
+
+
+def test_immediately_due_pending_review_is_bounded_by_attempt_limit(
+    fake_runtime, sample_question, monkeypatch
+):
+    """A zero-backoff Agent failure must exhaust instead of polling forever.
+
+    Production normally uses a positive retry delay.  A zero value is useful
+    in tests and is also a valid operator override, so the coordinator must
+    still terminate via ``review.max_attempts`` when every Chair call returns
+    pending (for example, an incomplete private draft contract).
+    """
+    chair = importlib.import_module("cuda_sft_qgen.graph.nodes.review_chair")
+
+    configure(fake_runtime)
+    fake_runtime.settings.max_iterations = 0
+    fake_runtime.settings.review.update(max_attempts=3, retry_base_seconds=0)
+    fake_runtime.store.save_pending([sample_question(id="always-pending")])
+
+    def pending_decisions(items, max_workers=4):
+        return {
+            item["question"]["id"]: {
+                "id": item["question"]["id"],
+                "action": "pending",
+                "reason": "draft_validation:missing_draft_target",
+                "review": {
+                    "action": "pending",
+                    "reason": "draft_validation",
+                },
+            }
+            for item in items
+        }
+
+    monkeypatch.setattr(chair, "_parallel_chair_decisions", pending_decisions)
+
+    result = run_pipeline(fake_runtime.settings, runtime=fake_runtime)
+
+    pending = fake_runtime.store.load_pending()
+    assert result["status"] == "review_pending"
+    assert len(pending) == 1
+    assert pending[0].review_attempts == 3
+    assert pending[0].review_exhausted is True

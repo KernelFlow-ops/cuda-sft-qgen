@@ -28,6 +28,32 @@ def test_full_pipeline_fake_llm(temp_data_dir):
     assert result["done"] is True or result["accepted_count"] > 0
 
 
+def test_full_pipeline_with_structured_contract_and_consistency(temp_data_dir):
+    """Exercise the opt-in Agent gates instead of only their disabled defaults.
+
+    The production defaults can be disabled after a real-API pilot fails its
+    quality threshold.  That must not make the integration suite blind to the
+    structured Writer contract or answer-consistency path: both features add
+    pending/retry states which previously looked like a pipeline hang when the
+    whole suite was killed by a short wall-clock timeout.
+    """
+    settings = load_settings(
+        fake_llm=True,
+        target=5,
+        data_dir=str(temp_data_dir),
+    )
+    settings.embedding_provider = "fake"
+    settings.max_iterations = 5
+    settings.default_yaml.setdefault("generation", {})["prompt_cot"] = True
+    settings.default_yaml.setdefault("review", {})["answer_consistency_enabled"] = True
+
+    result = run_pipeline(settings)
+
+    assert result["done"] is True
+    assert result["accepted_count"] >= 5
+    assert result["pending"] == []
+
+
 def test_full_pipeline_small_batch(temp_data_dir):
     """Test full pipeline with small batch size."""
     settings = load_settings(

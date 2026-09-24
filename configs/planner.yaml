@@ -27,3 +27,6 @@ adaptive_sampling:
   boost:
     unhealthy: 2.0      # Multiply weight by this for unhealthy leaves
     healthy: 0.8        # Multiply weight by this for healthy leaves
+
+# Mixup settings live in configs/default.yaml; profile/environment overrides
+# are resolved by load_settings, then passed to the planner explicitly.

@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import pytest
+
 from cuda_sft_qgen.graph.handoff import (
     ArchiveBatch,
     ChairDecisionRecord,
+    GenerationDraft,
     brief_snapshot_from_question,
+    generation_draft_from_question,
 )
 from cuda_sft_qgen.models import Question, SteeringBrief
+from cuda_sft_qgen.models import VerificationSpec
 
 
 def _q(**overrides) -> Question:
@@ -63,3 +68,38 @@ def test_archive_batch_accepts_pending_without_review_model():
     )
     assert batch.decisions[0].action == "pending"
     assert batch.decisions[0].review is None
+
+
+def test_generation_draft_is_validated_and_private():
+    q = _q(draft_plan={"analyze": "claim", "plan": "numeric scene"}, draft_target="128B")
+    draft = generation_draft_from_question(q)
+    assert isinstance(draft, GenerationDraft)
+    assert draft.plan["plan"] == "numeric scene"
+    assert draft.target == "128B"
+    assert "draft_plan" not in q.to_jsonl()
+    assert "draft_target" not in q.to_jsonl()
+
+
+def test_verification_spec_requires_compile_contract():
+    with pytest.raises(Exception):
+        VerificationSpec.model_validate({
+            "mode": "compile", "answer_type": "enum", "rubric": ["legal"],
+            "code": "int main() {}",
+        })
+
+
+def test_private_verification_fields_are_not_exported():
+    q = _q(
+        verification_spec={
+            "mode": "scalar", "answer_type": "number",
+            "expected_behavior": "exact scalar", "rubric": ["exact"],
+        },
+        verification_evidence={"status": "not_run"},
+        generation_provenance={"seed_domain_id": "T08"},
+        draft_validation_errors=["missing_draft_target"],
+    )
+    exported = q.to_jsonl()
+    assert "verification_spec" not in exported
+    assert "verification_evidence" not in exported
+    assert "generation_provenance" not in exported
+    assert "draft_validation_errors" not in exported

@@ -41,12 +41,16 @@ def archive_node(state: PipelineState) -> dict:
                 for dependency in dependencies:
                     claim = knowledge.get_claim(dependency["claim_id"])
                     revision = dependency.get("revision")
-                    if claim is not None and (claim.get("status") in {"quarantined", "retired"}
-                                             or (revision is not None and claim["revision"] != revision)):
+                    missing_parent = claim is None and dependency["claim_id"] in {
+                        p.get("l3_id") for p in q.mixup_context.get("parents", []) if isinstance(p, dict)
+                    }
+                    if missing_parent or (claim is not None and (claim.get("status") in {"quarantined", "retired"}
+                                             or (revision is not None and claim["revision"] != revision))):
                         item["action"], item["reason"] = "pending", "knowledge_revision_invalidated"
                         q.review_status, q.reject_reason = "pending", item["reason"]
                         q.review_exhausted, q.review_next_at = False, 0.0
                         q.review_details, q.internal_reference_answer = {}, None
+                        q.verification_evidence = {}
                         item["question"] = q.model_dump()
                         break
         steering = SteeringBrief.model_validate(payload.get("steering_brief") or state.get("steering_brief") or {})

@@ -604,8 +604,153 @@ cuda-sft-qgen estimate-cost --target 1000 --profile prod
 # }
 ```
 
-**性能基准**（3 API keys, prod profile）：
-- 吞吐：30-50 questions/min
-- 延迟：Writer 3-8s, Review Chair 2-4s
-- 内存：2-4 GB
-- 成本：1000 题约 $20-25
+**性能与费用口径**：上面的费用命令使用配置费率估算，不代表本次实测。
+真实延迟、API 调用数和 provider token usage 见 `docs/validation/`。
+未配置费率时报告费用为 `null`；本次没有证实历史的吞吐或成本宣传值。
+
+## 结构化 CoT、Mixup 与真实 Agent 验证
+
+启用 `STRUCTURED_COT=1` 时，Writer 的真实 API 请求按四个内部阶段组织：
+
+```text
+Analyze → Plan → Construct → Self-check
+```
+
+`draft_plan` 和 `draft_target` 只用于后续验证，不会进入 `Question.to_jsonl()` 或训练导出。Seed 会优先从相同 `l3_id + kind + question_type + hardware` 桶中抽取，避免把不相关的 CUDA 机制混入同一个 few-shot prompt。
+
+启用 MathMixup 风格生成时，Planner 使用 claim/topic embedding 配对相似但难度不同的 accepted 题目，并生成：
+
+- `decomposed`：保留核心 claim，减少一个可观测复杂度因素；
+- `original`：原始 accepted 题；
+- `hybrid`：合并相关父题并增加正交约束。
+
+新增质量功能尚未通过生产验收，`prompt_cot`、`answer_consistency_enabled`、Mixup、外部 inventory 默认关闭。可显式启用并用隔离 pilot 验证，不能用 FakeLLM 通过率代替质量验证。
+
+Pair provenance 保存在 `parent_ids`、`parent_difficulties`、`mixup_mode` 和 `difficulty_target` 中。默认关闭 Mixup，确认真实 API pilot 的 parent alignment、难度单调性和 Chair 接受率后再开启：
+
+```yaml
+mixup:
+  enabled: false
+  fraction: 0.30
+  modes: [decomposed, hybrid]
+  pair_similarity_min: 0.80
+  pair_similarity_max: 0.995
+```
+
+也可以用 `CUDA_MIXUP_ENABLED=1` 临时启用。生产 pair mining 使用运行时 embedding 服务；没有 embedding 服务时才使用稳定的 hashed-token fallback，后者只适合离线测试。
+
+### 验证顺序
+
+候选题按以下顺序处理：
+
+```text
+schema/sieve
+→ claim、hardware、版本检查
+→ cheap dedup
+→ Writer self-check
+→ target 一致性
+→ CUDA 编译或 litmus evidence
+→ 独立 Review Chair
+→ archive
+```
+
+可验证标量/符号题默认进行 5 次独立 solver 调用，配置支持 3–5 次；solver 仅看到题干，不接收 tests_claim、Writer target 或父题答案。投票冲突进入 `pending`；不能因为没有工具或 API 超时而默认通过。
+
+验证由 `verification_spec.mode` 决定，不能仅凭题型推断。`compile` 使用完整 translation unit 和正/负编译预期；`runtime` 在 bubblewrap 隔离、无网络、无凭据环境执行，限制 CPU、文件大小和时长，仅暴露 GPU 设备（包含 WSL `/dev/dxg`）。缺少工具、架构不匹配、超时或 runner 被禁用时保持 pending。二次 Chair 复用本轮已生成的 verifier evidence，不重复执行 K 次 Solver；跨题调用由原子运行预算限制。负向 runtime 合同可指定 `expected_runtime_outcome=sanitizer_error` 和明确诊断词；只有工具实际报告该错误才确认。死锁不能用超时证明，一次成功运行不能证明不存在竞态或 UB。
+
+数值答案用安全 AST/Fraction 归一化；符号答案需要 `pip install -e ".[verify]"`。开放题生成 3 个回答再独立评分，在同主题/kind/hardware 桶内按最低分筛选，不使用全局分数阈值。
+
+### 外部知识覆盖
+
+KnowledgeWorker 可以从 allowlisted NVIDIA 文档、Runtime API 文档索引、release notes 和 Nsight 文档生成外部概念清单。清单只用于发现 taxonomy 缺口，不直接授权新 claim：
+
+```text
+external inventory
+→ embedding/lexical coverage gap
+→ taxonomy critic
+→ duplicate/gray 检查
+→ provisional claim
+→ 官方 evidence audit
+→ verified claim（随后可供 Planner 使用）
+```
+
+`external_inventory_enabled` 默认关闭以避免未经配置的网络抓取。开启后，外部 coverage 低于 `taxonomy.manager.external_coverage_threshold` 会触发 critic，即使现有 taxonomy 的普通 health score 已经较高。无法归入已有 L2 的新分类轴只记录在 `new_axes`，不会自动写入 active taxonomy。
+
+也可以显式运行一次 inventory（默认只预览；`--apply` 才发布 provisional claims）：
+
+```bash
+cuda-sft-qgen knowledge inventory --data-dir data/dev
+cuda-sft-qgen knowledge inventory --apply --data-dir data/dev
+```
+
+### 真实 API pilot
+
+FakeLLM 测试只验证协议和错误处理，不能证明 Agent 生成质量。真实 pilot 应使用临时数据目录和项目现有 `.env`：
+
+```bash
+CUDA_SFT_DATA_DIR=/tmp/cuda-sft-pilot \
+CUDA_SFT_PROFILE=dev STRUCTURED_COT=1 ANSWER_CONSISTENCY_ENABLED=1 \
+cuda-sft-qgen generate --target 8 --batch 4
+```
+
+Pilot 至少记录：JSON 成功率、claim alignment、target consistency、Chair accept/reject/pending、duplicate/gray rate、parent claim coverage、难度单调性、编译/smoke pass rate、token/call 成本和平均延迟。不得把 API key、完整私有 CoT 或敏感请求头写入日志。
+
+Archive 还可以生成 curriculum manifest：
+
+```python
+archive.export_curriculum_manifest(Path("data/curriculum.json"))
+```
+
+`export` 同时生成 `.curriculum.json`，两种导出复用独立审查门槛。manifest 记录父题 family，整个 family 分到同一个 train/validation/test split，并输出分层 10% 人工抽检队列（未执行人工审核，不标已审）。
+
+manifest 的默认训练顺序是 `decomposed → original → hybrid`，但 `mixup_mode` 与 assessed difficulty 是两个独立维度，训练端应按联合 bucket 采样。
+
+### 真实验证记录
+
+汇总结论与验收边界见 [RESULTS.md](docs/validation/RESULTS.md)。
+
+真实验证产物保存在 `docs/validation/`，文件权限为 `0600`，其中只保留公开题干、来源证据、脱敏统计和错误码，不保留 API key、完整请求、私有答案或模型推理：
+
+- `cuda-tools-negative.json`：真实 memcheck 捕获预期的越界全局写错误，验证负向 runtime 合同。
+- `cuda-tools.json`：CUDA 12.6、WSL RTX 3060（sm_86）的真实编译、运行、负编译和 Compute Sanitizer 结果；sm_90 因本机架构不匹配而保持 pending。
+- `knowledge-confirmation.json`：加入 material token/数字覆盖检查与第二次独立审核后的重验记录（以文件中最终状态为准）。
+- `knowledge-pilot.json`：真实 NVIDIA LLM/Embedding 对官方 release notes 的概念发现、critic、provisional claim 和 evidence audit。历史结果中有一条 claim 通过逐字官方证据审计；后续代码还要求完整关键标识/数字覆盖与独立再次确认。
+- `review-quality-reasoning.json`：同一 12 例使用 medium reasoning/8192 tokens 时检出 5/8 个缺陷、仍漏检 3 个，对照题 4/4 接受；不是统计显著性或 CUDA 全域效果证明。
+- `review-quality.json`：12 个 frozen quality cases 的真实 Chair 结果。当前模型在固定缺陷集上检出 3/8 个缺陷、漏检 5 个，4/4 对照题接受；这项结果只能说明单次 Chair 仍有漏检，不能作为数据质量达标证明。
+- `verification-live.json`：真实盲 solver 对受控 scalar 题的 5 票一致性、错误 writer target 的 pending，以及开放题响应不足时的 pending。
+- `agent-pilot-small-abcd.json`：后续受限运行已尝试全部四组，但因 API 延迟、模型合同错误和 deadline 仍为 partial；不能据此宣称质量通过。
+- `agent-pilot.json`：A/B/C/D 真实 Agent 对照运行的增量 checkpoint。`status=completed` 只代表流程结束；`quality_gates` 只衡量样本量条件，不证明质量改善。此轮历史运行是 partial，小样本和预算中断均只用于诊断。
+- `mixup-targeted.json`：两个真实独立 Chair 接受的父题及其真实 Mixup 尝试；没有合格父题时明确记录 `not_evaluated`。
+
+运行新的真实对照需要 NVIDIA API key 和真实 embedding：
+
+```bash
+cuda-sft-qgen agent-pilot \
+  --output docs/validation/agent-pilot.json \
+  --samples 2 --max-calls 160 --timeout 1800 \
+  --groups A B C D
+```
+
+`--samples` 为每类样本数（默认 8 类），调用预算按组均分，重试与截止退出会记录 partial。生产关闭验证时，带结构化验证合同的题不能被接受/导出；B 因此只可观察 Chair 的 model_action，不宣称已验证。
+
+该命令使用临时 archive、固定 taxonomy 快照和相同 brief 集合。A 是旧 Writer 基线，B 加结构化 CoT，C 再加独立一致性，D 再尝试 Mixup；父题必须在 D 组内独立通过 Chair。`accept` 只表示该次运行的操作结果，不能替代官方证据、编译、运行或人工审核。
+
+CUDA 官方文档曾用于纠正一个真实 reviewer 误判：`cudaMemcpyPeer` 在未启用 peer access 时仍可通过 host staging 工作；启用 peer access 的作用是避免 staging 并获得更快的 peer path。由此可见，reviewer 的 reject 也必须由来源或执行证据复核。
+
+
+### 配置与限制
+
+| 环境变量 | 作用 |
+|---|---|
+| `STRUCTURED_COT=1` | 启用结构化设计摘要和私有验证合同 |
+| `ANSWER_CONSISTENCY_ENABLED=1` | 启用独立求解/开放题评分/工具合同验证 |
+| `CUDA_MIXUP_ENABLED=1` | 开启相关题配对；默认关闭 |
+| `CUDA_EXECUTION_ENABLED=0` | 暂停 CUDA runner；需执行的候选保持 pending |
+| `SOLVER_K` / `SOLVER_HIGH_RISK_K` | 默认 3/5；每题调用还受 `VERIFIER_MAX_CALLS` 与全运行 `VERIFIER_RUN_MAX_CALLS` 限制 |
+| `SOLVER_THINKING_LEVEL` / `SOLVER_MAX_TOKENS` | 紧凑 solver 输出预算 |
+| `LLM_REQUEST_TIMEOUT` / `LLM_MAX_RETRIES` | 单次 HTTP 超时与有限重试（总实验还需 pilot deadline） |
+| `EXTERNAL_INVENTORY_ENABLED=1` | 后台单独调度官方资料 inventory job |
+
+`knowledge inventory` 未指定 `--apply` 时只预览；新 L1/L2、拆分/合并建议持久化供复核，不自动重排知识树。
+静态难度特征是可解释的排序先验，最终 1–4 标签由独立 Chair 校准；未宣称完成大规模人类难度标定或下游训练。
+本项目依然只导出问题，curriculum manifest 为后续答案生成与训练准备；本次没有运行 SFT、GRPO 或下游 CUDA 模型训练。
