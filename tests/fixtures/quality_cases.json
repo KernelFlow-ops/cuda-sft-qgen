@@ -449,6 +449,1280 @@
       "source": {
         "kind": "authored_control"
       }
+    },
+    {
+      "case_id": "acc_g01_bank_gcd",
+      "expected_action": "accept",
+      "question": {
+        "id": "g01_bank_gcd",
+        "question": "某 kernel 声明 `__shared__ float s[1024];`，blockDim.x = 32（恰好一个 warp），每个线程执行一次 `float v = s[threadIdx.x * S];`。按 32 个 bank、每个 bank 宽 4 字节计算，分别给出 S = 6、S = 12、S = 33 时这条读指令的 bank 冲突路数（无冲突记为 1-way），并写出你使用的一般计算式。",
+        "tests_claim": "For 4-byte words at stride S over 32 banks a warp access is gcd(S,32)-way conflicted: S=6→2, S=12→4, S=33→1.",
+        "topic_path": [
+          "T25",
+          "smem_bank",
+          "smem_bank_stride_gcd"
+        ],
+        "l3_id": "smem_bank_stride_gcd",
+        "l3_claim": "4B 字、32 bank 下，warp 以跨度 S（单位：字）访问共享内存的冲突路数 = gcd(S, 32)。",
+        "question_type": "conceptual",
+        "difficulty": 2,
+        "bloom": "apply",
+        "persona": "ncu_perf_engineer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "zh",
+        "kind": "formula",
+        "source": "writer"
+      },
+      "reference_answer": "S=6: 2-way; S=12: 4-way; S=33: 1-way（无冲突）。一般式：路数 = gcd(S, 32)。"
+    },
+    {
+      "case_id": "acc_g02_transpose_padding",
+      "expected_action": "accept",
+      "question": {
+        "id": "g02_transpose_padding",
+        "question": "A transpose kernel stages a tile in `__shared__ float tile[32][32];` with blockDim = (32, 1). After a barrier, one version reads `tile[threadIdx.x][k]` and another reads `tile[k][threadIdx.x]` (k is uniform across the warp). For each version, give the bank-conflict degree of one warp-wide read. Then give the one-line declaration change that removes the conflict in the bad version, and state which way `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` should move after the change.",
+        "tests_claim": "tile[threadIdx.x][k] on a 32x32 float tile is 32-way bank conflicted; declaring tile[32][33] makes it conflict-free and the shared-load bank-conflict counter drops to about zero.",
+        "topic_path": [
+          "T02",
+          "shared_mem",
+          "shared_mem_transpose_padding"
+        ],
+        "l3_id": "shared_mem_transpose_padding",
+        "l3_claim": "Reading a 32x32 float smem tile down a column is 32-way conflicted; padding the row to 33 floats removes the conflict.",
+        "question_type": "profiling",
+        "difficulty": 3,
+        "bloom": "analyze",
+        "persona": "ncu_perf_engineer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "en",
+        "kind": "failure",
+        "source": "writer"
+      },
+      "reference_answer": "tile[threadIdx.x][k]: 32-way (all lanes hit bank k); tile[k][threadIdx.x]: conflict-free. Fix: __shared__ float tile[32][33]; bank=(tid*33+k)%32 distinct. Counter drops to ~0 for that load."
+    },
+    {
+      "case_id": "acc_g03_occupancy_granularity",
+      "expected_action": "accept",
+      "question": {
+        "id": "g03_occupancy_granularity",
+        "question": "在 A100（sm_80）上：每 SM 65536 个 32 位寄存器、最多 64 个驻留 warp、最多 32 个驻留 block；寄存器按 warp 分配，每个 warp 的寄存器数向上取整到 256 的倍数。某 kernel 经 ptxas 报告使用 36 个寄存器/线程、0 字节共享内存，以 256 线程/block 启动。求：每 SM 最多驻留多少个 block？对应理论 occupancy 是多少？若忽略分配粒度直接用 65536 /(36×256) 计算，会高估为多少个 block？",
+        "tests_claim": "On sm_80, 36 regs/thread rounds to 1280 regs per warp, so 256-thread blocks are limited to 6 per SM (48/64 warps = 75%), not the naive 7.",
+        "topic_path": [
+          "T03",
+          "occupancy_math",
+          "occupancy_math_reg_alloc_granularity"
+        ],
+        "l3_id": "occupancy_math_reg_alloc_granularity",
+        "l3_claim": "sm_80 寄存器按 warp 以 256 为单位向上取整分配；36 regs/thread、256 threads/block 时每 SM 驻留 6 个 block。",
+        "question_type": "conceptual",
+        "difficulty": 3,
+        "bloom": "apply",
+        "persona": "cuda_interviewer",
+        "hardware": "ampere",
+        "granularity": "kernel",
+        "language": "zh",
+        "kind": "numeric",
+        "source": "writer"
+      },
+      "reference_answer": "36×32=1152→向上取整 1280/warp；65536/1280=51 warp→按 8 warp/block 得 6 block（48 warp），理论 occupancy 48/64=75%；忽略粒度会得到 floor(65536/9216)=7。"
+    },
+    {
+      "case_id": "acc_g04_launch_bounds_cap",
+      "expected_action": "accept",
+      "question": {
+        "id": "g04_launch_bounds_cap",
+        "question": "A kernel compiled for sm_80 (65536 registers per SM) naturally uses 80 registers per thread. The author adds `__launch_bounds__(256, 4)` to force 4 resident blocks of 256 threads per SM. What is the maximum number of registers per thread the compiler may now allocate, and what new item would you expect to appear in the `-Xptxas -v` output as a side effect?",
+        "tests_claim": "__launch_bounds__(256,4) on sm_80 limits allocation to 64 registers per thread, so an 80-register kernel reports spill stores/loads.",
+        "topic_path": [
+          "T03",
+          "maxregcount",
+          "maxregcount_launch_bounds_cap"
+        ],
+        "l3_id": "maxregcount_launch_bounds_cap",
+        "l3_claim": "__launch_bounds__(256,4) on sm_80 caps registers at 65536/(4*256)=64 per thread; a kernel needing more spills to local memory.",
+        "question_type": "optimization",
+        "difficulty": 2,
+        "bloom": "apply",
+        "persona": "ncu_perf_engineer",
+        "hardware": "ampere",
+        "granularity": "kernel",
+        "language": "en",
+        "kind": "numeric",
+        "source": "writer"
+      },
+      "reference_answer": "64 registers/thread (65536/(4×256)); ptxas reports non-zero 'bytes spill stores' / 'bytes spill loads' (local memory spills)."
+    },
+    {
+      "case_id": "acc_g05_dyn_smem_optin",
+      "expected_action": "accept",
+      "question": {
+        "id": "g05_dyn_smem_optin",
+        "question": "在 A100（sm_80）上，kernel 使用 `extern __shared__ float buf[];`，主机端直接以 `kernel<<<grid, 256, 100 * 1024>>>(...)` 启动，此前没有对该 kernel 做任何属性设置。这次启动的结果是什么？若要合法使用 100 KB 动态共享内存，启动前应调用哪个运行时 API、设置哪个属性、取值多少？",
+        "tests_claim": "Launching with >48KB dynamic shared memory without cudaFuncAttributeMaxDynamicSharedMemorySize set fails; cudaFuncSetAttribute with 102400 bytes is required.",
+        "topic_path": [
+          "T01",
+          "launch",
+          "launch_dynamic_smem_optin"
+        ],
+        "l3_id": "launch_dynamic_smem_optin",
+        "l3_claim": "动态共享内存超过 48KB 必须先用 cudaFuncSetAttribute(..., cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) 显式开启，否则启动失败。",
+        "question_type": "syntax",
+        "difficulty": 1,
+        "bloom": "remember",
+        "persona": "api_examiner",
+        "hardware": "ampere",
+        "granularity": "api",
+        "language": "zh",
+        "kind": "api",
+        "source": "writer"
+      },
+      "reference_answer": "启动失败（kernel 不执行，cudaGetLastError 返回启动配置类错误）。需 cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 102400)，sm_80 可选上限约 163KB。"
+    },
+    {
+      "case_id": "acc_g06_sectors_per_request",
+      "expected_action": "accept",
+      "question": {
+        "id": "g06_sectors_per_request",
+        "question": "`float* a` and `double* d` are 256-byte aligned. For ONE warp-wide load instruction with lane = threadIdx.x (0..31), give the value of l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum / l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum (32-byte sectors per request) for each pattern: (a) `a[lane]`, (b) `a[lane + 1]`, (c) `a[2 * lane]`, (d) `d[lane]`.",
+        "tests_claim": "Warp loads touch 4 sectors for aligned float, 5 when shifted by one float, 8 for stride-2 float and 8 for aligned double.",
+        "topic_path": [
+          "T05",
+          "txn_count",
+          "txn_count_sectors_per_request"
+        ],
+        "l3_id": "txn_count_sectors_per_request",
+        "l3_claim": "A warp-wide global load touches ceil(span/32B) sectors; misalignment and stride inflate sectors per request.",
+        "question_type": "profiling",
+        "difficulty": 2,
+        "bloom": "apply",
+        "persona": "ncu_perf_engineer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "en",
+        "kind": "numeric",
+        "source": "writer"
+      },
+      "reference_answer": "(a) 4, (b) 5, (c) 8, (d) 8."
+    },
+    {
+      "case_id": "acc_g07_vectorized_float4",
+      "expected_action": "accept",
+      "question": {
+        "id": "g07_vectorized_float4",
+        "question": "A warp must read 128 consecutive floats starting at a 16-byte-aligned pointer `p`. Version S issues four scalar warp-wide loads `p[lane + 32*j]` (j = 0..3); version V issues one `reinterpret_cast<const float4*>(p)[lane]`. Compare the two on (1) warp-level load instructions issued and (2) total 32-byte sectors requested. Then state what happens at run time if the same float4 code is applied to `p + 1`.",
+        "tests_claim": "Replacing four scalar warp loads with one float4 load cuts load instructions from 4 to 1 while sectors stay at 16, and a float4 load from p+1 is a misaligned-address fault.",
+        "topic_path": [
+          "T05",
+          "vectorize",
+          "vectorize_float4_alignment"
+        ],
+        "l3_id": "vectorize_float4_alignment",
+        "l3_claim": "float4 loads cut load instructions 4x without changing sectors moved, but require 16-byte aligned addresses.",
+        "question_type": "optimization",
+        "difficulty": 3,
+        "bloom": "evaluate",
+        "persona": "ncu_perf_engineer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "en",
+        "kind": "api",
+        "source": "writer"
+      },
+      "reference_answer": "(1) 4 vs 1 load instructions; (2) 16 sectors in both (512 B). p+1 is only 4-byte aligned → misaligned address error (kernel faults, sticky error)."
+    },
+    {
+      "case_id": "acc_g08_divergent_syncthreads_ub",
+      "expected_action": "accept",
+      "question": {
+        "id": "g08_divergent_syncthreads_ub",
+        "question": "blockDim.x = 64，kernel 中有如下代码：\n```cuda\nif (threadIdx.x < 16) {\n    __syncthreads();\n}\nout[threadIdx.x] = 1;\n```\n下列关于其行为的说法，哪一项正确？（单选）\nA. 必然死锁，因为屏障计数永远达不到 64\nB. 属于未定义行为：条件在 block 内不一致，可能挂起，也可能看似正常结束，结果不可依赖\nC. 自 Volta 独立线程调度起合法，16 个线程到达即放行\nD. nvcc 会在编译期报错",
+        "tests_claim": "A __syncthreads() under a block-divergent condition is undefined behavior, neither a guaranteed deadlock nor legal.",
+        "topic_path": [
+          "T04",
+          "barriers",
+          "barriers_divergent_syncthreads_ub"
+        ],
+        "l3_id": "barriers_divergent_syncthreads_ub",
+        "l3_claim": "__syncthreads() 位于非块内一致的条件分支中是未定义行为，不保证死锁也不保证正常。",
+        "question_type": "debug",
+        "difficulty": 3,
+        "bloom": "analyze",
+        "persona": "code_reviewer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "zh",
+        "kind": "failure",
+        "source": "writer"
+      },
+      "reference_answer": "B"
+    },
+    {
+      "case_id": "acc_g09_warp_sync_reduction_its",
+      "expected_action": "accept",
+      "question": {
+        "id": "g09_warp_sync_reduction_its",
+        "question": "The following tail of a block reduction ran correctly on pre-Volta GPUs. `s` is filled and a `__syncthreads()` precedes the snippet; blockDim.x = 64.\n```cuda\n__shared__ volatile float s[64];\nint tid = threadIdx.x;\nif (tid < 32) {\n    s[tid] += s[tid + 32];\n    s[tid] += s[tid + 16];\n    s[tid] += s[tid + 8];\n    s[tid] += s[tid + 4];\n    s[tid] += s[tid + 2];\n    s[tid] += s[tid + 1];\n}\n```\nOn sm_80, is `s[0]` guaranteed to hold the correct sum? Explain the mechanism, then rewrite ONE step (the `+16` step) so that the whole snippet becomes correct when every step is rewritten the same way.",
+        "tests_claim": "On sm_70+ a volatile warp-synchronous reduction is not guaranteed correct; each step needs a read, __syncwarp(), write, __syncwarp() sequence.",
+        "topic_path": [
+          "T03",
+          "warp",
+          "warp_its_legacy_reduction"
+        ],
+        "l3_id": "warp_its_legacy_reduction",
+        "l3_claim": "Since sm_70 independent thread scheduling, volatile warp-synchronous smem reductions need __syncwarp between the read and write of each step.",
+        "question_type": "debug",
+        "difficulty": 4,
+        "bloom": "analyze",
+        "persona": "code_reviewer",
+        "hardware": "ampere",
+        "granularity": "kernel",
+        "language": "en",
+        "kind": "failure",
+        "source": "writer"
+      },
+      "reference_answer": "Not guaranteed: independent thread scheduling means lanes are not guaranteed to execute in lockstep, so lane i may read s[i+16] before or after lane i+16 updated it. Fix: float v = s[tid] + s[tid + 16]; __syncwarp(); s[tid] = v; __syncwarp(); (or use __shfl_down_sync)."
+    },
+    {
+      "case_id": "acc_g10_shfl_mask_width",
+      "expected_action": "accept",
+      "question": {
+        "id": "g10_shfl_mask_width",
+        "question": "下面的代码意在对 lane 0..15 的 16 个值做一次折半累加：\n```cuda\nint lane = threadIdx.x & 31;\nfloat v = in[threadIdx.x];\nif (lane < 16) {\n    v += __shfl_down_sync(0xffffffff, v, 8);\n}\n```\n指出这行调用违反了什么规则；给出修正后的完整调用（写明 mask 与 width 实参），要求修正后 lane 8..15 也不会读取到未定义的值。",
+        "tests_claim": "Calling __shfl_down_sync with mask 0xffffffff inside a lane<16 branch is undefined; __shfl_down_sync(0x0000ffff, v, 8, 16) is the well-defined form.",
+        "topic_path": [
+          "T03",
+          "shuffle_ops",
+          "shuffle_ops_mask_width"
+        ],
+        "l3_id": "shuffle_ops_mask_width",
+        "l3_claim": "__shfl_*_sync 的 mask 必须只包含实际执行该调用的线程；从 mask 外线程读取的结果未定义，width 参数可把源 lane 限制在段内。",
+        "question_type": "debug",
+        "difficulty": 3,
+        "bloom": "apply",
+        "persona": "code_reviewer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "zh",
+        "kind": "api",
+        "source": "writer"
+      },
+      "reference_answer": "mask 声明了 32 个线程参与，但只有 lane 0..15 执行该调用 → 未定义行为。修正：v += __shfl_down_sync(0x0000ffff, v, 8, 16); width=16 使 lane 8..15 的源 lane 超出段，返回自身值，不读 mask 外线程。"
+    },
+    {
+      "case_id": "acc_g11_counterfactual_double_barrier",
+      "expected_action": "accept",
+      "question": {
+        "id": "g11_counterfactual_double_barrier",
+        "question": "分块矩阵乘的主循环如下（blockDim = (32, 32)，单缓冲 tile）：\n```cuda\nfor (int t = 0; t < T; ++t) {\n    tile[threadIdx.y][threadIdx.x] = A[row * K + t * 32 + threadIdx.x];   // 写\n    __syncthreads();                                                      // (1)\n    for (int k = 0; k < 32; ++k) acc += tile[threadIdx.y][k] * B[(t * 32 + k) * N + col];  // 读\n    __syncthreads();                                                      // (2)\n}\n```\n只删除 (2)、保留 (1) 时，会出现哪一类数据冒险？发生在哪两次访问之间？若改为只删除 (1)、保留 (2) 呢？",
+        "tests_claim": "Removing the post-compute barrier causes a WAR hazard where iteration t+1 writes overwrite a tile still read in iteration t; removing the post-load barrier causes a RAW hazard.",
+        "topic_path": [
+          "T04",
+          "barriers",
+          "barriers_tile_loop_raw_war"
+        ],
+        "l3_id": "barriers_tile_loop_raw_war",
+        "l3_claim": "分块循环中写后屏障防止 RAW，读后屏障防止下一轮写覆盖仍在被读的 tile（WAR）。",
+        "question_type": "counterfactual",
+        "difficulty": 3,
+        "bloom": "analyze",
+        "persona": "code_reviewer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "zh",
+        "kind": "failure",
+        "source": "writer"
+      },
+      "reference_answer": "删 (2)：WAR——快的 warp 进入 t+1 轮写 tile，而慢的 warp 仍在读第 t 轮 tile。删 (1)：RAW——线程在其他线程写完 tile 之前就读取。两者都是静默错误结果。"
+    },
+    {
+      "case_id": "acc_g12_cp_async_sizes",
+      "expected_action": "accept",
+      "question": {
+        "id": "g12_cp_async_sizes",
+        "question": "Which of the following PTX instructions are legal on sm_80? Select all that apply.\n(a) `cp.async.cg.shared.global [sdst], [gsrc], 8;`\n(b) `cp.async.ca.shared.global [sdst], [gsrc], 8;`\n(c) `cp.async.cg.shared.global [sdst], [gsrc], 16;`\n(d) `cp.async.ca.shared.global [sdst], [gsrc], 12;`",
+        "tests_claim": "cp.async.cg accepts only a 16-byte cp-size while cp.async.ca accepts 4, 8 or 16, so only (b) and (c) are legal.",
+        "topic_path": [
+          "T18",
+          "cp_async_isa",
+          "cp_async_isa_cp_size_rules"
+        ],
+        "l3_id": "cp_async_isa_cp_size_rules",
+        "l3_claim": "cp.async.cg only supports cp-size 16; cp.async.ca supports 4, 8 and 16 bytes.",
+        "question_type": "syntax",
+        "difficulty": 2,
+        "bloom": "remember",
+        "persona": "api_examiner",
+        "hardware": "ampere",
+        "granularity": "api",
+        "language": "en",
+        "kind": "api",
+        "source": "writer"
+      },
+      "reference_answer": "(b) and (c)."
+    },
+    {
+      "case_id": "acc_g13_cp_async_wait_group",
+      "expected_action": "accept",
+      "question": {
+        "id": "g13_cp_async_wait_group",
+        "question": "sm_80 上的 3 级 cp.async 流水线，每个 k 轮先为第 k+2 个 tile 发出 cp.async 并提交一个 group，此时已提交但未等待的 group 依次对应 tile k、k+1、k+2：\n```cuda\nfor (int k = 0; k < KT; ++k) {\n    issue_tile_async(k + 2);          // 内部为若干 cp.async\n    __pipeline_commit();\n    ________A________;                // 保证 tile k 的拷贝已完成\n    ________B________;                // 保证其他线程的拷贝也已可见\n    compute_on_tile(k % 3);\n    __syncthreads();\n}\n```\n填写 A、B 两处（A 可写 `__pipeline_wait_prior(N)` 或 PTX 形式），并说明为什么只写 A 不够。",
+        "tests_claim": "In a 3-stage cp.async pipeline, consuming tile k needs wait_group 2 (__pipeline_wait_prior(2)) plus __syncthreads because wait_group only covers the calling thread's own copies.",
+        "topic_path": [
+          "T04",
+          "async_copy",
+          "async_copy_wait_group_depth"
+        ],
+        "l3_id": "async_copy_wait_group_depth",
+        "l3_claim": "cp.async.wait_group N 只等待调用线程自己提交的组直到最多剩 N 个未完成；其他线程可见还需 __syncthreads。",
+        "question_type": "code_complete",
+        "difficulty": 3,
+        "bloom": "apply",
+        "persona": "hopper_blackwell_tracker",
+        "hardware": "ampere",
+        "granularity": "pipeline",
+        "language": "zh",
+        "kind": "mechanism",
+        "source": "writer"
+      },
+      "reference_answer": "A: __pipeline_wait_prior(2)（cp.async.wait_group 2），最多保留 k+1、k+2 两组未完成；B: __syncthreads()。wait_group 只保证本线程发出的拷贝完成，tile 由多个线程共同写入，必须用块内屏障让其他线程的写入可见。"
+    },
+    {
+      "case_id": "acc_g14_tma_encode_rules",
+      "expected_action": "accept",
+      "question": {
+        "id": "g14_tma_encode_rules",
+        "question": "A row-major bf16 matrix with K columns (globalDim = {K, M}, base from cudaMalloc) is described with `cuTensorMapEncodeTiled` on an H100, interleave = NONE, elementStrides = {1, 1}. The only globalStride is K*2 bytes. Which configurations can be encoded successfully? Select all that apply.\n(a) K = 1000, boxDim = {64, 128}, SWIZZLE_128B\n(b) K = 1001, boxDim = {64, 64}, SWIZZLE_128B\n(c) K = 1024, boxDim = {4, 64}, SWIZZLE_NONE\n(d) K = 1024, boxDim = {128, 64}, SWIZZLE_128B\n(e) K = 1024, boxDim = {64, 256}, SWIZZLE_128B",
+        "tests_claim": "Only (a) and (e) encode: 2002-byte strides are not 16B multiples, an 8-byte inner box is illegal, and a 256-byte inner box exceeds SWIZZLE_128B.",
+        "topic_path": [
+          "T08",
+          "tma_encode",
+          "tma_encode_tiled_constraints"
+        ],
+        "l3_id": "tma_encode_tiled_constraints",
+        "l3_claim": "cuTensorMapEncodeTiled requires 16B-multiple global strides, boxDim<=256, 16B-multiple inner box bytes, and inner box bytes <= swizzle span.",
+        "question_type": "syntax",
+        "difficulty": 3,
+        "bloom": "apply",
+        "persona": "hopper_blackwell_tracker",
+        "hardware": "hopper",
+        "granularity": "api",
+        "language": "en",
+        "kind": "feature",
+        "source": "writer"
+      },
+      "reference_answer": "(a) and (e). (b) stride 2002 B not multiple of 16; (c) inner box 8 B not multiple of 16; (d) inner box 256 B > 128 B swizzle span."
+    },
+    {
+      "case_id": "acc_g15_tma_expect_tx_edge",
+      "expected_action": "accept",
+      "question": {
+        "id": "g15_tma_expect_tx_edge",
+        "question": "H100 上一个 warp-specialized GEMM：producer 对同一个 mbarrier 发出两次 TMA 2D 加载——A tile 为 128×64 的 bf16，B tile 为 256×64 的 bf16，随后以 `mbarrier.arrive.expect_tx` 声明本阶段的事务字节数。\n(1) 对内部 tile，expect_tx 应为多少字节？\n(2) 对 M 方向的最后一个 tile，A 只有 40 行落在张量范围内（其余由 TMA 零填充），expect_tx 应为多少字节？\n(3) 若作者在 (2) 中按有效数据改写为 40×64×2 + 256×64×2 字节，consumer 在该 barrier 上 wait 后读取 tile 可能出现什么后果？",
+        "tests_claim": "expect_tx must equal the full box bytes of every TMA load on the barrier (49152 here) even for edge tiles, because out-of-bounds elements are zero-filled and still counted.",
+        "topic_path": [
+          "T08",
+          "mbarrier_tx",
+          "mbarrier_tx_full_box_bytes"
+        ],
+        "l3_id": "mbarrier_tx_full_box_bytes",
+        "l3_claim": "mbarrier.arrive.expect_tx 的字节数应等于所有挂在该 barrier 上的 TMA box 的完整字节数，越界部分被零填充但仍计入。",
+        "question_type": "counterfactual",
+        "difficulty": 4,
+        "bloom": "analyze",
+        "persona": "hopper_blackwell_tracker",
+        "hardware": "hopper",
+        "granularity": "pipeline",
+        "language": "zh",
+        "kind": "numeric",
+        "source": "writer"
+      },
+      "reference_answer": "(1) 16384 + 32768 = 49152；(2) 仍为 49152（越界元素零填充并计入 tx 字节）；(3) 声明值 37888 小于实际到达字节，phase 可能在数据未全部落地前完成，consumer 读到不完整 tile（数据竞争/未定义）。"
+    },
+    {
+      "case_id": "acc_g16_wgmma_counts",
+      "expected_action": "accept",
+      "question": {
+        "id": "g16_wgmma_counts",
+        "question": "sm_90a 上一个 CTA 计算 128×128 的输出 tile，使用 2 个 consumer warpgroup，各自负责 64 行，指令形状为 `wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16`。每个 K-tile 深度为 64（bf16）。\n(1) 每个 consumer warpgroup 在一个 K-tile 内需要发出多少条 wgmma？\n(2) 每个线程需要多少个 fp32 寄存器保存该 warpgroup 的累加器？\n(3) 在第一条 wgmma 之前、发出一批之后、读取累加器之前，分别需要哪条 wgmma 同步指令？",
+        "tests_claim": "For m64n128k16 bf16 wgmma with a 64-deep K-tile each warpgroup issues 4 instructions and holds 64 fp32 accumulator registers per thread, bracketed by wgmma.fence, commit_group and wait_group.",
+        "topic_path": [
+          "T06",
+          "wgmma",
+          "wgmma_tile_counts"
+        ],
+        "l3_id": "wgmma_tile_counts",
+        "l3_claim": "wgmma 以 warpgroup(128 线程)为单位，M 固定为 64，bf16 的 K=16；m64nNk16 的 fp32 累加器每线程占 64*N/128 个寄存器。",
+        "question_type": "conceptual",
+        "difficulty": 3,
+        "bloom": "apply",
+        "persona": "hopper_blackwell_tracker",
+        "hardware": "hopper",
+        "granularity": "kernel",
+        "language": "zh",
+        "kind": "numeric",
+        "source": "writer"
+      },
+      "reference_answer": "(1) 64/16 = 4 条；(2) 64×128/128 = 64 个 fp32 寄存器；(3) wgmma.fence.sync.aligned → wgmma.commit_group.sync.aligned → wgmma.wait_group.sync.aligned N。"
+    },
+    {
+      "case_id": "acc_g17_mma_sync_fragments",
+      "expected_action": "accept",
+      "question": {
+        "id": "g17_mma_sync_fragments",
+        "question": "For `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32` on sm_80: (1) how many 32-bit registers per thread hold the A, B and C/D fragments respectively? (2) A warp computes a 64×64 output tile with K = 32 using only this instruction. How many mma.sync instructions does the warp issue?",
+        "tests_claim": "m16n8k16 bf16->f32 mma.sync uses 4/2/4 registers per thread for A/B/CD, and a 64x64x32 warp tile needs 64 instructions.",
+        "topic_path": [
+          "T06",
+          "fragment_map",
+          "fragment_map_m16n8k16"
+        ],
+        "l3_id": "fragment_map_m16n8k16",
+        "l3_claim": "mma.sync m16n8k16 with 16-bit inputs and f32 accumulate uses 4 A, 2 B and 4 C/D 32-bit registers per thread.",
+        "question_type": "conceptual",
+        "difficulty": 2,
+        "bloom": "apply",
+        "persona": "cuda_interviewer",
+        "hardware": "ampere",
+        "granularity": "kernel",
+        "language": "en",
+        "kind": "numeric",
+        "source": "writer"
+      },
+      "reference_answer": "(1) A: 4, B: 2, C/D: 4. (2) (64/16)*(64/8)*(32/16) = 4*8*2 = 64."
+    },
+    {
+      "case_id": "acc_g18_tcgen05_facts",
+      "expected_action": "accept",
+      "question": {
+        "id": "g18_tcgen05_facts",
+        "question": "A team ports a Hopper wgmma GEMM to data-center Blackwell (sm_100a) using tcgen05. Which statements are correct? Select all that apply.\nA. tcgen05.mma accumulators live in Tensor Memory (TMEM), not in the issuing threads' registers.\nB. `tcgen05.alloc` may request 96 columns.\nC. A 128×256 FP32 accumulator occupies 256 TMEM columns across 128 lanes.\nD. The same tcgen05 code compiled with `-arch=sm_120` runs on a GeForce RTX 50-series GPU because both are Blackwell.\nE. Unlike wgmma, which the whole warpgroup issues collectively, each tcgen05.mma is launched by one elected thread.",
+        "tests_claim": "On sm_100a tcgen05.mma is single-thread-issued with TMEM accumulators (a 128x256 fp32 tile uses 256 columns); 96-column allocations and sm_120 targets are invalid.",
+        "topic_path": [
+          "T08",
+          "tcgen05",
+          "tcgen05_tmem_facts"
+        ],
+        "l3_id": "tcgen05_tmem_facts",
+        "l3_claim": "tcgen05.mma is issued by a single thread, accumulates in TMEM (128 lanes x 512 32-bit columns), allocations are powers of two >= 32 columns, and it is unavailable on sm_120.",
+        "question_type": "compare",
+        "difficulty": 3,
+        "bloom": "evaluate",
+        "persona": "arch_migrator",
+        "hardware": "blackwell",
+        "granularity": "kernel",
+        "language": "en",
+        "kind": "feature",
+        "source": "writer"
+      },
+      "reference_answer": "A, C, E. B is illegal (column count must be a power of 2 ≥ 32); D is false (sm_120 has no tcgen05/TMEM)."
+    },
+    {
+      "case_id": "acc_g19_cluster_dsmem_exit",
+      "expected_action": "accept",
+      "question": {
+        "id": "g19_cluster_dsmem_exit",
+        "question": "H100 上 clusterDim = 2。kernel 片段：\n```cuda\nnamespace cg = cooperative_groups;\ncg::cluster_group cluster = cg::this_cluster();\n__shared__ float part[256];\npart[threadIdx.x] = local_sum();\ncluster.sync();\nif (cluster.block_rank() == 0) {\n    float* peer = cluster.map_shared_rank(part, 1);\n    out[threadIdx.x] = part[threadIdx.x] + peer[threadIdx.x];\n}\n// kernel 在此结束\n```\n这段代码存在什么生命周期问题？可能的后果是什么？给出最小修正。",
+        "tests_claim": "Reading a peer block's distributed shared memory after the only cluster.sync lets rank 1 exit first, which is undefined; a trailing cluster.sync() fixes it.",
+        "topic_path": [
+          "T08",
+          "cluster",
+          "cluster_dsmem_lifetime"
+        ],
+        "l3_id": "cluster_dsmem_lifetime",
+        "l3_claim": "访问 cluster 内其他 block 的分布式共享内存时，必须保证目标 block 尚未退出，通常在 kernel 末尾 cluster.sync()。",
+        "question_type": "debug",
+        "difficulty": 3,
+        "bloom": "analyze",
+        "persona": "hopper_blackwell_tracker",
+        "hardware": "hopper",
+        "granularity": "kernel",
+        "language": "zh",
+        "kind": "failure",
+        "source": "writer"
+      },
+      "reference_answer": "rank 1 在 cluster.sync() 后即可退出，其共享内存随之失效，rank 0 随后通过 map_shared_rank 读取属于未定义行为（可能读到垃圾或出错）。修正：在 if 块之后、kernel 结束前再调用一次 cluster.sync()，保证所有 DSMEM 访问完成前无 block 退出。"
+    },
+    {
+      "case_id": "acc_g20_cute_colex_index",
+      "expected_action": "accept",
+      "question": {
+        "id": "g20_cute_colex_index",
+        "question": "`auto L = make_layout(make_shape(Int<4>{}, Int<8>{}), make_stride(Int<8>{}, Int<1>{}));` Give the values of `L(13)`, `L(1, 3)`, `L(3, 1)` and `cosize(L)`.",
+        "tests_claim": "For layout (4,8):(8,1), CuTe's colexicographic 1-D indexing gives L(13) = L(1,3) = 11, L(3,1) = 25 and cosize 32.",
+        "topic_path": [
+          "T07",
+          "layout_algebra",
+          "layout_algebra_colex_1d_index"
+        ],
+        "l3_id": "layout_algebra_colex_1d_index",
+        "l3_claim": "CuTe maps a 1-D index to a coordinate colexicographically before applying strides, so (4,8):(8,1) at index 13 gives offset 11.",
+        "question_type": "layout",
+        "difficulty": 3,
+        "bloom": "apply",
+        "persona": "cutlass_layout_author",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "en",
+        "kind": "formula",
+        "source": "writer"
+      },
+      "reference_answer": "L(13): 13 → (13 % 4, 13 / 4) = (1, 3) → 1*8 + 3*1 = 11; L(1,3) = 11; L(3,1) = 25; cosize = 3*8 + 7*1 + 1 = 32."
+    },
+    {
+      "case_id": "acc_g21_cute_hierarchical",
+      "expected_action": "accept",
+      "question": {
+        "id": "g21_cute_hierarchical",
+        "question": "CuTe 层次化布局 `L = ((2,2),4):((1,8),2)`。\n(1) `size(L)` 是多少？\n(2) `L(5)` 是多少？写出 5 被展开成的层次坐标。\n(3) `L(((1,1),3))` 是多少？\n(4) `cosize(L)` 是多少？L 是否把 [0, size) 双射到 [0, cosize)？",
+        "tests_claim": "((2,2),4):((1,8),2) has size 16, maps index 5 to ((1,0),1) and offset 3, maps ((1,1),3) to 15, and is a bijection onto [0,16).",
+        "topic_path": [
+          "T20",
+          "hierarchical_shape",
+          "hierarchical_shape_offset_bijection"
+        ],
+        "l3_id": "hierarchical_shape_offset_bijection",
+        "l3_claim": "层次化 Layout 按 colex 逐层展开坐标后与层次 stride 做内积；((2,2),4):((1,8),2) 是 [0,16) 上的双射。",
+        "question_type": "layout",
+        "difficulty": 4,
+        "bloom": "analyze",
+        "persona": "cutlass_layout_author",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "zh",
+        "kind": "formula",
+        "source": "writer"
+      },
+      "reference_answer": "(1) 16；(2) 5 → mode0 索引 1、mode1 索引 1 → ((1,0),1) → 1·1+0·8+1·2 = 3；(3) 1+8+6 = 15；(4) cosize = 16，是双射（偏移集合恰为 0..15）。"
+    },
+    {
+      "case_id": "acc_g22_xor_swizzle_bank",
+      "expected_action": "accept",
+      "question": {
+        "id": "g22_xor_swizzle_bank",
+        "question": "A shared-memory tile has 8 rows of 64 fp16 (128 bytes per row, rows contiguous, tile 128B-aligned). Eight threads each read one 16-byte chunk: thread r reads logical chunk c = 0 of row r (r = 0..7), all in the same instruction.\n(1) Without swizzling, how many-way is the bank conflict?\n(2) With the XOR swizzle physical_chunk = c ^ r (3-bit), how many-way?\n(3) Under that swizzle, what is the physical byte offset of logical (row 5, chunk 2)?",
+        "tests_claim": "Reading chunk 0 of eight 128-byte rows is 8-way conflicted, an XOR chunk swizzle c^r removes it, and logical (5,2) lands at byte 752.",
+        "topic_path": [
+          "T07",
+          "swizzle_atom",
+          "swizzle_atom_xor_16b_chunks"
+        ],
+        "l3_id": "swizzle_atom_xor_16b_chunks",
+        "l3_claim": "With 128-byte smem rows, reading the same 16B chunk from 8 rows is 8-way conflicted; storing chunk c of row r at chunk c^r makes it conflict-free.",
+        "question_type": "layout",
+        "difficulty": 3,
+        "bloom": "analyze",
+        "persona": "cutlass_layout_author",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "en",
+        "kind": "mechanism",
+        "source": "writer"
+      },
+      "reference_answer": "(1) 8-way (all chunks at banks 0-3). (2) 1-way / conflict-free (chunks 0..7 cover all 32 banks). (3) 128*5 + 16*(2^5) = 640 + 112 = 752."
+    },
+    {
+      "case_id": "acc_g23_default_stream_semantics",
+      "expected_action": "accept",
+      "question": {
+        "id": "g23_default_stream_semantics",
+        "question": "```cuda\ncudaStream_t s1, s2;\ncudaStreamCreate(&s1);\ncudaStreamCreate(&s2);\nkA<<<g, b, 0, s1>>>();\nkB<<<g, b>>>();          // 默认流\nkC<<<g, b, 0, s2>>>();\n```\n假设三个 kernel 都足够小、GPU 资源允许并发。分别回答以下三种情形下 kA 与 kC 能否重叠执行、kB 与它们的先后关系：\n(1) 默认编译选项；(2) s1、s2 改用 `cudaStreamCreateWithFlags(..., cudaStreamNonBlocking)` 创建；(3) 恢复 (1) 的建流方式，但以 `--default-stream per-thread` 编译。",
+        "tests_claim": "With the legacy default stream kA→kB→kC serialize; non-blocking streams or per-thread default streams remove the implicit synchronization so all three may overlap.",
+        "topic_path": [
+          "T14",
+          "stream_event",
+          "stream_event_legacy_default_sync"
+        ],
+        "l3_id": "stream_event_legacy_default_sync",
+        "l3_claim": "legacy 默认流与阻塞流隐式同步；cudaStreamNonBlocking 流或 per-thread 默认流不产生该隐式同步。",
+        "question_type": "compare",
+        "difficulty": 3,
+        "bloom": "analyze",
+        "persona": "arch_migrator",
+        "hardware": "agnostic",
+        "granularity": "system",
+        "language": "zh",
+        "kind": "mechanism",
+        "source": "writer"
+      },
+      "reference_answer": "(1) kB 等待 kA 完成，kC 等待 kB 完成，三者串行，kA 与 kC 不重叠；(2) 非阻塞流不与 legacy 默认流隐式同步，三者均可能并发；(3) 默认流变为每线程的普通流，不与 s1、s2 隐式同步，三者均可能并发。"
+    },
+    {
+      "case_id": "acc_g24_pageable_memcpy_overlap",
+      "expected_action": "accept",
+      "question": {
+        "id": "g24_pageable_memcpy_overlap",
+        "question": "A pipeline splits work into chunks; for each chunk it calls `cudaMemcpyAsync(d_buf, h_buf, bytes, cudaMemcpyHostToDevice, s[i % 2])` followed by a kernel in the same stream. `h_buf` comes from `malloc`. Nsight Systems shows the copies never overlap any kernel. What is the cause, and which two host-side allocation APIs would fix it?",
+        "tests_claim": "Async H2D copies from malloc'd pageable memory are staged and do not overlap kernels; cudaMallocHost or cudaHostRegister pinned memory enables overlap.",
+        "topic_path": [
+          "T02",
+          "pinned_host",
+          "pinned_host_memcpy_overlap"
+        ],
+        "l3_id": "pinned_host_memcpy_overlap",
+        "l3_claim": "cudaMemcpyAsync from pageable host memory is staged and cannot overlap kernel execution; pinned memory is required.",
+        "question_type": "profiling",
+        "difficulty": 2,
+        "bloom": "analyze",
+        "persona": "ncu_perf_engineer",
+        "hardware": "agnostic",
+        "granularity": "system",
+        "language": "en",
+        "kind": "failure",
+        "source": "writer"
+      },
+      "reference_answer": "Pageable host memory: the driver stages through a pinned buffer, so the copy behaves synchronously with respect to overlap. Use cudaMallocHost/cudaHostAlloc or cudaHostRegister on the existing buffer."
+    },
+    {
+      "case_id": "acc_g25_graph_capture_sync",
+      "expected_action": "accept",
+      "question": {
+        "id": "g25_graph_capture_sync",
+        "question": "```cuda\ncudaStreamBeginCapture(s, cudaStreamCaptureModeGlobal);\nk1<<<g, b, 0, s>>>(x);\ncudaStreamSynchronize(s);   // added for debugging\nk2<<<g, b, 0, s>>>(x);\ncudaGraph_t graph;\ncudaError_t e = cudaStreamEndCapture(s, &graph);\n```\nWhat happens at the `cudaStreamSynchronize` call and what does `cudaStreamEndCapture` report? How should the author check k1's result instead?",
+        "tests_claim": "cudaStreamSynchronize on a capturing stream returns an error and invalidates the capture, so cudaStreamEndCapture fails without a usable graph.",
+        "topic_path": [
+          "T14",
+          "capture_ban",
+          "capture_ban_stream_synchronize"
+        ],
+        "l3_id": "capture_ban_stream_synchronize",
+        "l3_claim": "Synchronizing a stream that is being captured is illegal: the call fails and invalidates the capture.",
+        "question_type": "debug",
+        "difficulty": 2,
+        "bloom": "apply",
+        "persona": "api_examiner",
+        "hardware": "agnostic",
+        "granularity": "system",
+        "language": "en",
+        "kind": "api",
+        "source": "writer"
+      },
+      "reference_answer": "Synchronizing a capturing stream is unsupported: it returns an error (cudaErrorStreamCaptureUnsupported) and invalidates the capture; EndCapture then returns an error (capture invalidated) and no valid graph. Debug by launching the instantiated graph and synchronizing after cudaGraphLaunch, or temporarily run without capture."
+    },
+    {
+      "case_id": "acc_g26_release_acquire",
+      "expected_action": "accept",
+      "question": {
+        "id": "g26_release_acquire",
+        "question": "假设 block 0 与 block 1 同时驻留在 GPU 上，`flag` 初值为 0：\n```cuda\ncuda::atomic_ref<int, cuda::thread_scope_device> f(*flag);\nif (blockIdx.x == 0 && threadIdx.x == 0) {\n    data[0] = 42;\n    f.store(1, cuda::memory_order_relaxed);\n}\nif (blockIdx.x == 1 && threadIdx.x == 0) {\n    while (f.load(cuda::memory_order_relaxed) == 0) { }\n    out[0] = data[0];\n}\n```\nblock 1 读到的 `data[0]` 是否一定为 42？说明理由，并只修改两处 memory_order 给出正确版本。",
+        "tests_claim": "A relaxed device-scope flag does not order the preceding data write, so the reader may see stale data; a release store paired with an acquire load fixes it.",
+        "topic_path": [
+          "T16",
+          "release_acquire",
+          "release_acquire_flag_publish"
+        ],
+        "l3_id": "release_acquire_flag_publish",
+        "l3_claim": "跨 block 以标志位传递数据时，relaxed 原子不提供顺序保证，需要 device 作用域的 release 写与 acquire 读。",
+        "question_type": "debug",
+        "difficulty": 4,
+        "bloom": "evaluate",
+        "persona": "code_reviewer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "zh",
+        "kind": "failure",
+        "source": "writer"
+      },
+      "reference_answer": "不一定。relaxed 原子只保证该原子自身的原子性，不约束 data[0] 写与 flag 写的可见顺序。修正：f.store(1, cuda::memory_order_release); 读端 f.load(cuda::memory_order_acquire)；作用域 thread_scope_device 足以覆盖跨 block。"
+    },
+    {
+      "case_id": "acc_g27_coop_launch_limit",
+      "expected_action": "accept",
+      "question": {
+        "id": "g27_coop_launch_limit",
+        "question": "A kernel calls `cooperative_groups::this_grid().sync()`. On an A100 with 108 SMs, `cudaOccupancyMaxActiveBlocksPerMultiprocessor` returns 2 for its block size and shared-memory configuration. What is the largest grid that `cudaLaunchCooperativeKernel` can accept, and what happens if the grid has 256 blocks?",
+        "tests_claim": "With 108 SMs and 2 resident blocks per SM a cooperative launch accepts at most 216 blocks, so a 256-block grid is rejected at launch.",
+        "topic_path": [
+          "T04",
+          "cg_barrier",
+          "cg_barrier_grid_sync_residency"
+        ],
+        "l3_id": "cg_barrier_grid_sync_residency",
+        "l3_claim": "A cooperative launch requires every block to be co-resident: grid <= SMs * max active blocks per SM, else the launch fails.",
+        "question_type": "conceptual",
+        "difficulty": 2,
+        "bloom": "apply",
+        "persona": "api_examiner",
+        "hardware": "ampere",
+        "granularity": "system",
+        "language": "en",
+        "kind": "numeric",
+        "source": "writer"
+      },
+      "reference_answer": "Max 108 × 2 = 216 blocks. A 256-block cooperative launch fails with cudaErrorCooperativeLaunchTooLarge; the kernel does not run."
+    },
+    {
+      "case_id": "acc_g28_fatbin_compat",
+      "expected_action": "accept",
+      "question": {
+        "id": "g28_fatbin_compat",
+        "question": "分别判断下列三个部署场景能否正常运行 kernel，不能的给出典型报错或原因：\n(1) 只用 `-gencode arch=compute_80,code=sm_80` 构建，在 H100 上运行；\n(2) 用 `-gencode arch=compute_80,code=sm_80 -gencode arch=compute_80,code=compute_80` 构建，在 H100 上运行；\n(3) 使用 wgmma、以 `-gencode arch=compute_90a,code=sm_90a` 构建，在 B200（sm_100）上运行。",
+        "tests_claim": "sm_80 SASS alone fails on H100 with no kernel image, embedding compute_80 PTX allows JIT, and sm_90a arch-specific code cannot run on sm_100.",
+        "topic_path": [
+          "T09",
+          "fatbin_arch",
+          "fatbin_arch_sass_ptx_arch_specific"
+        ],
+        "l3_id": "fatbin_arch_sass_ptx_arch_specific",
+        "l3_claim": "SASS 只在同一主版本内兼容；带 PTX 才能 JIT 到新架构；sm_90a 等架构专用特性不向前兼容。",
+        "question_type": "compare",
+        "difficulty": 2,
+        "bloom": "understand",
+        "persona": "arch_migrator",
+        "hardware": "hopper",
+        "granularity": "system",
+        "language": "zh",
+        "kind": "feature",
+        "source": "writer"
+      },
+      "reference_answer": "(1) 失败：no kernel image is available for execution on the device（SASS 不跨主版本）；(2) 可运行：驱动将 compute_80 PTX JIT 为 sm_90；(3) 失败：sm_90a 架构专用特性（wgmma）不向前兼容，也无可 JIT 的通用 PTX。"
+    },
+    {
+      "case_id": "acc_g29_ncu_memory_bound",
+      "expected_action": "accept",
+      "question": {
+        "id": "g29_ncu_memory_bound",
+        "question": "Nsight Compute reports for a kernel: DRAM throughput 91% of peak, compute (SM) throughput 23%, achieved occupancy 38% (theoretical 50%), top warp stall reason Long Scoreboard. A colleague proposes lowering register usage with `__launch_bounds__` to raise occupancy to 75%. Will this likely give a large speedup? Justify with the numbers given and name two changes that attack the actual limiter.",
+        "tests_claim": "A kernel at 91% of DRAM peak is memory-bound, so raising occupancy yields little; fewer DRAM bytes (fusion, reuse, lower precision) is the lever.",
+        "topic_path": [
+          "T05",
+          "occupancy_trade",
+          "occupancy_trade_memory_bound"
+        ],
+        "l3_id": "occupancy_trade_memory_bound",
+        "l3_claim": "When DRAM throughput is near peak, raising occupancy cannot materially speed a kernel; reducing bytes moved is the lever.",
+        "question_type": "optimization",
+        "difficulty": 3,
+        "bloom": "evaluate",
+        "persona": "ncu_perf_engineer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "en",
+        "kind": "mechanism",
+        "source": "writer"
+      },
+      "reference_answer": "No: at 91% of DRAM peak the kernel is bandwidth-bound; more warps only add latency hiding for a pipe already saturated (≤~10% headroom). Reduce bytes: kernel fusion, data reuse via smem/L2 tiling, narrower types (fp16/fp8), avoiding redundant loads/stores."
+    },
+    {
+      "case_id": "acc_g30_roofline_saxpy",
+      "expected_action": "accept",
+      "question": {
+        "id": "g30_roofline_saxpy",
+        "question": "某 GPU 的 FP32 峰值为 60 TFLOP/s，DRAM 带宽为 3.0 TB/s（1 TB = 10^12 B）。FP32 SAXPY `y[i] = a * x[i] + y[i]` 每个元素读 x、读 y、写 y，且不考虑缓存复用。求：(1) 算术强度（FLOP/B）；(2) Roofline 模型下的可达性能（TFLOP/s）；(3) 该 GPU 的屋脊点算术强度（FLOP/B）。",
+        "tests_claim": "FP32 SAXPY has arithmetic intensity 1/6 FLOP/B, so at 3.0 TB/s it attains 0.5 TFLOP/s against a ridge point of 20 FLOP/B.",
+        "topic_path": [
+          "T25",
+          "roofline",
+          "roofline_saxpy_ai"
+        ],
+        "l3_id": "roofline_saxpy_ai",
+        "l3_claim": "Roofline 可达性能 = min(峰值算力, 带宽 × 算术强度)；FP32 SAXPY 的算术强度为 2 FLOP / 12 B。",
+        "question_type": "conceptual",
+        "difficulty": 2,
+        "bloom": "apply",
+        "persona": "ncu_perf_engineer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "zh",
+        "kind": "formula",
+        "source": "writer"
+      },
+      "reference_answer": "(1) 2 FLOP / 12 B = 1/6 ≈ 0.167；(2) 3.0 × 1/6 = 0.5 TFLOP/s；(3) 60 / 3.0 = 20 FLOP/B。"
+    },
+    {
+      "case_id": "acc_g31_nccl_busbw",
+      "expected_action": "accept",
+      "question": {
+        "id": "g31_nccl_busbw",
+        "question": "用 nccl-tests 的 all_reduce_perf 在 8 张 GPU 上测试，消息大小 1 GB（按 10^9 字节计），测得单次耗时 10 ms。求 algbw 与 busbw（GB/s，按 10^9 计），并说明 busbw 相对 algbw 的换算因子为什么与 GPU 数有关。",
+        "tests_claim": "For an 8-GPU allreduce of 1e9 bytes in 10 ms, algbw is 100 GB/s and busbw is 175 GB/s via the 2(n-1)/n factor.",
+        "topic_path": [
+          "T10",
+          "nccl",
+          "nccl_allreduce_busbw"
+        ],
+        "l3_id": "nccl_allreduce_busbw",
+        "l3_claim": "nccl-tests 中 allreduce 的 busbw = algbw × 2(n−1)/n，algbw = 数据量 / 时间。",
+        "question_type": "profiling",
+        "difficulty": 2,
+        "bloom": "apply",
+        "persona": "ncu_perf_engineer",
+        "hardware": "agnostic",
+        "granularity": "system",
+        "language": "zh",
+        "kind": "formula",
+        "source": "writer"
+      },
+      "reference_answer": "algbw = 1e9 B / 0.01 s = 100 GB/s；busbw = 100 × 2×7/8 = 175 GB/s。因子 2(n−1)/n 来自 ring allreduce 中每个 rank 需发送/接收 2(n−1)/n 倍数据量，使 busbw 可与硬件链路带宽比较。"
+    },
+    {
+      "case_id": "acc_g32_cublas_rowmajor",
+      "expected_action": "accept",
+      "question": {
+        "id": "g32_cublas_rowmajor",
+        "question": "Device arrays `dA` (M×K), `dB` (K×N) and `dC` (M×N) are float and stored ROW-major with no padding. Complete the call so that `dC = dA * dB` in row-major terms, without any explicit transpose kernels and with both op arguments CUBLAS_OP_N:\n```cpp\ncublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,\n            __m__, __n__, __k__, &alpha,\n            __X__, __ldX__,\n            __Y__, __ldY__, &beta,\n            dC, __ldC__);\n```",
+        "tests_claim": "Row-major C=A*B through column-major cuBLAS is cublasSgemm(N,N, N, M, K, alpha, dB, N, dA, K, beta, dC, N).",
+        "topic_path": [
+          "T11",
+          "cublas",
+          "cublas_rowmajor_swap"
+        ],
+        "l3_id": "cublas_rowmajor_swap",
+        "l3_claim": "cuBLAS is column-major; row-major C=A*B is computed as C^T=B^T*A^T by swapping operands and m/n without transposes.",
+        "question_type": "code_complete",
+        "difficulty": 2,
+        "bloom": "apply",
+        "persona": "api_examiner",
+        "hardware": "agnostic",
+        "granularity": "api",
+        "language": "en",
+        "kind": "api",
+        "source": "writer"
+      },
+      "reference_answer": "m=N, n=M, k=K, X=dB, ldX=N, Y=dA, ldY=K, ldC=N (computes C^T = B^T A^T in column-major)."
+    },
+    {
+      "case_id": "acc_g33_cub_temp_storage",
+      "expected_action": "accept",
+      "question": {
+        "id": "g33_cub_temp_storage",
+        "question": "```cpp\nvoid* d_temp = nullptr; size_t temp_bytes = 0;\ncub::DeviceReduce::Sum(d_temp, temp_bytes, d_in, d_out, n);\n```\n这次调用结束后 `d_out` 中是否已有求和结果？`temp_bytes` 发生了什么变化？要得到结果还需完成哪两步？",
+        "tests_claim": "A cub::DeviceReduce::Sum call with a null temp pointer only reports temp_storage_bytes and performs no reduction.",
+        "topic_path": [
+          "T11",
+          "cub_cccl",
+          "cub_cccl_two_phase_temp_storage"
+        ],
+        "l3_id": "cub_cccl_two_phase_temp_storage",
+        "l3_claim": "CUB device 级算法首次以 d_temp_storage=nullptr 调用时只写回所需临时存储字节数，不执行计算。",
+        "question_type": "syntax",
+        "difficulty": 1,
+        "bloom": "remember",
+        "persona": "api_examiner",
+        "hardware": "agnostic",
+        "granularity": "api",
+        "language": "zh",
+        "kind": "api",
+        "source": "writer"
+      },
+      "reference_answer": "没有结果；此次调用仅把所需临时存储字节数写入 temp_bytes，不做归约。需 cudaMalloc(&d_temp, temp_bytes)，再用相同参数再次调用 cub::DeviceReduce::Sum。"
+    },
+    {
+      "case_id": "acc_g34_racecheck_scope",
+      "expected_action": "accept",
+      "question": {
+        "id": "g34_racecheck_scope",
+        "question": "A histogram kernel does `hist[bin] += 1;` directly on a global-memory array from many blocks. `compute-sanitizer --tool racecheck ./app` reports 0 hazards, and the team concludes the kernel is race-free. Is the conclusion valid? Explain what racecheck actually inspects and give the one-line fix for the kernel.",
+        "tests_claim": "racecheck only analyzes shared-memory accesses, so zero reported hazards says nothing about the non-atomic global hist[bin] += 1 race; atomicAdd fixes it.",
+        "topic_path": [
+          "T12",
+          "sanitizer_scope",
+          "sanitizer_scope_racecheck_shared_only"
+        ],
+        "l3_id": "sanitizer_scope_racecheck_shared_only",
+        "l3_claim": "compute-sanitizer racecheck detects shared-memory hazards only; a clean report does not prove the absence of global-memory races.",
+        "question_type": "debug",
+        "difficulty": 2,
+        "bloom": "evaluate",
+        "persona": "code_reviewer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "en",
+        "kind": "failure",
+        "source": "writer"
+      },
+      "reference_answer": "Invalid. racecheck tracks shared-memory data hazards only; the global read-modify-write race is invisible to it (and testing cannot prove absence of races anyway). Fix: atomicAdd(&hist[bin], 1); (optionally privatize in shared memory first)."
+    },
+    {
+      "case_id": "acc_g35_oob_tail",
+      "expected_action": "accept",
+      "question": {
+        "id": "g35_oob_tail",
+        "question": "```cuda\n__global__ void scale(const float* in, float* out, int n) {\n    int i = blockIdx.x * blockDim.x + threadIdx.x;\n    out[i] = 2.0f * in[i];\n}\n// 主机端：n = 1000; scale<<<(n + 255) / 256, 256>>>(d_in, d_out, n);\n```\n共有多少个线程会访问越界？`compute-sanitizer --tool memcheck` 会报告哪类错误？给出修正。",
+        "tests_claim": "Launching 4x256=1024 threads for n=1000 without an i<n guard makes 24 threads access out of bounds, which memcheck reports as invalid global accesses.",
+        "topic_path": [
+          "T01",
+          "launch",
+          "launch_tail_bounds_check"
+        ],
+        "l3_id": "launch_tail_bounds_check",
+        "l3_claim": "网格线程数向上取整后多出的尾部线程若不做 i<n 判断会越界访问，memcheck 报告 invalid global read/write。",
+        "question_type": "debug",
+        "difficulty": 1,
+        "bloom": "apply",
+        "persona": "code_reviewer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "zh",
+        "kind": "failure",
+        "source": "writer"
+      },
+      "reference_answer": "共 1024 个线程，i = 1000..1023 的 24 个线程越界；memcheck 报告 Invalid __global__ read/write of size 4。修正：在访问前加 if (i < n)。"
+    },
+    {
+      "case_id": "acc_g36_nvfp4_mxfp4_bytes",
+      "expected_action": "accept",
+      "question": {
+        "id": "g36_nvfp4_mxfp4_bytes",
+        "question": "一个含 4096 个元素的权重张量分别以 NVFP4 与 MXFP4 存储。已知：NVFP4 每 16 个元素一组，每组 1 个 FP8 E4M3 缩放因子，另有 1 个 FP32 张量级缩放；MXFP4 每 32 个元素一组，每组 1 个 E8M0 缩放因子。元素本身均为 4 bit。分别求两种格式的总存储字节数，并算出各自的平均每元素比特数。",
+        "tests_claim": "A 4096-element tensor needs 2308 bytes in NVFP4 (2048 data + 256 E4M3 scales + 4) and 2176 bytes in MXFP4 (2048 + 128 E8M0 scales).",
+        "topic_path": [
+          "T06",
+          "block_scaled_fp4",
+          "block_scaled_fp4_storage_bytes"
+        ],
+        "l3_id": "block_scaled_fp4_storage_bytes",
+        "l3_claim": "NVFP4 每 16 元素共享一个 E4M3 缩放因子并有一个 FP32 张量级缩放；MXFP4 每 32 元素共享一个 E8M0 缩放因子。",
+        "question_type": "compare",
+        "difficulty": 3,
+        "bloom": "apply",
+        "persona": "arch_migrator",
+        "hardware": "blackwell",
+        "granularity": "kernel",
+        "language": "zh",
+        "kind": "numeric",
+        "source": "writer"
+      },
+      "reference_answer": "NVFP4：2048 + 4096/16×1 + 4 = 2308 B，约 4.508 bit/元素；MXFP4：2048 + 4096/32×1 = 2176 B，4.25 bit/元素。"
+    },
+    {
+      "case_id": "rej_n01_bank_wrong_answer",
+      "expected_action": "reject",
+      "question": {
+        "id": "n01_bank_wrong_answer",
+        "question": "Shared memory has 32 banks. For float smem[32][32] with column-major access smem[i][tid], how many-way is the bank conflict, and which Nsight counter rises?",
+        "tests_claim": "Column-major float access on 32 banks is 32-way conflict; l1tex bank-conflict counter rises.",
+        "topic_path": [
+          "T25",
+          "smem",
+          "bank_conflict"
+        ],
+        "l3_id": "bank_conflict_col",
+        "question_type": "profiling",
+        "difficulty": 3,
+        "bloom": "analyze",
+        "persona": "ncu_perf_engineer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "en",
+        "kind": "failure",
+        "source": "writer",
+        "l3_claim": "Column-major float access on 32 banks is 32-way conflict; l1tex bank-conflict counter rises."
+      },
+      "expected_failed_check": "correctness"
+    },
+    {
+      "case_id": "rej_n02_ub_as_deadlock",
+      "expected_action": "reject",
+      "question": {
+        "id": "n02_ub_as_deadlock",
+        "question": "一个 warp 里只有 tid<16 的线程执行 __syncthreads()，另外 16 线程走 return。该 kernel 的可观察后果是什么？",
+        "tests_claim": "Divergent __syncthreads in a block deadlocks because the barrier expects all threads in the block.",
+        "topic_path": [
+          "T04",
+          "barriers",
+          "syncthreads"
+        ],
+        "l3_id": "syncthreads_divergent",
+        "question_type": "debug",
+        "difficulty": 2,
+        "bloom": "analyze",
+        "persona": "code_reviewer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "zh",
+        "kind": "failure",
+        "source": "writer",
+        "l3_claim": "Divergent __syncthreads in a block deadlocks because the barrier expects all threads in the block."
+      },
+      "expected_failed_check": "correctness"
+    },
+    {
+      "case_id": "rej_n03_tma_leak_and_premise",
+      "expected_action": "reject",
+      "question": {
+        "id": "n03_tma_leak_and_premise",
+        "question": "Hopper 上 TMA cp.async.bulk.tensor 的 gmem 地址必须 16B 对齐。若 box 起点是 0x1008，该拷贝是否合法？给出判断与对齐约束。",
+        "tests_claim": "TMA bulk tensor gmem address must be 16-byte aligned; 0x1008 is illegal.",
+        "topic_path": [
+          "T08",
+          "tma",
+          "tma_gmem_16b_align"
+        ],
+        "l3_id": "tma_gmem_16b_align",
+        "question_type": "conceptual",
+        "difficulty": 2,
+        "bloom": "apply",
+        "persona": "cuda_interviewer",
+        "hardware": "hopper",
+        "granularity": "kernel",
+        "language": "zh",
+        "kind": "feature",
+        "source": "writer",
+        "l3_claim": "TMA bulk tensor gmem address must be 16-byte aligned; 0x1008 is illegal."
+      },
+      "expected_failed_check": "answer_leakage+premise"
+    },
+    {
+      "case_id": "rej_n04_ldg_counter_claim",
+      "expected_action": "reject",
+      "question": {
+        "id": "n04_ldg_counter_claim",
+        "question": "把全局 load 改成 __ldg 后，Nsight Compute 中 l1tex__t_sectors_pipe_lsu_mem_global_op_ld 应变大还是变小？说明原因。",
+        "tests_claim": "__ldg hits the read-only cache path; global LSU sector load counter should fall if hits increase.",
+        "topic_path": [
+          "T12",
+          "ncu",
+          "ldg_counter"
+        ],
+        "l3_id": "ldg_readonly_ptx_nc",
+        "question_type": "profiling",
+        "difficulty": 3,
+        "bloom": "analyze",
+        "persona": "ncu_perf_engineer",
+        "hardware": "ampere",
+        "granularity": "kernel",
+        "language": "zh",
+        "kind": "mechanism",
+        "source": "writer",
+        "l3_claim": "__ldg hits the read-only cache path; global LSU sector load counter should fall if hits increase."
+      },
+      "expected_failed_check": "correctness"
+    },
+    {
+      "case_id": "rej_n05_wgmma_leak",
+      "expected_action": "reject",
+      "question": {
+        "id": "n05_wgmma_leak",
+        "question": "A warpgroup MMA on Hopper requires 128 threads. If you launch 64 threads in the CTA and call wgmma.mma_async, what fails and why?",
+        "tests_claim": "wgmma is a 128-thread warpgroup op; a 64-thread CTA cannot legally issue it.",
+        "topic_path": [
+          "T06",
+          "mma",
+          "wgmma_threads"
+        ],
+        "l3_id": "wgmma_warpgroup",
+        "question_type": "debug",
+        "difficulty": 3,
+        "bloom": "apply",
+        "persona": "hopper_blackwell_tracker",
+        "hardware": "hopper",
+        "granularity": "kernel",
+        "language": "en",
+        "kind": "feature",
+        "source": "writer",
+        "l3_claim": "wgmma is a 128-thread warpgroup op; a 64-thread CTA cannot legally issue it."
+      },
+      "expected_failed_check": "answer_leakage"
+    },
+    {
+      "case_id": "rej_n06_glossary",
+      "expected_action": "reject",
+      "question": {
+        "id": "n06_glossary",
+        "question": "什么是 Hopper 的 TMA？请介绍它相比传统拷贝方式的主要优势。",
+        "tests_claim": "TMA is Hopper's tensor memory accelerator that improves copy efficiency.",
+        "topic_path": [
+          "T08",
+          "tma",
+          "tma_intro"
+        ],
+        "l3_id": "tma_intro",
+        "question_type": "conceptual",
+        "difficulty": 1,
+        "bloom": "remember",
+        "persona": "cuda_interviewer",
+        "hardware": "hopper",
+        "granularity": "api",
+        "language": "zh",
+        "kind": "feature",
+        "source": "writer",
+        "l3_claim": "TMA is Hopper's tensor memory accelerator that improves copy efficiency."
+      },
+      "expected_failed_check": "vague_glossary"
+    },
+    {
+      "case_id": "rej_n07_open_optimize",
+      "expected_action": "reject",
+      "question": {
+        "id": "n07_open_optimize",
+        "question": "How would you optimize a CUDA kernel that has low occupancy? Discuss the main techniques.",
+        "tests_claim": "Occupancy can be improved by reducing registers and shared memory.",
+        "topic_path": [
+          "T03",
+          "occupancy",
+          "occupancy_generic"
+        ],
+        "l3_id": "occupancy_generic",
+        "question_type": "optimization",
+        "difficulty": 2,
+        "bloom": "evaluate",
+        "persona": "ncu_perf_engineer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "en",
+        "kind": "mechanism",
+        "source": "writer",
+        "l3_claim": "Occupancy can be improved by reducing registers and shared memory."
+      },
+      "expected_failed_check": "unanswerable_open"
+    },
+    {
+      "case_id": "rej_n08_two_correct_options",
+      "expected_action": "reject",
+      "question": {
+        "id": "n08_two_correct_options",
+        "question": "全部 32 个 lane 都执行时，下列哪个调用是合法的？（单选）A. __shfl_sync(0xffffffff, v, 0)  B. __shfl_xor_sync(0xffffffff, v, 1)  C. __shfl(v, 0)  D. __shfl_up_sync(0xffffffff, v, 1)",
+        "tests_claim": "Only __shfl_sync with a full mask is legal when all lanes participate.",
+        "topic_path": [
+          "T03",
+          "warp_shuffle",
+          "warp_shuffle_mask"
+        ],
+        "l3_id": "warp_shuffle_mask",
+        "question_type": "syntax",
+        "difficulty": 2,
+        "bloom": "apply",
+        "persona": "api_examiner",
+        "hardware": "agnostic",
+        "granularity": "api",
+        "language": "zh",
+        "kind": "api",
+        "source": "writer",
+        "l3_claim": "Only __shfl_sync with a full mask is legal when all lanes participate."
+      },
+      "expected_failed_check": "multiple_correct"
+    },
+    {
+      "case_id": "rej_n09_arch_mismatch",
+      "expected_action": "reject",
+      "question": {
+        "id": "n09_arch_mismatch",
+        "question": "On an A100 (sm_80), complete the missing wgmma.fence / wgmma.commit_group calls so that the warpgroup GEMM below is correct: ...",
+        "tests_claim": "wgmma on sm_80 requires fence and commit_group.",
+        "topic_path": [
+          "T06",
+          "mma",
+          "wgmma_on_ampere"
+        ],
+        "l3_id": "wgmma_on_ampere",
+        "question_type": "code_complete",
+        "difficulty": 3,
+        "bloom": "apply",
+        "persona": "hopper_blackwell_tracker",
+        "hardware": "ampere",
+        "granularity": "kernel",
+        "language": "en",
+        "kind": "api",
+        "source": "writer",
+        "l3_claim": "wgmma on sm_80 requires fence and commit_group."
+      },
+      "expected_failed_check": "hardware_compatibility"
+    },
+    {
+      "case_id": "rej_n10_missing_premise",
+      "expected_action": "reject",
+      "question": {
+        "id": "n10_missing_premise",
+        "question": "某 kernel 每线程使用 64 个寄存器，每 SM 最多能驻留多少个 block？",
+        "tests_claim": "Resident blocks are limited by registers.",
+        "topic_path": [
+          "T03",
+          "occupancy",
+          "occupancy_reg"
+        ],
+        "l3_id": "occupancy_reg",
+        "question_type": "conceptual",
+        "difficulty": 2,
+        "bloom": "apply",
+        "persona": "cuda_interviewer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "zh",
+        "kind": "numeric",
+        "source": "writer",
+        "l3_claim": "Resident blocks are limited by registers."
+      },
+      "expected_failed_check": "insufficient_premises"
+    },
+    {
+      "case_id": "rej_n11_must_mention_leak",
+      "expected_action": "reject",
+      "question": {
+        "id": "n11_must_mention_leak",
+        "question": "If the second __syncthreads() in the tiled loop is removed, what goes wrong? Your answer must mention: (1) a write-after-read hazard, (2) the next iteration overwriting the tile, (3) silent wrong results.",
+        "tests_claim": "Removing the post-compute barrier causes a WAR hazard.",
+        "topic_path": [
+          "T04",
+          "barriers",
+          "barriers_tile_loop"
+        ],
+        "l3_id": "barriers_tile_loop",
+        "question_type": "counterfactual",
+        "difficulty": 3,
+        "bloom": "analyze",
+        "persona": "code_reviewer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "en",
+        "kind": "failure",
+        "source": "writer",
+        "l3_claim": "Removing the post-compute barrier causes a WAR hazard."
+      },
+      "expected_failed_check": "answer_leakage"
+    },
+    {
+      "case_id": "rej_n12_wrong_limits_in_claim",
+      "expected_action": "reject",
+      "question": {
+        "id": "n12_wrong_limits_in_claim",
+        "question": "On any GPU from SM70 to SM90, at most 32 CTAs can be resident per SM. How many 1024-thread CTAs can reside per SM given 2048 threads/SM?",
+        "tests_claim": "SM70–SM90 allow at most 32 resident CTAs per SM; a 1024-thread block is capped to 2 CTAs.",
+        "topic_path": [
+          "T03",
+          "occupancy",
+          "occupancy_cta_limit"
+        ],
+        "l3_id": "occupancy_cta_limit",
+        "question_type": "conceptual",
+        "difficulty": 2,
+        "bloom": "apply",
+        "persona": "cuda_interviewer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "en",
+        "kind": "numeric",
+        "source": "writer",
+        "l3_claim": "SM70–SM90 allow at most 32 resident CTAs per SM; a 1024-thread block is capped to 2 CTAs."
+      },
+      "expected_failed_check": "correctness"
+    },
+    {
+      "case_id": "rej_n13_format_mismatch",
+      "expected_action": "reject",
+      "question": {
+        "id": "n13_format_mismatch",
+        "question": "解释为什么非合并访问会降低有效带宽，并给出可能的多种改进方式。",
+        "tests_claim": "Uncoalesced access wastes sectors.",
+        "topic_path": [
+          "T25",
+          "gmem",
+          "gmem_coalescing"
+        ],
+        "l3_id": "gmem_coalescing",
+        "question_type": "conceptual",
+        "difficulty": 2,
+        "bloom": "understand",
+        "persona": "cuda_interviewer",
+        "hardware": "agnostic",
+        "granularity": "kernel",
+        "language": "zh",
+        "kind": "mechanism",
+        "source": "writer",
+        "l3_claim": "Uncoalesced access wastes sectors."
+      },
+      "expected_failed_check": "spec_mismatch"
     }
   ]
 }
