@@ -11,6 +11,15 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from cuda_sft_qgen.enums import ANSWER_FORMATS, ARCH_TARGETS, SCENARIOS, DEFECT_CODES, OPERATORS
+
+
+def _validate_enum(value: str, allowed: tuple[str, ...], name: str, allow_empty: bool = False) -> str:
+    """Validate a string label against its canonical vocabulary."""
+    if value not in allowed and not (allow_empty and value == ""):
+        raise ValueError(f"unknown {name} {value}")
+    return value
+
 
 QuestionType = Literal[
     "conceptual",
@@ -52,6 +61,18 @@ class AssessedMetadata(BaseModel):
     hardware: Hardware
     granularity: Granularity
     language: Language
+    arch_target: str | None = None
+    answer_format: str | None = None
+
+    @field_validator("arch_target")
+    @classmethod
+    def _check_arch_target(cls, value: str | None) -> str | None:
+        return None if value is None else _validate_enum(value, ARCH_TARGETS, "arch_target")
+
+    @field_validator("answer_format")
+    @classmethod
+    def _check_answer_format(cls, value: str | None) -> str | None:
+        return None if value is None else _validate_enum(value, ANSWER_FORMATS, "answer_format")
 
 
 CheckResult = Literal["pass", "fail", "uncertain"]
@@ -170,6 +191,20 @@ class QualityReview(BaseModel):
     # Only structured-generation candidates require these additional checks.
     # Optional on legacy reviews so resuming an old archive remains possible.
     construction_checks: dict[str, CheckResult] | None = None
+    defect_codes: list[str] = Field(default_factory=list)
+    value_scores: dict[str, int] | None = None
+
+    @model_validator(mode="after")
+    def validate_v2_fields(self) -> "QualityReview":
+        if any(code not in DEFECT_CODES for code in self.defect_codes):
+            raise ValueError("unknown defect code")
+        if self.value_scores is not None:
+            required = {"pedagogical_value", "discriminativeness", "realism"}
+            if set(self.value_scores) != required or any(
+                type(value) is not int or not 1 <= value <= 5 for value in self.value_scores.values()
+            ):
+                raise ValueError("value_scores must contain three integer scores in 1..5")
+        return self
 
     @model_validator(mode="after")
     def validate_decision(self) -> "QualityReview":
@@ -226,6 +261,34 @@ class QuestionBrief(BaseModel):
     parent_difficulties: list[int] = Field(default_factory=list)
     difficulty_target: int | None = Field(default=None, ge=1, le=4)
     difficulty_raw_score: float | None = None
+    answer_format: str = ""
+    scenario: str = "generic"
+    arch_target: str = "any"
+    operator: str | None = None
+    used_angles: list[str] = Field(default_factory=list)
+    used_formats: list[str] = Field(default_factory=list)
+    used_scenarios: list[str] = Field(default_factory=list)
+    exploration: bool = False
+
+    @field_validator("answer_format")
+    @classmethod
+    def _check_answer_format(cls, value: str) -> str:
+        return _validate_enum(value, ANSWER_FORMATS, "answer_format", allow_empty=True)
+
+    @field_validator("scenario")
+    @classmethod
+    def _check_scenario(cls, value: str) -> str:
+        return _validate_enum(value, SCENARIOS, "scenario")
+
+    @field_validator("arch_target")
+    @classmethod
+    def _check_arch_target(cls, value: str) -> str:
+        return _validate_enum(value, ARCH_TARGETS, "arch_target")
+
+    @field_validator("operator")
+    @classmethod
+    def _check_operator(cls, value: str | None) -> str | None:
+        return None if value is None else _validate_enum(value, OPERATORS, "operator")
 
 
 class Question(BaseModel):
@@ -291,6 +354,29 @@ class Question(BaseModel):
     difficulty_target: int | None = Field(default=None, ge=1, le=4)
     difficulty_raw_score: float | None = None
     generation_round: int | None = None
+    answer_format: str = ""
+    scenario: str = "generic"
+    arch_target: str = "any"
+    draft_rationale: str | None = None
+    premise_check: list[str] = Field(default_factory=list)
+    defect_codes: list[str] = Field(default_factory=list)
+    value_scores: dict[str, int] = Field(default_factory=dict)
+    exploration: bool = False
+
+    @field_validator("answer_format")
+    @classmethod
+    def _check_answer_format(cls, value: str) -> str:
+        return _validate_enum(value, ANSWER_FORMATS, "answer_format", allow_empty=True)
+
+    @field_validator("scenario")
+    @classmethod
+    def _check_scenario(cls, value: str) -> str:
+        return _validate_enum(value, SCENARIOS, "scenario")
+
+    @field_validator("arch_target")
+    @classmethod
+    def _check_arch_target(cls, value: str) -> str:
+        return _validate_enum(value, ARCH_TARGETS, "arch_target")
 
     @field_validator("language", mode="before")
     @classmethod
@@ -313,6 +399,7 @@ class Question(BaseModel):
             # lineage and curriculum labels live in the export manifest.
             "mixup_mode", "parent_ids", "parent_difficulties", "difficulty_target",
             "difficulty_raw_score", "generation_round",
+            "draft_rationale", "premise_check", "defect_codes", "value_scores", "exploration",
         })
         record["review_details"] = {
             key: value for key, value in self.review_details.items()
@@ -391,3 +478,9 @@ class DiversityReport(BaseModel):
     underrepresented: list[str] = Field(default_factory=list)
     overrepresented: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    format_hist: dict[str, int] = Field(default_factory=dict)
+    scenario_hist: dict[str, int] = Field(default_factory=dict)
+    arch_hist: dict[str, int] = Field(default_factory=dict)
+    joint_cells: int = 0
+    max_cell_share: float = 0.0
+    requested_vs_assessed_agreement: float | None = None
