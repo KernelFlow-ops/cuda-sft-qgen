@@ -42,6 +42,9 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "e2e: marks tests as end-to-end tests",
+    "llm: calls the real LLM/embedding API configured in .env (fails if unusable)",
+    "eval: long evaluation runs used only by task T41",
+    "gpu: requires nvcc and an NVIDIA GPU",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning",
