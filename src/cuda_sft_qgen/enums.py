@@ -16,4 +16,7 @@ OPERATORS = ("deepen", "re-arch", "inject-bug", "layout-eq", "profiler", "compar
 CHECK_TO_DEFECT = {"correctness": "correctness", "answerability": "answerability",
                    "claim_alignment": "claim_alignment", "hardware_compatibility": "hardware",
                    "answer_leakage": "leakage", "metadata": "metadata", "duplication": "duplicate"}
+# Chair defects that come from an incoherent brief (leaf/angle/arch/labels) rather
+# than the Writer's draft: rewriting the same brief repeats them, re-planning does not.
+BRIEF_LEVEL_DEFECTS = frozenset({"claim_alignment", "hardware", "metadata"})
 VERIFIED_BY = ("none", "quote", "computation", "execution", "expert")

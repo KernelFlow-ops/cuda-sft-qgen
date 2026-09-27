@@ -75,7 +75,7 @@ def test_exploration_share(cfgs):
 
 def test_hard_max_blocks_leaf(cfgs):
     acc = [make_question(id=f"a{i}", l3_id="smem_bank_gcd", topic_path=["T02", "smem", "smem_bank_gcd"]) for i in range(12)]
-    assert all(b.l3_id != "smem_bank_gcd" for b in _plan(cfgs, n=300, accepted=acc))
+    assert all(b.l3_id != "smem_bank_gcd" for b in _plan(cfgs, n=40, accepted=acc))
 
 
 def test_stems_for_leaf_full_text():

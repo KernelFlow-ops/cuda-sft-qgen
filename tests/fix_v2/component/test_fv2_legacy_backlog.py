@@ -37,7 +37,7 @@ def test_overlay_carries_due_date(tmp_path):
     assert leaf.audit_due_at == 10.0 + 86400
 
 
-def test_expired_legacy_only_explored(repo_root):
+def test_expired_legacy_stays_in_main_pool(repo_root):
     from cuda_sft_qgen.models import SteeringBrief
     from cuda_sft_qgen.planner.sampling import load_angles, plan_briefs
     extra = [{"id": "smem_expired", "claim": "legacy claim ways = gcd(S,32)", "kind": "formula", "types": ["conceptual"],
@@ -49,4 +49,4 @@ def test_expired_legacy_only_explored(repo_root):
                          angles=load_angles(repo_root / "configs" / "angles.yaml"), compat=load("compat_matrix.yaml"),
                          scope=load("scope.yaml"), joint=True)
     expired = [b for b in briefs if b.l3_id == "smem_expired"]
-    assert expired and all(b.exploration for b in expired)
+    assert expired and not any(b.exploration for b in expired)

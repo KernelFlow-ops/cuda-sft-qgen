@@ -8,9 +8,9 @@ review them.
 
 from __future__ import annotations
 
+import logging
 import random
 import re
-import time
 from collections import Counter
 from pathlib import Path
 from typing import Any, Sequence
@@ -29,6 +29,8 @@ from cuda_sft_qgen.planner.pair_mining import (
 )
 from cuda_sft_qgen.review.diversity import residual_weights
 from cuda_sft_qgen.taxonomy import Leaf, Taxonomy
+
+logger = logging.getLogger(__name__)
 
 BLOOMS = ["remember", "understand", "apply", "analyze", "evaluate", "create"]
 GRANULARITY = ["api", "kernel", "pipeline", "system"]
@@ -281,15 +283,14 @@ def plan_briefs(
     if joint is None:
         joint = bool((adaptive_config or {}).get("joint_sampling", True))
     joint = bool(joint and compat)
-    now = time.time()
     resolved_mixup = _resolve_mixup_config(mixup_config, adaptive_config)
+    # audit_due_at only schedules knowledge audits; an overdue legacy leaf stays
+    # plannable (audits rarely finish, so expiry would starve the whole pool).
     active_claims = {
         leaf.l3_id: leaf
         for leaf in taxonomy.leaves
         if not leaf.retired and str(getattr(leaf, "status", "") or "").lower()
         not in {"retired", "quarantined", "provisional"}
-        and not (joint and getattr(leaf, "status", "") == "legacy_unreviewed"
-                 and 0 < float(getattr(leaf, "audit_due_at", 0.0) or 0.0) < now)
     }
     parent_reuse_counts: Counter[str] = Counter()
     for existing in list(accepted) + list(pending):
@@ -388,11 +389,11 @@ def plan_briefs(
 
     persona_ids = list(personas.keys()) or ["cuda_interviewer"]
     leaves_by_l1: dict[str, list[Leaf]] = {}
+    # Main pool: every live leaf, legacy included. Only retired/quarantined
+    # leaves are excluded; provisional leaves are reached through exploration.
+    excluded_status = {"retired", "quarantined", "provisional"}
     for leaf in taxonomy.leaves:
-        status = str(getattr(leaf, "status", "") or "")
-        audit_due_at = float(getattr(leaf, "audit_due_at", 0.0) or 0.0)
-        expired_legacy = status == "legacy_unreviewed" and audit_due_at > 0 and now > audit_due_at
-        if leaf.retired or status in {"quarantined", "provisional"} or (joint and expired_legacy):
+        if leaf.retired or str(getattr(leaf, "status", "") or "") in excluded_status:
             continue
         l2_key = f"{leaf.domain_id}.{leaf.l2_id}"
         if l2_key in blocked_l2:
@@ -402,10 +403,7 @@ def plan_briefs(
     if not usable_l1:
         leaves_by_l1 = {}
         for leaf in taxonomy.leaves:
-            status = str(getattr(leaf, "status", "") or "")
-            audit_due_at = float(getattr(leaf, "audit_due_at", 0.0) or 0.0)
-            expired_legacy = status == "legacy_unreviewed" and audit_due_at > 0 and now > audit_due_at
-            if leaf.retired or status in {"quarantined", "provisional"} or (joint and expired_legacy):
+            if leaf.retired or str(getattr(leaf, "status", "") or "") in excluded_status:
                 continue
             leaves_by_l1.setdefault(leaf.domain_id, []).append(leaf)
         usable_l1 = list(leaves_by_l1)
@@ -452,17 +450,11 @@ def plan_briefs(
     all_leaves = [lf for v in leaves_by_l1.values() for lf in v]
     exploration_pool = [
         leaf for leaf in taxonomy.leaves
-        if not leaf.retired and (
-            getattr(leaf, "status", "") == "provisional"
-            or (getattr(leaf, "status", "") == "legacy_unreviewed"
-                and float(getattr(leaf, "audit_due_at", 0.0) or 0.0) > 0
-                and now > float(getattr(leaf, "audit_due_at", 0.0) or 0.0))
-        )
+        if not leaf.retired and getattr(leaf, "status", "") == "provisional"
     ] if joint else []
     generic_count = sum(q.scenario == "generic" for q in pool)
     per_leaf = compat["per_leaf"] if joint else {}
-    initially_eligible = [leaf for leaf in all_leaves
-                          if joint_sampler.leaf_weight(pool_counts[leaf.l3_id], per_leaf) > 0] if joint else []
+    saturation_logged = False
     if not all_leaves and not exploration_pool:
         raise ValueError("No active taxonomy claims are available for planning")
 
@@ -489,7 +481,15 @@ def plan_briefs(
                 available = [lf for lf in candidates if joint_sampler.leaf_weight(pool_counts[lf.l3_id], per_leaf) > 0]
                 if not available:
                     available = [lf for lf in all_leaves if joint_sampler.leaf_weight(pool_counts[lf.l3_id], per_leaf) > 0]
-                available = available or initially_eligible or candidates
+                if not available:
+                    # Every live leaf is at the hard cap: spread the overflow over
+                    # the least-saturated leaves instead of silently ignoring the cap.
+                    floor = min(pool_counts[lf.l3_id] for lf in all_leaves)
+                    available = [lf for lf in all_leaves if pool_counts[lf.l3_id] == floor]
+                    if not saturation_logged:
+                        logger.warning("planner_all_saturated leaves=%s min_count=%s hard_max=%s",
+                                       len(all_leaves), floor, per_leaf["hard_max"])
+                        saturation_logged = True
                 weights = {lf.l3_id: joint_sampler.leaf_weight(pool_counts[lf.l3_id], per_leaf)
                            * (0.5 + sampler.compute_health_score(leaf_stats[lf.l3_id]) if sampler else 1.0)
                            for lf in available}
@@ -596,6 +596,8 @@ def plan_briefs(
             answer_format, scenario, operator = axes.answer_format, axes.scenario, axes.operator
             sampled_card = axes.card
             if mixup_spec is not None:
+                # A mixup brief follows MIXUP_MODE and its parents, not an evolver operator.
+                operator = None
                 difficulty = int(mixup_payload(*mixup_spec)["difficulty_target"])
                 parent = mixup_spec[0].high
                 hardware, granularity, language = parent.hardware, parent.granularity, parent.language

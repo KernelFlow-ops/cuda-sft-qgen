@@ -470,7 +470,14 @@ class Archive:
                 and bool(provenance.get("writer_model")))
 
     def coverage_history(self) -> dict[str, "LeafCoverage"]:
-        """Count per-leaf axes used by accepted and pending questions."""
+        """Count per-leaf axes used by accepted and pending questions.
+
+        Chair rejects caused only by the brief (claim alignment, hardware,
+        metadata) also count toward that leaf's angle and arch counters, so the
+        planner's 1/(1+n) penalties steer away from combinations that failed.
+        They never count as coverage (``count``).
+        """
+        from cuda_sft_qgen.enums import BRIEF_LEVEL_DEFECTS
         from cuda_sft_qgen.planner.joint import LeafCoverage
 
         out: dict[str, LeafCoverage] = {}
@@ -489,6 +496,15 @@ class Archive:
                 cov.archs[question.arch_target] += 1
             if question.operator:
                 cov.operators[question.operator] += 1
+        for question in self.load_rejected():
+            codes = set(question.defect_codes)
+            if not question.l3_id or not codes or not codes <= BRIEF_LEVEL_DEFECTS:
+                continue
+            cov = out.setdefault(question.l3_id, LeafCoverage())
+            if question.angle_id:
+                cov.angles[question.angle_id] += 1
+            if question.arch_target:
+                cov.archs[question.arch_target] += 1
         return out
 
     def append_accepted(self, question: Question) -> None:

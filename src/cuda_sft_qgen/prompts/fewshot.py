@@ -288,10 +288,12 @@ def select_anti(
     cfg: FewshotCfg,
     static_patterns: Sequence[str],
 ) -> list[str]:
-    """Merge static anti-patterns, brief stems, and recent rejected skeletons."""
+    """Merge brief stems and recent rejected skeletons first, then static anti-patterns."""
     out: list[str] = []
     seen: set[str] = set()
-    for item in list(static_patterns) + list(brief.anti_templates) + list(corpus.anti_skeletons):
+    # Dynamic skeletons come first: the static list alone exceeds the cap and
+    # would otherwise crowd every recent near-duplicate out of the prompt.
+    for item in list(brief.anti_templates) + list(corpus.anti_skeletons) + list(static_patterns):
         text = (item or "").strip()
         if not text or text in seen:
             continue

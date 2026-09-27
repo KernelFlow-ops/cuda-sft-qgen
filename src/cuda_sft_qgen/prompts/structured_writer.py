@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import hashlib
 import logging
-import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,6 +22,7 @@ from cuda_sft_qgen.prompts.fewshot import (
     select_negatives,
     select_positives,
 )
+from cuda_sft_qgen.prompts.render import placeholders, render
 from cuda_sft_qgen.review.fingerprint import fingerprint
 
 logger = logging.getLogger(__name__)
@@ -52,18 +52,15 @@ COT_SCENE = {
 }
 
 
-def _render(template: str, mapping: dict[str, str]) -> str:
-    """Replace ``{{key}}`` placeholders; values are inserted raw."""
-    out = template
-    for key, value in mapping.items():
-        out = out.replace("{{" + key + "}}", value)
-    return out
+def _check_placeholders(templates: list[str], mapping: dict[str, str]) -> None:
+    """Raise when a template declares a placeholder the mapping cannot fill.
 
-
-def _bullet(items: list[str] | None) -> str:
-    if not items:
-        return ""
-    return "\n".join(f"- {x}" for x in items)
+    Only template text is inspected: braces inside injected values (skeletons
+    like ``{{N}, {N}}``, stems, seeds, knowledge) are content, not placeholders.
+    """
+    missing = sorted(set().union(*(placeholders(t) for t in templates)) - set(mapping))
+    if missing:
+        raise ValueError(f"unrendered prompt placeholders: {missing}")
 
 
 def _card_text(table: dict[str, Any], key: str) -> str:
@@ -223,6 +220,9 @@ class StructuredPrompt:
                 "Design a concrete, checkable scene (numbers, launch, layout, code, or counters).",
             ),
             "cot_evolver": (
+                f"Mixup extra: MIXUP_MODE={brief.mixup_mode}; set pair_plan.mode to it and "
+                "pair_plan.parent_ids to exactly PARENT_IDS."
+                if brief.mixup_mode else
                 f"Evolver extra: OPERATOR={brief.operator or 'deepen'}; state in draft_plan.construct "
                 "which dimension changed and why the seed's answer no longer applies."
                 if brief.role == "evolver" else ""
@@ -266,9 +266,13 @@ class StructuredPrompt:
                 mapping["kind_constraint"],
             ),
         )
+        policy = self._evolver_policy if role_key == "evolver" else self._writer_policy
+        # Programming errors only: every placeholder a layer declares must be mapped.
+        _check_placeholders([self._constraints, self._quality, self._context]
+                            + ([self._cot] if use_cot else []) + ([policy] if policy else []), mapping)
         dynamic_parts = [
-            _render(self._constraints, mapping).strip(),
-            _render(self._quality, mapping).strip(),
+            render(self._constraints, mapping).strip(),
+            render(self._quality, mapping).strip(),
             (
                 "Seed bucket policy: use the same-l3/type/kind/hardware positives "
                 "as the primary style anchors. Cross-bucket examples are contrast "
@@ -276,13 +280,12 @@ class StructuredPrompt:
             ),
         ]
         if use_cot:
-            dynamic_parts.append(_render(self._cot, mapping).strip())
-        policy = self._evolver_policy if role_key == "evolver" else self._writer_policy
+            dynamic_parts.append(render(self._cot, mapping).strip())
         if policy:
-            rendered_policy = _render(policy, mapping).strip()
+            rendered_policy = render(policy, mapping).strip()
             if rendered_policy:
                 dynamic_parts.append(rendered_policy)
-        dynamic_parts.append(_render(self._context, mapping).strip())
+        dynamic_parts.append(render(self._context, mapping).strip())
         dynamic_parts.append(
             f'Reminder: len in [{mapping["min_chars"]}, {mapping["max_chars"]}]; '
             f'follow angle "{brief.angle}"; ANSWER_FORMAT={brief.answer_format or "any"}; JSON only.'
@@ -305,7 +308,10 @@ class StructuredPrompt:
             f"ANSWER_FORMAT: {brief.answer_format or 'short_answer'}",
             f"SCENARIO: {brief.scenario}",
             f"ARCH_TARGET: {brief.arch_target}",
-            *([f"OPERATOR: {brief.operator or 'deepen'}"] if brief.role == "evolver" else []),
+            *([f"OPERATOR: {brief.operator or 'deepen'}"] if brief.role == "evolver" and not brief.mixup_mode else []),
+            # The Writer echoes these into pair_plan; generate_core checks them.
+            *([f"MIXUP_MODE: {brief.mixup_mode}", f"PARENT_IDS: {json.dumps(list(brief.parent_ids))}"]
+              if brief.mixup_mode else []),
             f"MUST_INCLUDE: {mapping['must_include']}",
             f"MUST_AVOID: {mapping['must_avoid']}",
             f"SEED_BUCKET: {mapping['seed_bucket']}",
@@ -342,10 +348,6 @@ class StructuredPrompt:
             "arch_target": brief.arch_target,
             "operator": brief.operator,
         }
-        rendered = system + user
-        leftover = re.findall(r"\{\{[a-zA-Z0-9_]+\}\}", rendered)
-        if "{{" in rendered:
-            raise ValueError(f"unrendered prompt placeholders: {sorted(set(leftover)) or ['{{']}")
         return PromptBundle(
             system=system,
             user=user,
@@ -359,7 +361,9 @@ class StructuredPrompt:
         template = load_prompt("writer")
         if role_key == "evolver":
             template += "\n\n" + load_prompt("evolver")
-        return _render(template, {"min_chars": min_chars, "max_chars": max_chars}).strip()
+        values = {"min_chars": min_chars, "max_chars": max_chars}
+        _check_placeholders([template], values)
+        return render(template, values).strip()
 
     def _semi_block(
         self,
@@ -388,15 +392,20 @@ class StructuredPrompt:
         return PromptCache.compose(*parts)
 
     def _angle_card_block(self, brief: QuestionBrief) -> str:
-        extra = []
-        # Planner may have stuffed must_have into angle_guide; keep brief fields if present.
-        must_have = getattr(brief, "angle_must_have", None)
-        must_not = getattr(brief, "angle_must_not", None)
-        if isinstance(must_have, list) and must_have:
-            extra.append("Must have:\n" + _bullet(must_have))
-        if isinstance(must_not, list) and must_not:
-            extra.append("Must not:\n" + _bullet(must_not))
-        return "\n".join(extra)
+        """Angle lock card from the brief's angle_id and the card lists in angle_guide.
+
+        The planner renders a card's must_have/must_not into ``angle_guide``;
+        its "Other angles" contrast list is already shown with the quality cards.
+        """
+        lines = [f"Angle card: {brief.angle_id}"] if brief.angle_id else []
+        keep = False
+        for line in (brief.angle_guide or "").splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("-") and stripped.endswith(":"):
+                keep = stripped in {"Must have:", "Must not:"}
+            if keep and stripped:
+                lines.append(line.rstrip())
+        return "\n".join(lines)
 
     def _breadth_guidance(self, brief: QuestionBrief) -> str:
         if brief.breadth_or_depth == "BREADTH":

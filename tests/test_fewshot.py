@@ -167,6 +167,6 @@ def test_anti_includes_static_and_caps():
     brief = _brief(anti_templates=["dynamic-skel"])
     corpus = FewshotCorpus(anti_skeletons=["L1-skel"])
     items = select_anti(brief, corpus, FewshotCfg(anti_max=15), ["static-a", "static-b"])
-    assert items[0] == "static-a"
-    assert "dynamic-skel" in items
+    assert items[0] == "dynamic-skel"
+    assert "static-a" in items
     assert "L1-skel" in items
