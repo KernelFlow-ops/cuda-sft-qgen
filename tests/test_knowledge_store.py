@@ -106,7 +106,9 @@ def test_worker_quarantine_invalidates_questions(store):
     llm = Mock()
     llm.complete_json.return_value = {"verdict": "contradicted", "url": URL, "quote": CLAIM, "reason": "32, not 99"}
     archive = Mock()
-    worker = KnowledgeWorker(store, llm, archive=archive, official_fetcher=lambda url: CLAIM)
+    worker = KnowledgeWorker(store, llm, archive=archive,
+                             settings=SimpleNamespace(root=store.path.parent, knowledge_cfg={"docs_dir": "absent"}),
+                             official_fetcher=lambda url: CLAIM)
     store.enqueue_daily_audits()
     worker.run_once()
     assert store.get_claim("warp_width")["status"] == "quarantined"
@@ -159,7 +161,9 @@ def test_invalidation_includes_secondary_dependencies(store):
     llm = Mock()
     llm.complete_json.return_value = {"verdict": "contradicted", "url": URL, "quote": CLAIM, "reason": "contradiction"}
     archive = Mock()
-    worker = KnowledgeWorker(store, llm, archive=archive, official_fetcher=lambda url: CLAIM)
+    worker = KnowledgeWorker(store, llm, archive=archive,
+                             settings=SimpleNamespace(root=store.path.parent, knowledge_cfg={"docs_dir": "absent"}),
+                             official_fetcher=lambda url: CLAIM)
     store.enqueue_daily_audits()
     worker.run_once()
     assert archive.invalidate_claim.call_args.kwargs["question_ids"] == ["secondary"]

@@ -1,5 +1,6 @@
 id: T10
 name: 多 GPU 与通信
+weight: 0.7
 children:
 - id: p2p
   name: P2P 与 NVLink
@@ -74,6 +75,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 10
 - id: nccl
   name: NCCL 与 MPI
   leaves:
@@ -146,6 +148,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 10
 - id: isolation
   name: MIG / MPS
   leaves:
@@ -216,6 +219,7 @@ children:
     - 2
     - 3
     kind: api
+  target_leaves: 10
 - id: nvlink_topo
   name: NVLink 拓扑
   leaves:
@@ -286,6 +290,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 10
 - id: nccl_proto
   name: NCCL 协议选择
   leaves:
@@ -354,6 +359,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 10
 - id: fabric_mem
   name: Fabric 内存
   leaves:
@@ -423,6 +429,7 @@ children:
     difficulty:
     - 4
     kind: failure
+  target_leaves: 10
 - id: p2p_atomic
   name: 跨 GPU 原子
   leaves:
@@ -493,6 +500,7 @@ children:
     difficulty:
     - 3
     kind: numeric
+  target_leaves: 10
 - id: memcpy_peer
   name: Peer 拷贝引擎
   leaves:
@@ -564,6 +572,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 10
 - id: nccl_group
   name: NCCL 启动与融合
   leaves:
@@ -635,6 +644,7 @@ children:
     difficulty:
     - 3
     kind: numeric
+  target_leaves: 10
 - id: nvls
   name: NVLS / SHARP
   leaves:
@@ -707,6 +717,10 @@ children:
     - 3
     - 4
     kind: mechanism
+  arch:
+  - sm_90
+  - sm_100a
+  target_leaves: 10
 - id: mig_gi
   name: MIG 实例切分
   leaves:
@@ -778,6 +792,11 @@ children:
     - 2
     - 3
     kind: formula
+  arch:
+  - sm_80
+  - sm_90
+  - sm_100a
+  target_leaves: 10
 - id: mps_qos
   name: MPS 调度与 QoS
   leaves:
@@ -848,6 +867,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 10
 - id: mnnvl
   name: 多节点 NVLink
   leaves:
@@ -916,3 +936,4 @@ children:
     difficulty:
     - 4
     kind: mechanism
+  target_leaves: 10

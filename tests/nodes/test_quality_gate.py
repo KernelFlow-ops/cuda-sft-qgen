@@ -27,7 +27,12 @@ def review_result(question, action="accept"):
         "checks": {key: "pass" for key in QualityChecks.model_fields},
         "evidence": ["PRIVATE expected answer is 17"],
         "internal_reference_answer": "PRIVATE 17",
-        "assessed_metadata": {key: getattr(question, key) for key in AssessedMetadata.model_fields},
+        "value_scores": {"pedagogical_value": 4, "discriminativeness": 4, "realism": 4},
+        "assessed_metadata": {
+            **{key: getattr(question, key) for key in AssessedMetadata.model_fields},
+            "answer_format": question.answer_format or "short_answer",
+            "arch_target": question.arch_target or "any",
+        },
     }
 
 

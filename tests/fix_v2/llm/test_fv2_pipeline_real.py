@@ -17,6 +17,7 @@ def test_real_pipeline(tmp_path, eval_out):
     target = int(os.getenv("QGEN_E2E_TARGET", "15"))
     timeout = float(os.getenv("QGEN_E2E_TIMEOUT", "2400"))
     settings = load_settings(target=target, data_dir=tmp_path)
+    settings.generation["max_runtime_seconds"] = max(1.0, timeout - min(600.0, timeout / 4))
     assert not settings.fake_llm
     with concurrent.futures.ThreadPoolExecutor(1) as ex:
         fut = ex.submit(run_pipeline, settings)

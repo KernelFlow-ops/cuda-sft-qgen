@@ -22,6 +22,22 @@ class IndexedRecord:
     simhash: int
 
 
+def gist_verdict(current: DupDecision, cosine: float | None, *, dup: float, gray: float,
+                 nearest_id: str | None) -> DupDecision:
+    """Upgrade a dedup decision using cross-language claim similarity."""
+    if cosine is None or current.verdict == "dup":
+        return current
+    if cosine >= dup:
+        verdict, reason = "dup", "L2_gist_crosslingual"
+    elif gray <= cosine < dup and current.verdict == "unique":
+        verdict, reason = "gray", "gist_gray"
+    else:
+        return current
+    return DupDecision(verdict=verdict, reason=reason, nearest_id=nearest_id,
+                       nearest_cosine=cosine, template_jaccard=current.template_jaccard,
+                       hamming=current.hamming)
+
+
 class Deduper:
     """In-memory index of accepted fingerprints used during review scoring."""
 

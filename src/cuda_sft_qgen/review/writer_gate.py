@@ -14,6 +14,7 @@ from typing import Any
 from cuda_sft_qgen.keys import PRI_WRITER
 from cuda_sft_qgen.llm import LLMClient
 from cuda_sft_qgen.models import Question
+from cuda_sft_qgen.review.cute_shapes import check_cute_shapes
 from cuda_sft_qgen.review.consistency import sm_name_conflicts
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,11 @@ def local_writer_defects(question: Question) -> str | None:
     stem = question.question or ""
     tests = question.tests_claim or ""
     claim = getattr(question, "l3_claim", None) or ""
+    if question.draft_validation_errors:
+        return "writer_contract:" + ",".join(question.draft_validation_errors[:3])
+    shape_check = check_cute_shapes(question)
+    if shape_check["status"] in {"contradiction", "unsupported"}:
+        return f"writer_cute_shape_{shape_check['status']}:{shape_check['reason']}"
     conflicts = sm_name_conflicts(stem)
     if conflicts:
         return "writer_sm_conflict:" + ",".join(conflicts)
@@ -76,6 +82,19 @@ def local_writer_defects(question: Question) -> str | None:
         return "writer_leakage:tests_claim_in_stem"
     if _LEAK_EXAMPLE.search(stem):
         return "writer_leakage:worked_example_in_stem"
+    arch = (getattr(question, "arch_target", "") or "any")
+    qtype = question.question_type or ""
+    if len(claim) >= 40 and claim[:40] in stem:
+        return "writer_leakage:claim_in_stem"
+    if re.search(r"tcgen05", stem, re.I) and arch != "sm_100a" and qtype != "compare":
+        return "writer_hw:tcgen05_on_non_sm100a"
+    if re.search(r"\bwgmma", stem, re.I) and arch != "sm_90a" and qtype != "compare":
+        return "writer_hw:wgmma_on_non_hopper"
+    fmt = getattr(question, "answer_format", "") or ""
+    if fmt in {"single_choice", "multi_choice"}:
+        option_lines = re.findall(r"(?m)^\s*(?:[A-F][\.\)、]|\([a-f]\))", stem)
+        if len(option_lines) < 3:
+            return "writer_format:choice_without_options"
     return None
 
 

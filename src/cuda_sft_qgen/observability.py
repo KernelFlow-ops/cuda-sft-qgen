@@ -9,11 +9,27 @@ import functools
 import logging
 import threading
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Callable, TypeVar
 
 logger = logging.getLogger(__name__)
 
 F = TypeVar("F", bound=Callable[..., Any])
+_AGENT_ROLE: ContextVar[str] = ContextVar("agent_role", default="unspecified")
+
+
+@contextmanager
+def agent_role(role: str):
+    token = _AGENT_ROLE.set(role)
+    try:
+        yield
+    finally:
+        _AGENT_ROLE.reset(token)
+
+
+def current_agent_role() -> str:
+    return _AGENT_ROLE.get()
 
 
 def _percentile(values: list[float], p: float) -> float:

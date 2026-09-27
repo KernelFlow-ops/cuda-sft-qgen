@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
 from cuda_sft_qgen.cache import PromptCache
+from cuda_sft_qgen import hardware_facts
 from cuda_sft_qgen.models import QuestionBrief, SteeringBrief
 from cuda_sft_qgen.prompts import load_prompt, load_prompt_yaml
 from cuda_sft_qgen.prompts.fewshot import (
@@ -21,6 +24,8 @@ from cuda_sft_qgen.prompts.fewshot import (
     select_positives,
 )
 from cuda_sft_qgen.review.fingerprint import fingerprint
+
+logger = logging.getLogger(__name__)
 
 KIND_CONSTRAINTS = {
     "formula": (
@@ -132,6 +137,11 @@ class StructuredPrompt:
         self._context = load_prompt("context")
         self._cot = load_prompt("cot")
         try:
+            self._hw_facts = hardware_facts.load(str(settings.hardware_facts_path))
+        except Exception:  # noqa: BLE001
+            logger.warning("hardware_facts_unavailable path=%s", getattr(settings, "hardware_facts_path", None))
+            self._hw_facts = {"common": {}, "arch": {}}
+        try:
             self._writer_policy = load_prompt("writer_policy")
         except FileNotFoundError:
             self._writer_policy = ""
@@ -140,9 +150,10 @@ class StructuredPrompt:
         except FileNotFoundError:
             self._evolver_policy = ""
 
-    def build(self, brief: QuestionBrief, steering: SteeringBrief) -> PromptBundle:
+    def build(self, brief: QuestionBrief, steering: SteeringBrief, corpus: FewshotCorpus | None = None) -> PromptBundle:
         """Render the layered prompt for one brief, injecting few-shots and steering."""
         gen = self.settings.generation
+        corpus = corpus or self.corpus
         use_cot = bool(gen.get("prompt_cot", True))
         anti_cap = int(gen.get("anti_templates_max", 15))
         kind = brief.kind or "mechanism"
@@ -154,14 +165,21 @@ class StructuredPrompt:
         seed_hash = None
         if brief.role == "evolver" and brief.seed_question:
             seed_hash = fingerprint(brief.seed_question).simhash
-        pos = select_positives(brief, self.corpus, self.cfg, seed_simhash=seed_hash)
+        pos = select_positives(brief, corpus, self.cfg, seed_simhash=seed_hash)
         used = {p.question.id for p in pos}
-        neg = select_negatives(brief, self.corpus, self.cfg, used_ids=used)
-        anti = select_anti(brief, self.corpus, self.cfg, self.static_anti)
+        neg = select_negatives(brief, corpus, self.cfg, used_ids=used)
+        anti = select_anti(brief, corpus, self.cfg, self.static_anti)
 
         angle_card = ""
         if brief.angle:
             angle_card = self._angle_card_block(brief)
+        format_card = _card_text(self.quality.get("answer_format") or {}, brief.answer_format)
+        instance_hint = brief.instance_hint or "(design your own scene)"
+        try:
+            rendered_hardware_facts = hardware_facts.render(brief.arch_target or "any", self._hw_facts)
+        except Exception:  # noqa: BLE001
+            logger.warning("hardware_facts_render_failed arch_target=%s", brief.arch_target)
+            rendered_hardware_facts = ""
 
         mapping = {
             "persona_name": persona_name,
@@ -172,6 +190,7 @@ class StructuredPrompt:
             "must_avoid": brief.must_avoid or "do not write definition-only questions",
             "must_avoid_stems": "\n".join(f"- {s}" for s in brief.must_avoid_stems) or "(none)",
             "kind_constraint": KIND_CONSTRAINTS.get(kind, KIND_CONSTRAINTS["mechanism"]),
+            "format_constraint": f"- ANSWER_FORMAT={brief.answer_format}: {format_card}" if brief.answer_format else "",
             "topic_path": ".".join(brief.topic_path),
             "question_type": brief.question_type,
             "difficulty": str(brief.difficulty),
@@ -179,6 +198,14 @@ class StructuredPrompt:
             "granularity": brief.granularity,
             "language": brief.language,
             "hardware": brief.hardware,
+            "answer_format": brief.answer_format,
+            "scenario": brief.scenario,
+            "arch_target": brief.arch_target,
+            "operator": brief.operator or "(none)",
+            "hardware_facts": rendered_hardware_facts,
+            "used_angles": ", ".join(brief.used_angles) or "(none)",
+            "used_formats": ", ".join(brief.used_formats) or "(none)",
+            "used_scenarios": ", ".join(brief.used_scenarios) or "(none)",
             "kind": kind,
             "angle": brief.angle or "",
             "angle_card": angle_card,
@@ -186,6 +213,7 @@ class StructuredPrompt:
             "bloom_card": _card_text(self.quality.get("bloom") or {}, brief.bloom),
             "diff_card": _card_text(self.quality.get("difficulty") or {}, str(brief.difficulty)),
             "kind_card": _card_text(self.quality.get("kind") or {}, kind),
+            "format_card": format_card,
             "fewshot_pos": format_positives(pos, self.cfg),
             "fewshot_neg": format_negatives(neg, self.cfg),
             "steering": steering.to_prompt_block(anti_cap=anti_cap),
@@ -195,15 +223,12 @@ class StructuredPrompt:
                 "Design a concrete, checkable scene (numbers, launch, layout, code, or counters).",
             ),
             "cot_evolver": (
-                "Evolver extra: name exactly one operator "
-                "deepen|re-arch|inject-bug|layout-eq|profiler|compare|counterfactual "
-                "matched to this leaf kind; say how it changes the seed's training structure "
-                "(not a synonym rewrite)."
-                if brief.role == "evolver"
-                else ""
+                f"Evolver extra: OPERATOR={brief.operator or 'deepen'}; state in draft_plan.construct "
+                "which dimension changed and why the seed's answer no longer applies."
+                if brief.role == "evolver" else ""
             ),
             "l3_claim": brief.l3_claim,
-            "instance_hint": brief.instance_hint or brief.must_include or brief.l3_claim,
+            "instance_hint": instance_hint,
             "seed_question": brief.seed_question or "",
             "breadth_or_depth_signal": brief.breadth_or_depth,
             "breadth_or_depth_guidance": self._breadth_guidance(brief),
@@ -226,6 +251,7 @@ class StructuredPrompt:
             kind,
             brief.bloom,
             str(brief.difficulty),
+            brief.answer_format,
         )
         semi = self.cache.get_semi(
             semi_key,
@@ -259,7 +285,7 @@ class StructuredPrompt:
         dynamic_parts.append(_render(self._context, mapping).strip())
         dynamic_parts.append(
             f'Reminder: len in [{mapping["min_chars"]}, {mapping["max_chars"]}]; '
-            f'follow angle "{brief.angle}"; JSON only.'
+            f'follow angle "{brief.angle}"; ANSWER_FORMAT={brief.answer_format or "any"}; JSON only.'
         )
         system = PromptCache.compose(static_prefix, semi, *dynamic_parts)
 
@@ -276,6 +302,10 @@ class StructuredPrompt:
             f"HARDWARE: {brief.hardware}",
             f"GRANULARITY: {brief.granularity}",
             f"LANGUAGE: {brief.language}",
+            f"ANSWER_FORMAT: {brief.answer_format or 'short_answer'}",
+            f"SCENARIO: {brief.scenario}",
+            f"ARCH_TARGET: {brief.arch_target}",
+            *([f"OPERATOR: {brief.operator or 'deepen'}"] if brief.role == "evolver" else []),
             f"MUST_INCLUDE: {mapping['must_include']}",
             f"MUST_AVOID: {mapping['must_avoid']}",
             f"SEED_BUCKET: {mapping['seed_bucket']}",
@@ -296,7 +326,7 @@ class StructuredPrompt:
         provenance = {
             "structured_cot": use_cot,
             "prompt_sha256": hashlib.sha256(system.encode()).hexdigest(),
-            "writer_model": getattr(self.settings, "nvidia_model", "unknown"),
+            "writer_model": getattr(self.settings, "llm_model", "unknown"),
             "task_id": brief.task_id,
             "role": brief.role,
             "seed_id": brief.seed_id,
@@ -307,7 +337,15 @@ class StructuredPrompt:
             "mixup_context": mixup,
             "claim_revision": brief.claim_revision,
             "source_ids": list(brief.source_ids),
+            "answer_format": brief.answer_format,
+            "scenario": brief.scenario,
+            "arch_target": brief.arch_target,
+            "operator": brief.operator,
         }
+        rendered = system + user
+        leftover = re.findall(r"\{\{[a-zA-Z0-9_]+\}\}", rendered)
+        if "{{" in rendered:
+            raise ValueError(f"unrendered prompt placeholders: {sorted(set(leftover)) or ['{{']}")
         return PromptBundle(
             system=system,
             user=user,
@@ -318,8 +356,9 @@ class StructuredPrompt:
 
     def _static_prefix(self, role_key: str, min_chars: str, max_chars: str) -> str:
         """Load writer.md / evolver.md so editing those files changes the cached prefix."""
-        name = "evolver" if role_key == "evolver" else "writer"
-        template = load_prompt(name)
+        template = load_prompt("writer")
+        if role_key == "evolver":
+            template += "\n\n" + load_prompt("evolver")
         return _render(template, {"min_chars": min_chars, "max_chars": max_chars}).strip()
 
     def _semi_block(
@@ -334,8 +373,7 @@ class StructuredPrompt:
         kind_constraint: str,
     ) -> str:
         parts = []
-        if role_key != "evolver":
-            parts.append(f"Persona you must inhabit:\n{persona_name}\n{persona_voice}")
+        parts.append(f"Persona you must inhabit:\n{persona_name}\n{persona_voice}")
         if kind_constraint:
             parts.append(kind_constraint)
         cards = []

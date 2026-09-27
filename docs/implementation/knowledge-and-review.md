@@ -32,7 +32,15 @@ at a time; background knowledge auditing uses SQLite transactions.
 Internal reference answers and detailed evidence remain in the SQLite archive.
 Public question JSONL removes those fields. `export` additionally requires a real
 successful reviewer result and excludes withdrawn or pending questions. Fake model
-results cannot be exported as verified training questions.
+results and legacy rows without explicit real Writer API provenance cannot be
+exported as verified training questions. Only provenance-verified accepted rows
+count toward the production target.
+
+The concurrent coordinator hands each completed Writer result to the single
+review/archive lane immediately. JSON salvage and pre-review rewrites run on a
+separate repair lane. A Chair reject with a repairable defect can enqueue one
+durable Writer revision; the original reject remains archived, and the revision
+must pass the full independent review before export.
 
 ## Knowledge Lifecycle
 

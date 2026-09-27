@@ -171,6 +171,18 @@ def _field_start(text: str, key: str) -> int | None:
     return m.end()
 
 
+def extract_complete_json_field(text: str, key: str) -> Any | None:
+    """Read a complete field value even when the enclosing object is damaged."""
+    start = _field_start(text, key)
+    if start is None:
+        return None
+    try:
+        value, _ = json.JSONDecoder().raw_decode(text, start)
+    except json.JSONDecodeError:
+        return None
+    return value
+
+
 def _next_key_index(text: str, start: int, keys: tuple[str, ...]) -> int | None:
     """Earliest sibling-key boundary after ``start`` (comma or newline form)."""
     found: list[int] = []

@@ -1,5 +1,6 @@
 id: T11
 name: CUDA 库生态
+weight: 0.7
 children:
 - id: cublas
   name: cuBLAS / cuBLASLt
@@ -84,6 +85,7 @@ children:
     - 2
     - 3
     kind: feature
+  target_leaves: 10
 - id: cub_cccl
   name: CUB / CCCL / Thrust
   leaves:
@@ -160,6 +162,7 @@ children:
     difficulty:
     - 3
     kind: numeric
+  target_leaves: 10
 - id: others
   name: 其他库
   leaves:
@@ -236,6 +239,7 @@ children:
     difficulty:
     - 2
     kind: api
+  target_leaves: 10
 - id: cublaslt_cask
   name: cuBLASLt kernel 选择
   leaves:
@@ -315,6 +319,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 10
 - id: cub_tuning
   name: CUB 调参
   leaves:
@@ -390,6 +395,7 @@ children:
     difficulty:
     - 3
     kind: feature
+  target_leaves: 10
 - id: cufft_layout
   name: cuFFT 布局
   leaves:
@@ -468,6 +474,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 10
 - id: cudnn_conv
   name: cuDNN 卷积算法
   leaves:
@@ -546,6 +553,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 10
 - id: cudnn_sdpa
   name: cuDNN 融合注意力
   leaves:
@@ -615,6 +623,7 @@ children:
     difficulty:
     - 3
     kind: numeric
+  target_leaves: 10
 - id: cublas_lt_pref
   name: cuBLASLt preference
   leaves:
@@ -685,6 +694,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 10
 - id: thrust_exec
   name: Thrust 执行策略
   leaves:
@@ -756,6 +766,7 @@ children:
     difficulty:
     - 2
     kind: numeric
+  target_leaves: 10
 - id: cub_block
   name: CUB 块级原语
   leaves:
@@ -829,6 +840,7 @@ children:
     - 2
     - 3
     kind: api
+  target_leaves: 10
 - id: cufft_exec
   name: cuFFT 执行与 plan
   leaves:
@@ -898,6 +910,7 @@ children:
     difficulty:
     - 2
     kind: api
+  target_leaves: 10
 - id: cublas_lt_desc
   name: cuBLASLt 描述符
   leaves:
@@ -970,3 +983,4 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 10

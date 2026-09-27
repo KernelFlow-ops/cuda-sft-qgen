@@ -1,5 +1,6 @@
 id: T25
 name: 性能模型与公式
+weight: 1.1
 children:
 - id: occupancy
   name: Occupancy 闭式
@@ -80,6 +81,7 @@ children:
     - 2
     - 3
     kind: api
+  target_leaves: 12
 - id: bandwidth_tx
   name: 带宽与事务
   leaves:
@@ -153,6 +155,7 @@ children:
     - 2
     - 3
     kind: formula
+  target_leaves: 12
 - id: roofline
   name: Roofline
   leaves:
@@ -227,6 +230,7 @@ children:
     - 2
     - 3
     kind: formula
+  target_leaves: 12
 - id: wave_quant
   name: Wave 量化
   leaves:
@@ -304,6 +308,7 @@ children:
     difficulty:
     - 3
     kind: formula
+  target_leaves: 12
 - id: tile_sizing
   name: Tile 尺寸
   leaves:
@@ -375,6 +380,7 @@ children:
     difficulty:
     - 3
     kind: formula
+  target_leaves: 12
 - id: latency_ilp
   name: 延迟隐藏与 ILP
   leaves:
@@ -445,6 +451,7 @@ children:
     difficulty:
     - 3
     kind: formula
+  target_leaves: 12
 - id: l2_cache
   name: L2 缓存模型
   leaves:
@@ -515,6 +522,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: smem_bank
   name: 共享内存 bank 模型
   leaves:
@@ -584,6 +592,7 @@ children:
     difficulty:
     - 3
     kind: formula
+  target_leaves: 12
 - id: tensor_tflops
   name: Tensor 吞吐闭式
   leaves:
@@ -655,6 +664,7 @@ children:
     difficulty:
     - 3
     kind: formula
+  target_leaves: 12
 - id: issue_rate
   name: 发射率与双发射
   leaves:
@@ -726,6 +736,7 @@ children:
     difficulty:
     - 2
     kind: feature
+  target_leaves: 12
 - id: launch_cost
   name: Launch 与网格开销
   leaves:
@@ -800,6 +811,7 @@ children:
     - 2
     - 3
     kind: api
+  target_leaves: 12
 - id: pipe_overlap
   name: 计算通信重叠
   leaves:
@@ -869,6 +881,7 @@ children:
     difficulty:
     - 3
     kind: formula
+  target_leaves: 12
 - id: dram_eff
   name: DRAM 效率与功耗代理
   leaves:
@@ -940,3 +953,4 @@ children:
     - 2
     - 3
     kind: formula
+  target_leaves: 12

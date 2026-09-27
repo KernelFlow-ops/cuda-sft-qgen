@@ -1,5 +1,6 @@
 id: T03
 name: Warp、Occupancy 与发射模型
+weight: 1.2
 children:
 - id: warp
   name: Warp 执行
@@ -82,6 +83,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 14
 - id: occupancy
   name: Occupancy
   leaves:
@@ -163,6 +165,7 @@ children:
     difficulty:
     - 3
     kind: formula
+  target_leaves: 14
 - id: ilp_tlp
   name: ILP 与 TLP
   leaves:
@@ -229,6 +232,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 14
 - id: occupancy_math
   name: 占用闭式计算
   leaves:
@@ -303,6 +307,7 @@ children:
     difficulty:
     - 3
     kind: feature
+  target_leaves: 14
 - id: scheduler
   name: Warp 调度器
   leaves:
@@ -374,6 +379,7 @@ children:
     - 3
     - 4
     kind: mechanism
+  target_leaves: 14
 - id: register_file
   name: 寄存器文件与溢出
   leaves:
@@ -442,6 +448,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 14
 - id: shuffle_ops
   name: Shuffle 与 warp 交换
   leaves:
@@ -510,6 +517,7 @@ children:
     - 2
     - 3
     kind: api
+  target_leaves: 14
 - id: ballot_vote
   name: Ballot、Vote 与 Match
   leaves:
@@ -579,6 +587,7 @@ children:
     difficulty:
     - 3
     kind: feature
+  target_leaves: 14
 - id: predication
   name: 谓词与分支
   leaves:
@@ -648,6 +657,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 14
 - id: maxregcount
   name: 寄存器上限与编译开关
   leaves:
@@ -715,6 +725,7 @@ children:
     difficulty:
     - 4
     kind: failure
+  target_leaves: 14
 - id: warp_state
   name: Warp 状态与 reconverge
   leaves:
@@ -784,6 +795,7 @@ children:
     difficulty:
     - 3
     kind: feature
+  target_leaves: 14
 - id: issue_width
   name: 发射宽度与管道
   leaves:
@@ -853,6 +865,7 @@ children:
     - 3
     - 4
     kind: feature
+  target_leaves: 14
 - id: occupancy_api
   name: Occupancy 工具 API
   leaves:
@@ -921,3 +934,4 @@ children:
     difficulty:
     - 2
     kind: api
+  target_leaves: 14

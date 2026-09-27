@@ -16,3 +16,5 @@ data/
 logs/
 paper/
 .zip
+cuda_qgen_fix/
+*.zip

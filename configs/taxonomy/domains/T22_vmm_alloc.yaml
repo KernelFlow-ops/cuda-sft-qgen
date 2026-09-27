@@ -1,5 +1,6 @@
 id: T22
 name: 虚拟内存与分配器
+weight: 0.5
 children:
 - id: vmm_map
   name: VMM 预留与映射
@@ -97,6 +98,7 @@ children:
     - 2
     - 3
     kind: feature
+  target_leaves: 8
 - id: fabric_multicast
   name: Fabric 与 multicast
   leaves:
@@ -191,6 +193,7 @@ children:
     difficulty:
     - 4
     kind: api
+  target_leaves: 8
 - id: mempool
   name: Mempool
   leaves:
@@ -286,6 +289,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 8
 - id: async_stream_order
   name: 流序异步分配
   leaves:
@@ -377,6 +381,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 8
 - id: mmu_pages
   name: MMU 与页大小
   leaves:
@@ -471,6 +476,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 8
 - id: cuda_malloc
   name: 同步 cudaMalloc
   leaves:
@@ -562,6 +568,7 @@ children:
     - 2
     - 3
     kind: mechanism
+  target_leaves: 8
 - id: aligned_alloc
   name: 对齐与 pitched 分配
   leaves:
@@ -659,6 +666,7 @@ children:
     difficulty:
     - 3
     kind: feature
+  target_leaves: 8
 - id: managed_vs_vmm
   name: Managed 与 VMM
   leaves:
@@ -753,6 +761,7 @@ children:
     difficulty:
     - 3
     kind: numeric
+  target_leaves: 8
 - id: prefetch_vs_map
   name: Prefetch 与 Map
   leaves:
@@ -846,6 +855,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 8
 - id: vmm_props
   name: 分配属性与句柄
   leaves:
@@ -938,3 +948,4 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 8

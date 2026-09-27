@@ -1,5 +1,6 @@
 id: T12
 name: 调试、剖析与正确性
+weight: 1.1
 children:
 - id: ncu
   name: Nsight Compute
@@ -79,6 +80,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 12
 - id: nsys
   name: Nsight Systems
   leaves:
@@ -158,6 +160,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 12
 - id: sanitizer
   name: 正确性工具
   leaves:
@@ -236,6 +239,7 @@ children:
     - 2
     - 3
     kind: failure
+  target_leaves: 12
 - id: ncu_metric
   name: NCU 计数器释义
   leaves:
@@ -315,6 +319,7 @@ children:
     - 1
     - 2
     kind: api
+  target_leaves: 12
 - id: stall_math
   name: Stall 与延迟公式
   leaves:
@@ -389,6 +394,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 12
 - id: sanitizer_scope
   name: Sanitizer 覆盖边界
   leaves:
@@ -468,6 +474,7 @@ children:
     - 1
     - 2
     kind: numeric
+  target_leaves: 12
 - id: ncu_source
   name: NCU Source 与 SASS
   leaves:
@@ -539,6 +546,7 @@ children:
     difficulty:
     - 2
     kind: api
+  target_leaves: 12
 - id: nsys_api
   name: Nsys CUDA API 提交
   leaves:
@@ -611,6 +619,7 @@ children:
     difficulty:
     - 2
     kind: failure
+  target_leaves: 12
 - id: stall_issue
   name: Issue 类 stall
   leaves:
@@ -679,6 +688,7 @@ children:
     - 2
     - 3
     kind: numeric
+  target_leaves: 12
 - id: sanitizer_mem
   name: memcheck 覆盖
   leaves:
@@ -751,6 +761,7 @@ children:
     - 1
     - 2
     kind: failure
+  target_leaves: 12
 - id: ncu_replay
   name: NCU replay 与时钟
   leaves:
@@ -820,6 +831,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 12
 - id: nsys_memcpy
   name: Memcpy 与 GPU idle
   leaves:
@@ -891,6 +903,7 @@ children:
     - 2
     - 3
     kind: numeric
+  target_leaves: 12
 - id: profiler_filter
   name: 剖析过滤与范围
   leaves:
@@ -959,6 +972,7 @@ children:
     difficulty:
     - 2
     kind: formula
+  target_leaves: 12
 - id: ncu_workflow
   name: NCU 调试工作流
   leaves:
@@ -1029,7 +1043,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
-
+  target_leaves: 12
 - id: nsys_intro
   name: Nsight Systems 入门
   leaves:
@@ -1101,3 +1115,4 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 12

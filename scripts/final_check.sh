@@ -9,7 +9,6 @@ echo "📦 核心模块检查："
 echo ""
 
 modules=(
-    "src/cuda_sft_qgen/graph/state_v2.py"
     "src/cuda_sft_qgen/observability.py"
     "src/cuda_sft_qgen/planner_v2.py"
     "src/cuda_sft_qgen/executor.py"

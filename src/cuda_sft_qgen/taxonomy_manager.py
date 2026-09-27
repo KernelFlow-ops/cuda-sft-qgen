@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -16,7 +17,7 @@ from cuda_sft_qgen.keys import PRI_TAXONOMY
 from cuda_sft_qgen.llm import LLMClient
 from cuda_sft_qgen.models import DiversityReport, Question
 from cuda_sft_qgen.prompts import load_prompt, load_prompt_yaml
-from cuda_sft_qgen.taxonomy import Taxonomy, dump_taxonomy, merge_leaves, patch_leaf
+from cuda_sft_qgen.taxonomy import LEAF_KINDS, Taxonomy, dump_taxonomy, merge_leaves, patch_leaf
 from cuda_sft_qgen.taxonomy_embed import TaxonomyEmbedIndex
 from cuda_sft_qgen.store.knowledge import official_url
 from cuda_sft_qgen.taxonomy_expand import (
@@ -41,6 +42,7 @@ DEFAULT_FACET_IDS = (
     "arch_migrate",
     "cross_factor",
 )
+LEAF_KINDS_SET = set(LEAF_KINDS)
 
 
 def load_facets() -> list[dict]:
@@ -135,7 +137,7 @@ def manager_from_runtime(rt: Any) -> "TaxonomyManager":
     tax_cfg = (getattr(rt.settings, "default_yaml", {}) or {}).get("taxonomy") or {}
     return TaxonomyManager(
         rt.taxonomy,
-        rt.llm,
+        rt.knowledge_llm or rt.llm,
         embedder=getattr(rt, "embedder", None),
         settings=rt.settings,
         target_leaves_per_l2=int(tax_cfg.get("target_leaves_per_l2", 30) or 30),
@@ -598,6 +600,10 @@ class TaxonomyManager:
                     generic.append(leaf.l3_id)
         return generic
 
+    def _l2_target(self, child: dict) -> int:
+        """Use the L2-specific target when present."""
+        return int(child.get("target_leaves") or self.target_leaves_per_l2)
+
     def _compute_expansion_priority(
         self,
         empty_l2: list[str],
@@ -623,10 +629,11 @@ class TaxonomyManager:
         remaining_sparse = [k for k, _ in sparse_l2 if k not in priority]
         priority.extend(remaining_sparse)
 
+        by_key = {f"{domain_id}.{child['id']}": child for domain_id, _name, child in self.taxonomy.iter_l2()}
         below_target = [
             k
             for k, v in sorted(l2_counts.items(), key=lambda kv: kv[1])
-            if v < self.target_leaves_per_l2 and k not in priority
+            if v < self._l2_target(by_key[k]) and k not in priority
         ]
         priority.extend(below_target)
 
@@ -660,25 +667,26 @@ class TaxonomyManager:
         self,
         health: TaxonomyHealthReport,
         last_facet: str | None = None,
+        rng: random.Random | None = None,
     ) -> str:
-        """Pick one facet id. Rotate away from last_facet."""
+        """Sample a facet with coverage boosts and a short cooldown."""
+        from cuda_sft_qgen.planner.joint import weighted_choice
+
+        rng = rng or random.Random()
         ids = list(self.facet_ids) or list(DEFAULT_FACET_IDS)
-        formula_n = int((health.kind_distribution or {}).get("formula", 0) or 0)
+        kinds = health.kind_distribution or {}
         total = max(int(health.total_leaves or 0), 1)
-        few_formula = formula_n < 0.05 * total
-        if health.kind_imbalance or few_formula:
-            preferred = [x for x in ids if x in {"formula", "numeric"}] or [
-                "formula",
-                "numeric",
-            ]
-        elif health.leaves_with_high_reject_rate:
-            preferred = [x for x in ids if x == "failure"] or ["failure"]
-        else:
-            preferred = ids
-        if preferred == ids and last_facet in ids:
-            return ids[(ids.index(last_facet) + 1) % len(ids)]
-        options = [x for x in preferred if x != last_facet]
-        return (options or preferred or ids)[0]
+        weights = {}
+        for fid in ids:
+            weight = 1.0
+            if fid in LEAF_KINDS_SET and kinds.get(fid, 0) < 0.5 * total / 6:
+                weight += 2.0
+            if fid == "failure" and health.leaves_with_high_reject_rate:
+                weight += 1.0
+            if fid == last_facet:
+                weight *= 0.2
+            weights[fid] = weight
+        return weighted_choice(rng, weights)
 
     def _facet_defs(self) -> list[dict[str, Any]]:
         if self._facets_cache is None:
@@ -1131,7 +1139,7 @@ class TaxonomyManager:
                 continue
             current = _active_leaf_count(child)
             need = min(
-                self.target_leaves_per_l2 - current,
+                self._l2_target(child) - current,
                 max_leaves_to_add - added_total,
                 20,
             )
@@ -1292,7 +1300,7 @@ class TaxonomyManager:
             if not pair:
                 continue
             _, child = pair
-            if _active_leaf_count(child) < self.target_leaves_per_l2:
+            if _active_leaf_count(child) < self._l2_target(child):
                 return key
         return None
 
@@ -1303,15 +1311,15 @@ class TaxonomyManager:
     ) -> str | None:
         for key in health.expansion_priority:
             pair = self._lookup_l2(key)
-            if pair and _active_leaf_count(pair[1]) < self.target_leaves_per_l2:
+            if pair and _active_leaf_count(pair[1]) < self._l2_target(pair[1]):
                 return key
         for key in self._underrep_keys(diversity_report):
             pair = self._lookup_l2(key)
-            if key.count(".") == 1 and pair and _active_leaf_count(pair[1]) < self.target_leaves_per_l2:
+            if key.count(".") == 1 and pair and _active_leaf_count(pair[1]) < self._l2_target(pair[1]):
                 return key
         for key in self._prioritize_from_diversity(diversity_report):
             pair = self._lookup_l2(key)
-            if pair and _active_leaf_count(pair[1]) < self.target_leaves_per_l2:
+            if pair and _active_leaf_count(pair[1]) < self._l2_target(pair[1]):
                 return key
         return None
 
@@ -1425,7 +1433,7 @@ class TaxonomyManager:
                         domain, child = pair
                         current = _active_leaf_count(child)
                         need = min(
-                            self.target_leaves_per_l2 - current,
+                            self._l2_target(child) - current,
                             leaf_cap,
                             20,
                         )
@@ -1447,7 +1455,7 @@ class TaxonomyManager:
                 l2_key = self._pick_gap_l2(health, diversity_report)
                 if l2_key:
                     pair = self._lookup_l2(l2_key)
-                    need = min(leaf_cap, 20, self.target_leaves_per_l2 - _active_leaf_count(pair[1])) if pair else 0
+                    need = min(leaf_cap, 20, self._l2_target(pair[1]) - _active_leaf_count(pair[1])) if pair else 0
                     accepted_leaves = self.gap_search(
                         target_l2_key=l2_key,
                         health=health,
@@ -1479,7 +1487,7 @@ class TaxonomyManager:
                         if pair:
                             domain, child = pair
                             need = min(
-                                self.target_leaves_per_l2 - _active_leaf_count(child),
+                                self._l2_target(child) - _active_leaf_count(child),
                                 leaf_cap,
                                 20,
                             )

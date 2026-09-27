@@ -12,6 +12,7 @@ from cuda_sft_qgen.planner.sampling import (
     load_angles,
     plan_briefs,
 )
+from cuda_sft_qgen.planner.joint import LeafCoverage
 
 __all__ = [
     "plan_briefs",
@@ -19,4 +20,5 @@ __all__ = [
     "load_angles",
     "_instance_hint",
     "_pick_angle",
+    "LeafCoverage",
 ]

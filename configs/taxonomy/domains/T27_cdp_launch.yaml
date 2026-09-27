@@ -1,5 +1,6 @@
 id: T27
 name: 设备 launch 与 CDP
+weight: 0.4
 children:
 - id: nesting_depth
   name: 嵌套深度
@@ -81,6 +82,7 @@ children:
     difficulty:
     - 3
     kind: feature
+  target_leaves: 8
 - id: pending_launch
   name: 待发射池
   leaves:
@@ -165,6 +167,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 8
 - id: cdp2_streams
   name: Fire-and-forget 与尾发射
   leaves:
@@ -247,6 +250,7 @@ children:
     - 3
     - 4
     kind: mechanism
+  target_leaves: 8
 - id: device_malloc
   name: 设备堆与参数缓冲
   leaves:
@@ -329,6 +333,7 @@ children:
     - 2
     - 3
     kind: mechanism
+  target_leaves: 8
 - id: parent_child
   name: 父子可见性与资源
   leaves:
@@ -410,6 +415,7 @@ children:
     - 2
     - 3
     kind: failure
+  target_leaves: 8
 - id: device_dsync
   name: 设备侧 cudaDeviceSynchronize
   leaves:
@@ -479,6 +485,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 8
 - id: nested_launch_cfg
   name: 嵌套执行配置
   leaves:
@@ -548,6 +555,7 @@ children:
     difficulty:
     - 3
     kind: feature
+  target_leaves: 8
 - id: device_stream_api
   name: 设备流 API
   leaves:
@@ -619,6 +627,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 8
 - id: cdp_compile_limits
   name: 编译与设备限制
   leaves:
@@ -689,6 +698,7 @@ children:
     - 2
     - 3
     kind: feature
+  target_leaves: 8
 - id: param_launch_api
   name: 参数缓冲与 launch API
   leaves:
@@ -759,6 +769,7 @@ children:
     difficulty:
     - 2
     kind: failure
+  target_leaves: 8
 - id: cdp_event_graph
   name: 设备事件与图发射
   leaves:
@@ -832,6 +843,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 8
 - id: child_mem_model
   name: 子网格内存模型
   leaves:
@@ -902,3 +914,4 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 8

@@ -1,5 +1,6 @@
 id: T07
 name: CUTLASS 与 CuTe 布局
+weight: 1.0
 children:
 - id: layout_algebra
   name: Layout 代数
@@ -100,6 +101,7 @@ children:
     difficulty:
     - 3
     kind: formula
+  target_leaves: 12
 - id: swizzle_atom
   name: Swizzle 与 atom
   leaves:
@@ -182,6 +184,7 @@ children:
     - 3
     - 4
     kind: mechanism
+  target_leaves: 12
 - id: tiled
   name: TiledCopy / TiledMMA
   leaves:
@@ -266,6 +269,7 @@ children:
     - 3
     - 4
     kind: feature
+  target_leaves: 12
 - id: cutlass_kernel
   name: CUTLASS 内核结构
   leaves:
@@ -339,6 +343,7 @@ children:
     difficulty:
     - 3
     kind: feature
+  target_leaves: 12
 - id: cute_hier
   name: 层次化 Layout
   leaves:
@@ -377,7 +382,7 @@ children:
     - 3
     kind: formula
   - id: cute_hier_zipped
-    claim: zipped_divide 保持 (tile, rest) 成对模式，tiled_divide 把 tiler 拍扁；用错会导致 local_tile 坐标秩不匹配
+    claim: zipped_divide 保持 (tile, rest) 成对模式；tiled_divide 保留 tile 内部层级，只把 rest 各模提升为同级成员。误按另一种 shape 取坐标会导致 local_tile 坐标秩不匹配
     types:
     - layout
     - syntax
@@ -410,6 +415,7 @@ children:
     difficulty:
     - 3
     kind: formula
+  target_leaves: 12
 - id: epilogue_visit
   name: Epilogue visitor
   leaves:
@@ -481,6 +487,7 @@ children:
     - 3
     - 4
     kind: failure
+  target_leaves: 12
 - id: sm90_mainloop
   name: Sm90 collective mainloop
   leaves:
@@ -556,6 +563,9 @@ children:
     hints:
     - Stages=2 但 wait_prior<0
     - 漏 producer_commit
+  arch:
+  - sm_90a
+  target_leaves: 12
 - id: coalesce_filter
   name: coalesce / filter / flatten
   leaves:
@@ -625,6 +635,7 @@ children:
     - 2
     - 3
     kind: api
+  target_leaves: 12
 - id: tiled_copy
   name: TiledCopy 细节
   leaves:
@@ -704,6 +715,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: mma_atom
   name: MMA_Atom 与 GMMA
   leaves:
@@ -782,6 +794,7 @@ children:
     difficulty:
     - 4
     kind: feature
+  target_leaves: 12
 - id: cute_tensor
   name: cute::Tensor
   leaves:
@@ -851,6 +864,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: kernel_schedule
   name: KernelSchedule 策略
   leaves:
@@ -920,6 +934,7 @@ children:
     difficulty:
     - 3
     kind: formula
+  target_leaves: 12
 - id: smem_desc
   name: SMEM descriptor
   leaves:
@@ -988,6 +1003,10 @@ children:
     difficulty:
     - 4
     kind: feature
+  arch:
+  - sm_90a
+  - sm_100a
+  target_leaves: 12
 - id: copy_pred
   name: Copy 谓词与边界
   leaves:
@@ -1058,3 +1077,4 @@ children:
     - 3
     - 4
     kind: mechanism
+  target_leaves: 12

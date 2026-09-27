@@ -8,13 +8,34 @@ without network the script exits 0.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import re
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 def mirror(urls: list[str], out: Path, toolkit: str) -> int:
     """Return number of documents written."""
-    raise NotImplementedError("implemented by task T34")
+    from cuda_sft_qgen.knowledge_worker import fetch_official_document
+
+    written = 0
+    for url in urls:
+        try:
+            text = fetch_official_document(url)
+            if not text.strip():
+                raise ValueError("empty document")
+            parsed = urlparse(url)
+            slug = re.sub(r"[^A-Za-z0-9]+", "_", parsed.netloc + parsed.path).strip("_")
+            (out / f"{slug}.txt").write_text(text, encoding="utf-8")
+            meta = {"url": url, "title": slug, "toolkit_version": toolkit,
+                    "sha256": hashlib.sha256(text.encode()).hexdigest()}
+            (out / f"{slug}.meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            written += 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"SKIP {url} {type(exc).__name__}: {exc}")
+    return written
 
 
 def main() -> int:

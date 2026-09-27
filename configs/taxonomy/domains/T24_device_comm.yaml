@@ -1,5 +1,6 @@
 id: T24
 name: 设备侧通信
+weight: 0.5
 children:
 - id: nvshmem_rma
   name: NVSHMEM 单边 RMA
@@ -75,6 +76,7 @@ children:
     - 2
     - 3
     kind: failure
+  target_leaves: 8
 - id: ibgda_transport
   name: IBGDA 设备发起 NIC
   leaves:
@@ -147,6 +149,7 @@ children:
     difficulty:
     - 3
     kind: feature
+  target_leaves: 8
 - id: warp_block_scope
   name: warp/block 集合通信原语
   leaves:
@@ -224,6 +227,7 @@ children:
     difficulty:
     - 3
     kind: formula
+  target_leaves: 8
 - id: remote_atomics
   name: 远端原子与信号
   leaves:
@@ -301,6 +305,7 @@ children:
     - 2
     - 3
     kind: mechanism
+  target_leaves: 8
 - id: symmetric_heap
   name: 对称堆与组播映射
   leaves:
@@ -488,6 +493,7 @@ children:
     - nvshmem_init
     - nvshmem_malloc
     - deadlock
+  target_leaves: 8
 - id: nvshmem_teams
   name: NVSHMEM 团队与 PE 映射
   leaves:
@@ -564,6 +570,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 8
 - id: nvshmem_collectives
   name: 设备侧集合通信
   leaves:
@@ -638,6 +645,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 8
 - id: nvshmemx_api
   name: nvshmemx 扩展入口
   leaves:
@@ -713,6 +721,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 8
 - id: quiet_nbi
   name: quiet 与非阻塞完成
   leaves:
@@ -785,6 +794,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 8
 - id: signal_wait_ops
   name: signal 与 wait_until
   leaves:
@@ -859,6 +869,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 8
 - id: nvshmem_get
   name: get/iget 对称读
   leaves:
@@ -931,6 +942,7 @@ children:
     - 2
     - 3
     kind: formula
+  target_leaves: 8
 - id: nvshmem_host_stream
   name: Host 与 stream 侧 RMA
   leaves:
@@ -1003,6 +1015,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 8
 - id: warp_remote_amo
   name: warp 级远端原子
   leaves:
@@ -1076,3 +1089,4 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 8

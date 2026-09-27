@@ -20,6 +20,15 @@ def test_split_chunks():
     assert "".join(c.text for c in chunks).replace("\n", "").replace(" ", "") == text.replace("\n", "").replace(" ", "")
 
 
+def test_long_document_line_is_bounded():
+    from cuda_sft_qgen.knowledge.doc_index import split_chunks
+    text = "CUDA TMA descriptor alignment requirement. " * 500
+    chunks = split_chunks("large", text, {"url": "https://docs.nvidia.com/a"})
+    assert len(chunks) > 1
+    assert max(len(chunk.text) for chunk in chunks) <= 2400
+    assert "".join(chunk.text for chunk in chunks).replace(" ", "") == text.replace(" ", "")
+
+
 def test_search_ranks_relevant(tmp_path):
     from cuda_sft_qgen.knowledge.doc_index import DocIndex
     _write(tmp_path, "tma", "The global address must be aligned to 16 bytes for cuTensorMapEncodeTiled. " * 20, "https://docs.nvidia.com/a")

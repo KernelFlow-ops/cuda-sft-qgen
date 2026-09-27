@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import ast
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from fractions import Fraction
 import json
 import os
@@ -24,6 +26,7 @@ from typing import Any, Iterable
 from cuda_sft_qgen.llm import FakeLLM
 from cuda_sft_qgen.keys import PRI_CHAIR
 from cuda_sft_qgen.models import Question, VerificationSpec
+from cuda_sft_qgen.review.cute_shapes import check_cute_shapes
 
 _ANSWER = re.compile(r"\\boxed\s*\{([^{}]*)\}|(?:answer|答案)\s*[:：=]\s*([^\n.;。；]+)", re.I)
 _CODE = re.compile(r"```(?:cuda|cpp|c\+\+|c)?\s*\n?(.*?)```", re.I | re.S)
@@ -160,13 +163,26 @@ def answer_consistency(target: Any, votes: Iterable[Any], *, minimum_agreement: 
             "votes": normalized, "reason": "majority_differs_from_target" if majority != target_norm else ""}
 
 
+def _en(words: list[str]) -> re.Pattern[str]:
+    return re.compile(r"\b(?:" + "|".join(words) + r")\b")
+
+
+def _zh(words: list[str]) -> re.Pattern[str]:
+    return re.compile("(?:" + "|".join(words) + ")")
+
+
+_C_EN, _C_ZH = _en(["if", "unless", "only when", "must", "provided", "assuming"]), _zh(["否则", "若", "仅当", "不得", "必须", "如果"])
+_D_EN, _D_ZH = _en(["after", "before", "then", "depends", "ordering", "synchronize", "wait"]), _zh(["先", "后", "依赖", "同步", "等待"])
+_F_EN, _F_ZH = _en(["if", "else", "switch", "for", "while", "branch", "diverg"]), _zh(["条件", "分支", "循环", "发散"])
+
+
 def complexity_features(question: Question | str) -> dict[str, int]:
     text = question.question if isinstance(question, Question) else str(question or "")
     lower = text.lower(); blocks = _CODE.findall(text)
     return {
-        "num_constraints": len(re.findall(r"\b(?:if|unless|only when|must|provided|assuming|否则|若|仅当|不得)\b", lower)),
-        "dependency_depth": len(re.findall(r"\b(?:after|before|then|depends|ordering|synchronize|wait|先|后|依赖|同步)\b", lower)),
-        "control_flow_depth": len(re.findall(r"\b(?:if|else|switch|for|while|branch|diverg|条件|分支|循环)\b", lower)),
+        "num_constraints": len(_C_EN.findall(lower)) + len(_C_ZH.findall(text)),
+        "dependency_depth": len(_D_EN.findall(lower)) + len(_D_ZH.findall(text)),
+        "control_flow_depth": len(_F_EN.findall(lower)) + len(_F_ZH.findall(text)),
         "memory_scope_count": len({x for x in ("thread", "warp", "block", "cluster", "device", "stream", "host") if x in lower}),
         "architecture_specificity": len({x for x in ("ampere", "hopper", "blackwell", "sm80", "sm90", "sm100", "a100", "h100", "b200") if x in lower}),
         "code_size": len(blocks[0]) if blocks else 0,
@@ -375,6 +391,34 @@ def _runtime_oracle(spec: VerificationSpec, cfg: dict[str, Any]) -> dict[str, An
         if temp: temp.cleanup()
 
 
+def solver_call_params(difficulty: int, cfg: dict) -> dict:
+    """Choose solver effort and a bounded output budget from difficulty."""
+    level = cfg.get("solver_thinking_level_hard", "medium") if int(difficulty) >= 3 else cfg.get("solver_thinking_level", "low")
+    return {"thinking_level": str(level), "max_tokens": min(int(cfg.get("solver_max_tokens", 3072)), 4096)}
+
+
+def _independent_responses(count: int, call: Any, cfg: dict[str, Any]) -> list[Any]:
+    """Run independent solver samples concurrently while preserving vote order."""
+    if not bool(cfg.get("verification_parallel_enabled", False)) or count == 1:
+        results = []
+        for _ in range(count):
+            try:
+                results.append(call())
+            except Exception as exc:  # noqa: BLE001
+                results.append(exc)
+        return results
+    workers = max(1, min(count, int(cfg.get("verification_parallel_workers", count))))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="solver-vote") as executor:
+        futures = [executor.submit(copy_context().run, call) for _ in range(count)]
+        results = []
+        for future in futures:
+            try:
+                results.append(future.result())
+            except Exception as exc:  # noqa: BLE001
+                results.append(exc)
+        return results
+
+
 def _blind_votes(q: Question, reviewer: Any, spec: VerificationSpec, cfg: dict[str, Any]) -> dict[str, Any]:
     high_risk = spec.mode in {"scalar", "symbolic"}
     configured = cfg.get("answer_consistency_high_risk_k" if high_risk else "answer_consistency_k")
@@ -383,7 +427,8 @@ def _blind_votes(q: Question, reviewer: Any, spec: VerificationSpec, cfg: dict[s
     k = max(3, min(int(configured), 5, budget))
     if budget < 3:
         return {"status": "pending", "reason": "verification_llm_budget_too_small", "budget": budget}
-    system = ("Solve this CUDA question independently. Return JSON only with answer and evidence. "
+    system = ("Solve this CUDA question independently. Return exactly one JSON object "
+              "with string fields answer and evidence, e.g. {\"answer\":\"1\",\"evidence\":\"reason\"}. "
               "Do not infer or request a writer answer. Put the final result only in answer; "
               "put the justification in evidence. For a single numeric question return only "
               "the number or reduced fraction, in the units requested by the question, "
@@ -391,15 +436,18 @@ def _blind_votes(q: Question, reviewer: Any, spec: VerificationSpec, cfg: dict[s
               "Do not invent missing premises or reduce a multi-part problem to one value.")
     # Deliberately excludes target, spec, rubric, parents, and provenance.
     public = {"question": q.question}
+    def solve() -> dict[str, Any]:
+        return reviewer.complete_json([{"role": "system", "content": system},
+                                       {"role": "user", "content": json.dumps(public, ensure_ascii=False)}],
+                                      retries=0, temperature=0.2,
+                                      **solver_call_params(q.difficulty, cfg),
+                                      priority=int(cfg.get("priority", cfg.get("verification_priority", PRI_CHAIR))))
+
     votes, proofs, errors = [], [], []
-    for _ in range(k):
+    for obj in _independent_responses(k, solve, cfg):
         try:
-            obj = reviewer.complete_json([{"role": "system", "content": system},
-                                          {"role": "user", "content": json.dumps(public, ensure_ascii=False)}],
-                                         retries=0, temperature=0.2,
-                                         thinking_level=str(cfg.get("solver_thinking_level", "none")),
-                                         max_tokens=min(int(cfg.get("solver_max_tokens", 768)), 1024),
-                                         priority=int(cfg.get("priority", cfg.get("verification_priority", PRI_CHAIR))))
+            if isinstance(obj, Exception):
+                raise obj
             proof = str(obj.get("evidence") or "").strip()
             if obj.get("answer") is None or not proof: raise ValueError("incomplete_vote")
             votes.append(_canonical(obj["answer"], spec.answer_type, spec.mode)); proofs.append(proof[:400])
@@ -427,16 +475,22 @@ def _open_rip(q: Question, reviewer: Any, spec: VerificationSpec, cfg: dict[str,
     budget = max(1, int(cfg.get("verification_max_calls", cfg.get("verification_max_llm_calls", 6))))
     if budget < 4:
         return {"status": "pending", "reason": "verification_llm_budget_too_small", "budget": budget}
+    if len([row for row in (spec.rubric or []) if str(row).strip()]) < 2:
+        return {"status": "pending", "reason": "rubric_too_small"}
     public = {"question": q.question}
+    def solve() -> dict[str, Any]:
+        return reviewer.complete_json([{"role": "system", "content":
+                                       'Answer the CUDA question independently. Return only {"response":"your answer"} as valid JSON.'},
+                                       {"role": "user", "content": json.dumps(public, ensure_ascii=False)}],
+                                      retries=0, temperature=.3,
+                                      **solver_call_params(q.difficulty, cfg),
+                                      priority=int(cfg.get("priority", cfg.get("verification_priority", PRI_CHAIR))))
+
     responses, errors = [], []
-    for _ in range(3):
+    for obj in _independent_responses(3, solve, cfg):
         try:
-            obj = reviewer.complete_json([{"role": "system", "content": "Answer independently. JSON only: response."},
-                                          {"role": "user", "content": json.dumps(public, ensure_ascii=False)}],
-                                         retries=0, temperature=.3,
-                                         thinking_level=str(cfg.get("solver_thinking_level", "none")),
-                                         max_tokens=min(int(cfg.get("solver_max_tokens", 768)), 1024),
-                                         priority=int(cfg.get("priority", cfg.get("verification_priority", PRI_CHAIR))))
+            if isinstance(obj, Exception):
+                raise obj
             response = str(obj.get("response") or "").strip()
             if not response: raise ValueError("empty_response")
             responses.append(response)
@@ -445,11 +499,14 @@ def _open_rip(q: Question, reviewer: Any, spec: VerificationSpec, cfg: dict[str,
         return {"status": "pending", "reason": "incomplete_open_responses", "errors": errors}
     payload = {**public, "rubric": spec.rubric, "responses": responses}
     try:
-        obj = reviewer.complete_json([{"role": "system", "content": "Score each response 0..1 against rubric. JSON scores[{score,evidence}], exactly 3."},
+        obj = reviewer.complete_json([{"role": "system", "content":
+                                      'Score each response from 0 to 1 against the rubric. Return only valid JSON: '
+                                      '{"scores":[{"score":0.5,"evidence":"reason"},'
+                                      '{"score":0.5,"evidence":"reason"},{"score":0.5,"evidence":"reason"}]}.'},
                                       {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
                                      retries=0, temperature=0,
-                                     thinking_level=str(cfg.get("solver_thinking_level", "none")),
-                                     max_tokens=min(int(cfg.get("solver_max_tokens", 768)), 1024),
+                                     thinking_level=str(cfg.get("thinking_level", "medium")),
+                                     max_tokens=min(int(cfg.get("solver_max_tokens", 3072)), 2048),
                                      priority=int(cfg.get("priority", cfg.get("verification_priority", PRI_CHAIR))))
         rows = obj.get("scores")
         if not isinstance(rows, list) or len(rows) != 3: raise ValueError("invalid_scores")
@@ -468,23 +525,34 @@ def _open_rip(q: Question, reviewer: Any, spec: VerificationSpec, cfg: dict[str,
 def evaluate_candidate(q: Question, reviewer: Any, settings: Any) -> dict[str, Any]:
     """Evaluate one candidate within K+1 LLM calls and bounded tool time."""
     cfg = _cfg(settings)
+    shape_check = check_cute_shapes(q)
+    shape_evidence = {"cute_shapes": shape_check} if shape_check["status"] == "pass" else {}
+    if shape_check["status"] == "contradiction":
+        return {"status": "fail", "reason": "cute_shape_contradiction",
+                "evidence": {"cute_shapes": shape_check}}
+    if shape_check["status"] == "unsupported":
+        return {"status": "pending", "reason": "cute_shape_unsupported",
+                "evidence": {"cute_shapes": shape_check}}
     enabled = bool(cfg.get("verification_enabled", cfg.get("answer_consistency_enabled", False)))
-    if not enabled: return {"status": "disabled", "reason": "verification_feature_disabled", "evidence": {}}
+    if not enabled:
+        return {"status": "disabled", "reason": "verification_feature_disabled", "evidence": shape_evidence}
     if isinstance(reviewer, FakeLLM):
-        return {"status": "disabled", "reason": "synthetic_reviewer", "evidence": {"synthetic": True}}
+        return {"status": "disabled", "reason": "synthetic_reviewer",
+                "evidence": {"synthetic": True, **shape_evidence}}
     # Legacy candidates have no structured contract and must not add LLM calls.
     if not q.verification_spec and not q.draft_plan:
-        return {"status": "disabled", "reason": "legacy_unstructured_candidate", "evidence": {}}
+        return {"status": "disabled", "reason": "legacy_unstructured_candidate", "evidence": shape_evidence}
     if q.draft_validation_errors:
         return {"status": "pending", "reason": "draft_validation_errors",
-                "evidence": {"errors": list(q.draft_validation_errors)}}
+                "evidence": {"errors": list(q.draft_validation_errors), **shape_evidence}}
     try: spec = VerificationSpec.model_validate(q.verification_spec)
     except Exception as exc:
-        return {"status": "pending", "reason": f"invalid_verification_spec:{type(exc).__name__}", "evidence": {}}
+        return {"status": "pending", "reason": f"invalid_verification_spec:{type(exc).__name__}",
+                "evidence": shape_evidence}
     if spec.mode in {"compile", "runtime"} and not bool(cfg.get("execution_enabled", cfg.get("verification_execution_enabled", True))):
         # Disabling the runner cannot certify a question that explicitly
         # requires execution; it must remain queued for a capable environment.
-        return {"status": "pending", "reason": "verification_execution_disabled", "evidence": {}}
+        return {"status": "pending", "reason": "verification_execution_disabled", "evidence": shape_evidence}
     try:
         if spec.mode in {"scalar", "symbolic"}: result = _blind_votes(q, reviewer, spec, cfg)
         elif spec.mode == "open": result = _open_rip(q, reviewer, spec, cfg)
@@ -492,6 +560,7 @@ def evaluate_candidate(q: Question, reviewer: Any, settings: Any) -> dict[str, A
         else: result = _runtime_oracle(spec, cfg)
     except Exception as exc:
         result = {"status": "pending", "reason": f"verifier_error:{type(exc).__name__}"}
+    result.update(shape_evidence)
     status, reason = result.pop("status", "pending"), result.pop("reason", "inconclusive")
     return {"status": status, "reason": reason, "evidence": result}
 

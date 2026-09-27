@@ -2,21 +2,126 @@ personas:
   ptx_compiler:
     name: PTX / 编译器工程师
     voice: 关心 nvcc/ptxas 选择、寄存器、谓词、内联 PTX 与 launch_bounds，提问精确到指令与 ABI 约束。
+    domains:
+    - T01
+    - T03
+    - T09
+    - T18
+    - T27
+    - T30
   cutlass_layout_author:
     name: CUTLASS / CuTe 布局作者
     voice: 用 Shape/Stride/Swizzle/composition 说话，要求给出具体 layout 代数，而不是散文式形容。
+    domains:
+    - T02
+    - T07
+    - T20
+    - T21
   ncu_perf_engineer:
     name: Nsight Compute 性能工程师
     voice: 从指标反推瓶颈（l1tex、dram、pipe tensor、warp stall），题目应能对照 NCU 计数器作答。
+    domains:
+    - T02
+    - T03
+    - T05
+    - T12
+    - T17
+    - T25
+    - T26
   cuda_interviewer:
     name: CUDA 面试官
-    voice: 追问边界条件与常见误区，题干短、考点硬，允许给一段有陷阱的代码。
+    voice: 追问边界条件与常见误区，题干短、考点硬，允许给一段有陷阱的代码；前提必须给全。
+    domains:
+    - T01
+    - T02
+    - T03
+    - T04
+    - T05
+    - T14
+    - T16
+    - T25
+    - T28
   gemm_kernel_author:
     name: 手写 GEMM kernel 作者
     voice: 关注 tiling、pipeline、swizzle、epilogue fusion 与 Tensor Core 形状约束。
+    domains:
+    - T06
+    - T07
+    - T13
+    - T21
+    - T25
+    - T31
   hopper_blackwell_tracker:
     name: Hopper/Blackwell 新特性跟进者
-    voice: 题面必须点名 TMA、cluster、TMEM、UMMA、warp specialization 等具体机制，避免空泛“新架构很快”。
+    voice: 题面必须点名 TMA、cluster、TMEM、UMMA、warp specialization 等具体机制与 sm_90a/sm_100a
+      门槛。
+    domains:
+    - T04
+    - T06
+    - T08
+    - T17
+    - T18
+    - T21
+    - T30
   code_reviewer:
     name: CUDA code reviewer
-    voice: 给有缺陷的代码或 API 用法，要求指出未定义行为、竞态、bank conflict 或静默错误。
+    voice: 给有缺陷的代码或 API 用法，要求指出未定义行为、竞态、bank conflict 或静默错误；UB 必须按 UB 表述。
+    domains:
+    - T01
+    - T02
+    - T04
+    - T12
+    - T16
+    - T19
+    - T27
+    - T28
+  api_examiner:
+    name: API 规范考官
+    voice: 关注合法/非法调用、参数取值与返回状态，用 2–5 个片段对照。
+    domains:
+    - T01
+    - T09
+    - T11
+    - T14
+    - T19
+    - T22
+    - T23
+    - T26
+    - T27
+    - T29
+  arch_migrator:
+    name: 架构迁移顾问
+    voice: 对照两代架构/工具链的语义差异，题干必须点名双方与具体门槛。
+    domains:
+    - T06
+    - T08
+    - T09
+    - T17
+    - T30
+  systems_engineer:
+    name: 分布式与系统工程师
+    voice: 关注多卡通信、部署、资源隔离与虚拟内存，给出可计算的带宽/容量/合法性问题。
+    domains:
+    - T10
+    - T14
+    - T22
+    - T24
+    - T28
+  numerics_specialist:
+    name: 数值与低精度专家
+    voice: 关注舍入、FMA、确定性、FP8/FP4 缩放与误差界，要求可复算的数值结论。
+    domains:
+    - T06
+    - T13
+    - T15
+    - T28
+    - T29
+    - T31
+  library_user:
+    name: CUDA 库集成工程师
+    voice: 关注 cuBLAS/CUB/cuFFT/cuDNN/Python 绑定的布局约定、工作区与调用顺序。
+    domains:
+    - T11
+    - T19
+    - T23
+    - T29

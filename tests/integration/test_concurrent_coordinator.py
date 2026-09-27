@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import importlib
 import threading
+import time
 
-from cuda_sft_qgen.graph.app import run_pipeline
+import pytest
+
 from cuda_sft_qgen.graph.nodes.generate import GenerateOutcome, apply_outcome
 from cuda_sft_qgen.runtime import reset_runtime, set_runtime
+
+REAL_ORIGIN = {"writer_real_api": True, "writer_provider": "openai", "writer_model": "test-model"}
 
 
 def configure(runtime):
@@ -19,44 +23,69 @@ def configure(runtime):
     runtime.settings.generation["concurrent_pipeline"] = True
 
 
-def test_due_retry_runs_after_new_generation_iteration_limit(fake_runtime, sample_brief):
-    configure(fake_runtime)
-    fake_runtime.settings.max_iterations = 0
-    fake_runtime.store.enqueue_retry({"brief": sample_brief().model_dump(),
-                                     "attempts": 1, "reason": "429", "next_ok_at": 0})
-    result = run_pipeline(fake_runtime.settings, runtime=fake_runtime)
-    assert result["accepted_count"] == 1
-    assert fake_runtime.store.due_retry_count() == 0
-
-
-def test_unfinished_generation_restores_after_iteration_limit(fake_runtime, sample_brief):
-    configure(fake_runtime)
-    fake_runtime.settings.max_iterations = 0
-    brief = sample_brief().model_dump()
-    task_id = fake_runtime.store.save_generation_task(brief)
-    result = run_pipeline(fake_runtime.settings, runtime=fake_runtime)
-    assert result["accepted_count"] == 1
-    assert fake_runtime.store.load_accepted()[0].id == "q_" + task_id
-    assert fake_runtime.store.unfinished_generation_tasks() == []
-
-
-def test_exhausted_review_does_not_consume_active_queue(fake_runtime, sample_question):
-    configure(fake_runtime)
-    fake_runtime.settings.max_iterations = 2
-    fake_runtime.store.save_pending([sample_question(id="exhausted", review_exhausted=True)])
-    result = run_pipeline(fake_runtime.settings, runtime=fake_runtime)
-    assert result["accepted_count"] == 1
-    assert [q.id for q in fake_runtime.store.load_pending()] == ["exhausted"]
-
-
 def test_total_pending_bound_stops_new_generation(fake_runtime, sample_question):
+    from cuda_sft_qgen.graph.app import initial_state
+    from cuda_sft_qgen.graph.pipeline import run_concurrent
+
     configure(fake_runtime)
     fake_runtime.settings.max_iterations = 5
-    fake_runtime.store.save_pending([sample_question(id=f"exhausted{i}", review_exhausted=True) for i in range(2)])
-    result = run_pipeline(fake_runtime.settings, runtime=fake_runtime)
+    fake_runtime.store.save_pending([sample_question(id=f"exhausted{i}", review_exhausted=True,
+                                                     generation_provenance=REAL_ORIGIN) for i in range(2)])
+    token = set_runtime(fake_runtime)
+    try:
+        result = run_concurrent(fake_runtime, initial_state())
+    finally:
+        reset_runtime(token)
     assert result["status"] == "review_pending"
     assert result["iteration"] == 0
     assert fake_runtime.store.unfinished_generation_tasks() == []
+
+
+def test_unverified_pending_does_not_block_real_writer_slot(fake_runtime, sample_question, monkeypatch):
+    from cuda_sft_qgen.graph import pipeline
+    from cuda_sft_qgen.graph.app import initial_state
+
+    configure(fake_runtime)
+    fake_runtime.settings.max_iterations = 1
+    fake_runtime.settings.review.update(queue_capacity=1, max_pending_total=1)
+    fake_runtime.store.save_pending([sample_question(id="legacy-no-origin")])
+    started = threading.Event()
+    monkeypatch.setattr(pipeline, "generate_batch_node", lambda state: (started.set() or {"salvage_items": []}))
+    token = set_runtime(fake_runtime)
+    try:
+        pipeline.run_concurrent(fake_runtime, initial_state())
+    finally:
+        reset_runtime(token)
+    assert started.is_set()
+
+
+def test_pending_covering_target_does_not_consume_planner_iterations(
+    fake_runtime, sample_question, monkeypatch
+):
+    from cuda_sft_qgen.graph import pipeline
+    from cuda_sft_qgen.graph.app import initial_state
+
+    configure(fake_runtime)
+    fake_runtime.settings.max_iterations = 3
+    fake_runtime.store.save_pending([
+        sample_question(id="awaiting-review", generation_provenance=REAL_ORIGIN)
+    ])
+
+    def review(_state):
+        time.sleep(0.4)
+        raise RuntimeError("review probe finished")
+
+    monkeypatch.setattr(pipeline, "_review_stage", review)
+    monkeypatch.setattr(pipeline, "planner_node", lambda _state: pytest.fail(
+        "planner ran while pending questions covered the target"
+    ))
+    token = set_runtime(fake_runtime)
+    try:
+        with pytest.raises(RuntimeError, match="review probe finished"):
+            pipeline.run_concurrent(fake_runtime, initial_state())
+    finally:
+        reset_runtime(token)
+    assert fake_runtime.store.load_run_state().get("iteration", 0) == 0
 
 
 def test_salvage_task_remains_recoverable_until_durable_outcome(fake_runtime, sample_brief, sample_question):
@@ -79,17 +108,19 @@ def test_salvage_task_remains_recoverable_until_durable_outcome(fake_runtime, sa
 
 def test_review_starts_before_writer_batch_finishes(fake_runtime, sample_question, monkeypatch):
     from cuda_sft_qgen.graph import pipeline
+    from cuda_sft_qgen.graph.app import initial_state
 
     configure(fake_runtime)
-    fake_runtime.settings.review_batch_size = 8
-    fake_runtime.settings.review["chair_max_workers"] = 1
+    fake_runtime.settings.review_batch_size = 20
+    fake_runtime.settings.writer_concurrency = 4
+    fake_runtime.settings.review["chair_max_workers"] = 4
     fake_runtime.settings.max_iterations = 1
     reviewed = threading.Event()
     generated = threading.Event()
     real_review_score = pipeline.review_score_node
 
     def generate(state):
-        fake_runtime.store.save_pending([sample_question(id="overlap")])
+        fake_runtime.store.save_pending([sample_question(id="overlap", generation_provenance=REAL_ORIGIN)])
         assert reviewed.wait(5), "review waited for the whole writer batch"
         generated.set()
         return {"salvage_items": []}
@@ -101,9 +132,154 @@ def test_review_starts_before_writer_batch_finishes(fake_runtime, sample_questio
 
     monkeypatch.setattr(pipeline, "generate_batch_node", generate)
     monkeypatch.setattr(pipeline, "review_score_node", score)
-    result = run_pipeline(fake_runtime.settings, runtime=fake_runtime)
+    token = set_runtime(fake_runtime)
+    try:
+        result = pipeline.run_concurrent(fake_runtime, initial_state())
+    finally:
+        reset_runtime(token)
     assert reviewed.is_set() and generated.is_set()
-    assert result["accepted_count"] == 1
+    assert result["iteration"] == 1
+
+
+def test_next_writer_wave_starts_during_review(fake_runtime, sample_question, monkeypatch):
+    from cuda_sft_qgen.graph import pipeline
+    from cuda_sft_qgen.graph.app import initial_state
+
+    configure(fake_runtime)
+    fake_runtime.settings.target_question_count = 10
+    fake_runtime.settings.max_iterations = 2
+    fake_runtime.settings.review_batch_size = 20
+    fake_runtime.settings.review["chair_max_workers"] = 4
+    fake_runtime.settings.writer_concurrency = 4
+    review_started = threading.Event()
+    second_wave = threading.Event()
+    calls = 0
+    real_review = pipeline._review_stage
+
+    def generate(state):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            fake_runtime.store.save_pending([sample_question(id="first-wave", generation_provenance=REAL_ORIGIN)])
+            assert review_started.wait(5)
+        else:
+            second_wave.set()
+        return {"salvage_items": []}
+
+    def review(state):
+        review_started.set()
+        assert second_wave.wait(5), "next Writer wave waited for Chair"
+        return real_review(state)
+
+    monkeypatch.setattr(pipeline, "generate_batch_node", generate)
+    monkeypatch.setattr(pipeline, "_review_stage", review)
+    token = set_runtime(fake_runtime)
+    try:
+        pipeline.run_concurrent(fake_runtime, initial_state())
+    finally:
+        reset_runtime(token)
+    assert calls == 2 and second_wave.is_set()
+
+
+def test_repair_starts_before_writer_batch_finishes(fake_runtime, monkeypatch):
+    from cuda_sft_qgen.graph import pipeline
+    from cuda_sft_qgen.graph.app import initial_state
+
+    configure(fake_runtime)
+    fake_runtime.settings.max_iterations = 1
+    repair_started = threading.Event()
+    generation_done = threading.Event()
+
+    def generate(state):
+        state["_repair_queue"].put({"kind": "salvage", "payload": {"brief": {}, "raw": ""}})
+        assert repair_started.wait(5), "repair waited for the Writer batch"
+        generation_done.set()
+        return {"salvage_items": []}
+
+    def repair(items):
+        assert not generation_done.is_set()
+        assert len(items) == 1
+        repair_started.set()
+        return {"status": "repaired"}
+
+    monkeypatch.setattr(pipeline, "generate_batch_node", generate)
+    monkeypatch.setattr(pipeline, "repair_batch_node", repair)
+    token = set_runtime(fake_runtime)
+    try:
+        pipeline.run_concurrent(fake_runtime, initial_state())
+    finally:
+        reset_runtime(token)
+    assert repair_started.is_set() and generation_done.is_set()
+
+
+def test_inflight_repair_reserves_pending_capacity(fake_runtime, sample_question, monkeypatch):
+    from cuda_sft_qgen.graph import pipeline
+    from cuda_sft_qgen.graph.app import initial_state
+
+    configure(fake_runtime)
+    fake_runtime.settings.max_iterations = 2
+    fake_runtime.settings.review.update(queue_capacity=1, max_pending_total=1)
+    calls = 0
+
+    def generate(state):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            pytest.fail("Writer was scheduled while repair held the only pending slot")
+        state["_repair_queue"].put({"kind": "salvage", "payload": {
+            "brief": state["batch_briefs"][0], "raw": "broken",
+        }})
+        return {"salvage_items": []}
+
+    def repair(_items):
+        time.sleep(0.4)
+        assert calls == 1
+        fake_runtime.store.save_pending([sample_question(id="repaired", generation_provenance=REAL_ORIGIN)])
+        return {"status": "repaired"}
+
+    monkeypatch.setattr(pipeline, "generate_batch_node", generate)
+    monkeypatch.setattr(pipeline, "repair_batch_node", repair)
+    token = set_runtime(fake_runtime)
+    try:
+        pipeline.run_concurrent(fake_runtime, initial_state())
+    finally:
+        reset_runtime(token)
+    assert calls == 1
+
+
+def test_durable_repair_waits_for_new_generation_reservations(fake_runtime, sample_brief, monkeypatch):
+    from cuda_sft_qgen.graph import pipeline
+    from cuda_sft_qgen.graph.app import initial_state
+
+    configure(fake_runtime)
+    fake_runtime.settings.target_question_count = 2
+    fake_runtime.settings.review_batch_size = 2
+    fake_runtime.settings.max_iterations = 1
+    fake_runtime.settings.review.update(queue_capacity=2, max_pending_total=2)
+    fake_runtime.store.enqueue_review_repair("old-reject", {
+        "brief": sample_brief().model_dump(), "source_id": "old-reject", "attempts": 1,
+    })
+    generation_finished = threading.Event()
+    repair_started = threading.Event()
+
+    def generate(_state):
+        time.sleep(0.5)
+        generation_finished.set()
+        return {"salvage_items": []}
+
+    def repair(_items):
+        assert generation_finished.is_set(), "Durable repair exceeded the pending capacity"
+        repair_started.set()
+        return {"status": "repaired"}
+
+    monkeypatch.setattr(pipeline, "generate_batch_node", generate)
+    monkeypatch.setattr(pipeline, "repair_batch_node", repair)
+    token = set_runtime(fake_runtime)
+    try:
+        pipeline.run_concurrent(fake_runtime, initial_state())
+    finally:
+        reset_runtime(token)
+    assert repair_started.is_set()
 
 
 def test_immediately_due_pending_review_is_bounded_by_attempt_limit(
@@ -121,7 +297,7 @@ def test_immediately_due_pending_review_is_bounded_by_attempt_limit(
     configure(fake_runtime)
     fake_runtime.settings.max_iterations = 0
     fake_runtime.settings.review.update(max_attempts=3, retry_base_seconds=0)
-    fake_runtime.store.save_pending([sample_question(id="always-pending")])
+    fake_runtime.store.save_pending([sample_question(id="always-pending", generation_provenance=REAL_ORIGIN)])
 
     def pending_decisions(items, max_workers=4):
         return {
@@ -139,7 +315,14 @@ def test_immediately_due_pending_review_is_bounded_by_attempt_limit(
 
     monkeypatch.setattr(chair, "_parallel_chair_decisions", pending_decisions)
 
-    result = run_pipeline(fake_runtime.settings, runtime=fake_runtime)
+    from cuda_sft_qgen.graph.app import initial_state
+    from cuda_sft_qgen.graph.pipeline import run_concurrent
+
+    token = set_runtime(fake_runtime)
+    try:
+        result = run_concurrent(fake_runtime, initial_state())
+    finally:
+        reset_runtime(token)
 
     pending = fake_runtime.store.load_pending()
     assert result["status"] == "review_pending"

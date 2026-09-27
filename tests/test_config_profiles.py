@@ -11,11 +11,11 @@ from cuda_sft_qgen.config_v2 import load_config_v2
 
 @pytest.fixture
 def isolated_config(tmp_path, monkeypatch):
-    """Clear NVIDIA/profile env vars so profile YAML is the only override."""
+    """Clear API/profile env vars so profile YAML is the only override."""
     root = config.find_project_root()
     monkeypatch.setattr(config, "load_dotenv", lambda *args, **kwargs: None)
     for key in tuple(os.environ):
-        if key.startswith(("NVIDIA_", "CUDA_SFT_", "KNOWLEDGE_")) or key in {
+        if key.startswith(("WRITER_", "EVOLVER_", "REVIEW_", "SALVAGE_", "EMBEDDING_", "CUDA_SFT_", "KNOWLEDGE_")) or key in {
             "REVIEW_MODEL", "REVIEW_BATCH_SIZE", "TEMPERATURE", "TOP_P", "WRITER_CONCURRENCY",
         }:
             monkeypatch.delenv(key)
@@ -55,7 +55,7 @@ def test_cli_environment_and_review_model_precedence(isolated_config, monkeypatc
 
 
 def test_secrets_hidden_and_knowledge_config_shared(isolated_config, monkeypatch):
-    monkeypatch.setenv("NVIDIA_API_KEY", "secret-for-test-only")
+    monkeypatch.setenv("WRITER_API_KEY", "secret-for-test-only")
     monkeypatch.setenv("KNOWLEDGE_AUDIT_BATCH_SIZE", "13")
     legacy = config.load_settings()
     typed = load_config_v2()

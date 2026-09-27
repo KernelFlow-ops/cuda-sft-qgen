@@ -9,6 +9,7 @@ This module does not score, chair, or generate questions.
 from __future__ import annotations
 
 import logging
+import uuid
 
 import numpy as np
 
@@ -19,6 +20,42 @@ from cuda_sft_qgen.observability import trace_node
 from cuda_sft_qgen.runtime import get_runtime
 
 logger = logging.getLogger(__name__)
+_REPAIRABLE_DEFECTS = frozenset({
+    "correctness", "answerability", "multiple_correct", "insufficient_premises",
+    "claim_alignment", "hardware", "leakage", "metadata", "ub_misstated", "invented_api",
+})
+
+
+def enqueue_review_repairs(rt, decisions: list[dict], steering: SteeringBrief) -> int:
+    """Queue one new Writer attempt for an API-authored, repairable Chair reject."""
+    cfg = rt.settings.generation
+    if rt.settings.fake_llm or not cfg.get("review_repair_enabled", True):
+        return 0
+    maximum = int(cfg.get("review_repair_max_attempts", 1))
+    queued = 0
+    for item in decisions:
+        if item["action"] != "reject":
+            continue
+        q = Question.model_validate(item["question"])
+        codes = set(q.defect_codes)
+        if (not codes or not codes.issubset(_REPAIRABLE_DEFECTS)
+                or not rt.store.has_real_writer_origin(q)):
+            continue
+        attempts = int(q.generation_provenance.get("review_repair_attempt") or 0)
+        if attempts >= maximum:
+            continue
+        original_task_id = str(q.generation_provenance.get("task_id") or "")
+        brief = rt.store.generation_task_payload(original_task_id) if original_task_id else None
+        if brief is None:
+            continue
+        brief = {**brief, "task_id": uuid.uuid4().hex}
+        created = rt.store.enqueue_review_repair(q.id, {
+            "brief": brief, "reason": str(item.get("reason") or "quality review")[:400],
+            "source_id": q.id, "attempts": attempts + 1,
+            "steering": steering.model_dump(),
+        })
+        queued += int(created)
+    return queued
 
 
 @trace_node("archive")
@@ -58,6 +95,8 @@ def archive_node(state: PipelineState) -> dict:
                      "review_rounds": int(state.get("review_rounds") or 0)}
         committed = rt.store.commit_review(decisions, steering, run_state)
         vectors = np.asarray(payload.get("vectors") or [], dtype=np.float32)
+        gist_vectors = np.asarray(payload.get("gist_vectors") or [], dtype=np.float32)
+        gist_index = getattr(rt, "gist_index", None)
         for item in decisions:
             if item["action"] != "accept":
                 continue
@@ -67,17 +106,26 @@ def archive_node(state: PipelineState) -> dict:
             row = item.get("vector_row")
             if row is not None and vectors.size and q.id not in rt.index.ids:
                 rt.index.add([q.id], vectors[[int(row)]])
+            if gist_index is not None and row is not None and gist_vectors.size and q.id not in gist_index.ids:
+                gist_index.add([q.id], gist_vectors[[int(row)]])
         # The transactional store is authoritative; derived index files can be rebuilt.
         try:
             if vectors.size:
                 rt.index.save(rt.settings.data_dir / "embeddings.npz")
+            if gist_index is not None:
+                gist_index.save(rt.settings.data_dir / "gist_embeddings.npz")
             cache = getattr(rt, "embedding_cache", None)
             if cache is not None:
                 cache.save()
         except Exception as exc:
             logger.warning("Committed review; derived index/cache save failed: %s", exc)
+        accepted_count = rt.store.status_counts()["verified_accepted"]
+        if accepted_count < int(state.get("target") or rt.settings.target_question_count):
+            enqueued = enqueue_review_repairs(rt, decisions, steering)
+            if enqueued:
+                logger.info("chair repair queued=%s", enqueued)
         rt.store.compute_stats()
-        accepted_count, rejected_count = committed["accepted_count"], committed["rejected_count"]
+        rejected_count = committed["rejected_count"]
         return {"pending": committed["pending"], "accepted_count": accepted_count,
                 "rejected_count": rejected_count,
                 "done": accepted_count >= int(state.get("target") or rt.settings.target_question_count),

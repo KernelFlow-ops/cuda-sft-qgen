@@ -1,5 +1,6 @@
 id: T06
 name: Tensor Core、MMA 与精度
+weight: 1.2
 children:
 - id: wmma_mma
   name: WMMA 与 MMA
@@ -75,6 +76,7 @@ children:
     - 2
     - 3
     kind: api
+  target_leaves: 12
 - id: wgmma
   name: WGMMA
   leaves:
@@ -149,6 +151,9 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  arch:
+  - sm_90a
+  target_leaves: 12
 - id: precision
   name: 混合精度
   leaves:
@@ -222,6 +227,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 12
 - id: mma_shapes
   name: MMA 形状表
   leaves:
@@ -293,6 +299,7 @@ children:
     - 2
     - 3
     kind: numeric
+  target_leaves: 12
 - id: sparse_tc
   name: 结构化稀疏 Tensor Core
   leaves:
@@ -363,6 +370,12 @@ children:
     difficulty:
     - 4
     kind: feature
+  arch:
+  - sm_80
+  - sm_86
+  - sm_89
+  - sm_90
+  target_leaves: 12
 - id: scale_fp8
   name: FP8/FP4 缩放
   leaves:
@@ -432,6 +445,12 @@ children:
     difficulty:
     - 4
     kind: feature
+  arch:
+  - sm_89
+  - sm_90
+  - sm_90a
+  - sm_100a
+  target_leaves: 12
 - id: ldmatrix
   name: ldmatrix / LDSM
   leaves:
@@ -502,6 +521,13 @@ children:
     - 3
     - 4
     kind: mechanism
+  arch:
+  - sm_75
+  - sm_80
+  - sm_86
+  - sm_89
+  - sm_90
+  target_leaves: 12
 - id: fragment_map
   name: Fragment 寄存器映射
   leaves:
@@ -573,6 +599,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 12
 - id: imma_int
   name: 整数 MMA / IMMA
   leaves:
@@ -643,6 +670,7 @@ children:
     difficulty:
     - 3
     kind: feature
+  target_leaves: 12
 - id: tc_flops
   name: Tensor Core 吞吐
   leaves:
@@ -714,6 +742,7 @@ children:
     - 2
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: mma_mods
   name: MMA 修饰符
   leaves:
@@ -784,6 +813,7 @@ children:
     - 3
     - 4
     kind: failure
+  target_leaves: 12
 - id: wgmma_group
   name: WGMMA 完成组
   leaves:
@@ -855,6 +885,9 @@ children:
     - 3
     - 4
     kind: api
+  arch:
+  - sm_90a
+  target_leaves: 12
 - id: acc_dtype
   name: 累加器精度路径
   leaves:
@@ -925,3 +958,11 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12
+- id: block_scaled_fp4
+  name: 块缩放低精度 NVFP4/MXFP4
+  arch:
+  - sm_100a
+  - sm_120
+  target_leaves: 12
+  leaves: []

@@ -10,6 +10,7 @@ from typing import Any, Iterable, Sequence
 from cuda_sft_qgen.models import Question, QuestionBrief
 
 _SEED_PATH = Path(__file__).parent / "fewshot_seed.jsonl"
+_NEG_SEED_PATH = Path(__file__).parent / "fewshot_negative.jsonl"
 from cuda_sft_qgen.review.fingerprint import hamming64, speech_act
 
 QUALITY_REJECT_PREFIXES = (
@@ -18,6 +19,8 @@ QUALITY_REJECT_PREFIXES = (
     "L1_",
     "L2_",
     "gray_chair",
+    "chair:",
+    "writer_",
 )
 
 TYPE_TO_ACT = {
@@ -47,6 +50,25 @@ def load_seed_questions() -> list[Question]:
             rec.setdefault("tests_claim", rec.get("l3_claim") or "seed")
             rec.setdefault("dup_verdict", "unique")
             rec.setdefault("warnings", [])
+            out.append(Question.model_validate(rec))
+        except Exception:
+            continue
+    return out
+
+
+def load_negative_seeds() -> list[Question]:
+    """Load annotated quality negatives shipped with the package."""
+    if not _NEG_SEED_PATH.is_file():
+        return []
+    out: list[Question] = []
+    for line in _NEG_SEED_PATH.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+            rec["reject_reason"] = f"chair:{str(rec.get('defect', 'seed')).split('+')[0]}:seed"
+            rec["review_details"] = {"evidence": [rec.get("why", "")]}
+            rec.setdefault("dup_verdict", "unique")
             out.append(Question.model_validate(rec))
         except Exception:
             continue
@@ -98,6 +120,7 @@ class FewshotCfg:
     negatives: int = 2
     anti_max: int = 15
     snippet_chars: int = 500
+    snippet_chars_code: int = 1200
     max_nn_cosine: float = 0.50
     nn_cosine_fallback: float = 0.80
     simhash_hamming_max: int = 20
@@ -111,6 +134,7 @@ class FewshotCfg:
             negatives=int(gen.get("fewshot_negatives", 2)),
             anti_max=int(gen.get("anti_templates_max", 15)),
             snippet_chars=int(gen.get("fewshot_snippet_chars", 500)),
+            snippet_chars_code=int(gen.get("fewshot_snippet_chars_code", 1200)),
             max_nn_cosine=float(gen.get("fewshot_max_nn_cosine", 0.50)),
             nn_cosine_fallback=float(gen.get("fewshot_nn_cosine_fallback", 0.80)),
             simhash_hamming_max=int(gen.get("fewshot_simhash_hamming_max", 20)),
@@ -149,7 +173,7 @@ class FewshotCorpus:
         skeletons = []
         if hasattr(store, "recent_rejected_skeletons"):
             skeletons = list(store.recent_rejected_skeletons(anti_k))
-        return cls(accepted=accepted, rejected_quality=rejected, anti_skeletons=skeletons)
+        return cls(accepted=accepted, rejected_quality=load_negative_seeds() + rejected, anti_skeletons=skeletons)
 
 
 def _cosine_rank(q: Question, prefer: float, fallback: float) -> tuple[int, float, int]:
@@ -197,84 +221,37 @@ def select_positives(
     *,
     seed_simhash: int | None = None,
 ) -> list[FewshotPick]:
-    """Pick accepted examples near the brief's leaf/L1 without near-duplicates of the seed."""
+    """Fill same-leaf, kind, format, then domain slots without seed copies."""
     accepted = [q for q in corpus.accepted if _unique_ok(q)]
     same_lang = [q for q in accepted if (q.language or "") == brief.language]
     if same_lang:
         accepted = same_lang
+    if seed_simhash is not None:
+        accepted = [q for q in accepted if hamming64(q.simhash, seed_simhash) > cfg.simhash_gray_hamming]
     used: set[str] = set()
     picks: list[FewshotPick] = []
     brief_l1 = brief.topic_path[0] if brief.topic_path else ""
-    kind = brief.kind or ""
 
-    def recency_first(items: Sequence[Question]) -> list[Question]:
-        return list(reversed(items))
+    def score(q: Question) -> float:
+        return sum(q.value_scores.values()) / len(q.value_scores) if q.value_scores else 3.0
 
-    # Start with a coherent seed bucket before widening to style examples.
-    same_bucket = [
-        q
-        for q in recency_first(accepted)
-        if q.l3_id == brief.l3_id
-        and q.question_type == brief.question_type
-        and (not kind or (q.kind or "mechanism") == kind)
-        and (q.hardware in {brief.hardware, "agnostic"} or brief.hardware == "agnostic")
-    ]
-    picks.extend(_take(same_bucket, 2, used, "S", "same seed bucket"))
+    def take(candidates: Iterable[Question], cap: int, slot: str, note: str) -> None:
+        room = min(cap, cfg.positives - len(picks))
+        if room > 0:
+            picks.extend(_take(candidates, room, used, slot, note))
 
-    same_type = [
-        q
-        for q in recency_first(accepted)
-        if q.question_type == brief.question_type
-        and q.l3_id != brief.l3_id
-        and (_l1(q) == brief_l1 or not brief_l1)
-        and (q.hardware in {brief.hardware, "agnostic"} or brief.hardware == "agnostic")
-    ]
-    if kind:
-        same_type.sort(
-            key=lambda q: (
-                0 if (q.kind or "mechanism") == kind else 1,
-                *_cosine_rank(q, cfg.max_nn_cosine, cfg.nn_cosine_fallback),
-            )
-        )
-    else:
-        same_type.sort(key=lambda q: _cosine_rank(q, cfg.max_nn_cosine, cfg.nn_cosine_fallback))
-    picks.extend(_take(same_type, 2, used, "A", "same question_type"))
-
-    same_l3 = [
-        q
-        for q in recency_first(accepted)
-        if q.l3_id == brief.l3_id
-        and q.question_type != brief.question_type
-        and (q.hardware in {brief.hardware, "agnostic"} or brief.hardware == "agnostic")
-    ]
-    picks.extend(_take(same_l3, 1, used, "B", "same l3, different type"))
-
-    same_diff_bloom = [
-        q
-        for q in recency_first(accepted)
-        if int(q.difficulty) == int(brief.difficulty)
-        and q.bloom == brief.bloom
-        and (_l1(q) == brief_l1 or not brief_l1)
-    ]
-    same_diff_bloom.sort(key=lambda q: _cosine_rank(q, cfg.max_nn_cosine, cfg.nn_cosine_fallback))
-    picks.extend(_take(same_diff_bloom, 1, used, "C", "same difficulty+bloom"))
-
-    anchor_hash = seed_simhash
-    if anchor_hash is None and picks:
-        anchor_hash = int(picks[0].question.simhash)
-    # Never use a different L1/domain as a positive seed.  An empty domain
-    # bucket is a normal cold-start condition; the writer receives no seed
-    # rather than an unrelated cross-domain mixture.
-    same_domain_fill = [
-        q for q in recency_first(accepted)
-        if (_l1(q) == brief_l1 or not brief_l1) and q.id not in used
-    ]
-    picks.extend(_take(same_domain_fill, 1, used, "D", "same domain bootstrap"))
-
-    if len(picks) < cfg.positives:
-        fill = [q for q in recency_first(accepted) if _l1(q) == brief_l1 or not brief_l1]
-        picks.extend(_take(fill, cfg.positives - len(picks), used, "F", "recency fill"))
-    return picks[: cfg.positives]
+    take((q for q in reversed(accepted) if q.l3_id == brief.l3_id), 1, "S",
+         "already exists on this leaf — do NOT paraphrase")
+    kind = brief.kind or "mechanism"
+    same_kind = [q for q in accepted if q.l3_id != brief.l3_id and (q.kind or "mechanism") == kind]
+    same_kind.sort(key=lambda q: (-score(q), _cosine_rank(q, cfg.max_nn_cosine, cfg.nn_cosine_fallback)))
+    take(same_kind, 2, "K", "same kind, different leaf: imitate rigor, not content")
+    same_format = [q for q in accepted if q.l3_id != brief.l3_id and q.answer_format
+                   and q.answer_format == brief.answer_format]
+    same_format.sort(key=lambda q: -score(q))
+    take(same_format, 1, "F", "same answer format: imitate option/blank structure")
+    take((q for q in reversed(accepted) if _l1(q) == brief_l1), cfg.positives, "D", "same domain")
+    return picks
 
 
 def select_negatives(
@@ -337,11 +314,11 @@ def format_positives(picks: Sequence[FewshotPick], cfg: FewshotCfg) -> str:
         lines.append(
             f"[POS slot={p.slot} type={q.question_type} kind={q.kind or 'mechanism'} "
             f"hardware={q.hardware} l3={q.l3_id} diff={q.difficulty} "
-            f"bloom={q.bloom} nn={nn_s}]"
+            f"bloom={q.bloom} format={q.answer_format or '-'} nn={nn_s}]"
         )
-        lines.append(_snippet(q.question, cfg.snippet_chars))
+        lines.append(_snippet(q.question, cfg.snippet_chars_code if "```" in q.question else cfg.snippet_chars))
         if p.note:
-            lines.append(f"Why this pattern: {p.note}.")
+            lines.append(f"Why this is good: {p.note}.")
         lines.append("")
     return "\n".join(lines).strip()
 
@@ -355,7 +332,10 @@ def format_negatives(picks: Sequence[FewshotPick], cfg: FewshotCfg) -> str:
         q = p.question
         reason = q.reject_reason or "unknown"
         lines.append(f"[NEG l3={q.l3_id} type={q.question_type} reason={reason}]")
-        lines.append(_snippet(q.question, cfg.snippet_chars))
+        lines.append(_snippet(q.question, cfg.snippet_chars_code if "```" in q.question else cfg.snippet_chars))
+        evidence = (q.review_details or {}).get("evidence") or []
+        if isinstance(evidence, list) and evidence:
+            lines.append("Reviewer finding: " + "; ".join(str(item)[:160] for item in evidence[:2]))
         lines.append(f"Do not repeat this failure mode ({reason}).")
         lines.append("")
     return "\n".join(lines).strip()

@@ -24,8 +24,8 @@ def test_review_model_reachable(real_runtime, eval_out):
     assert obj.get("ok") is True
     s = real_runtime.settings
     (eval_out / "smoke_review_model.json").write_text(json.dumps({
-        "writer_model": s.nvidia_model, "review_model": s.review_model,
-        "independent_review": s.review_model != s.nvidia_model}), encoding="utf-8")
+        "writer_model": s.llm_model, "review_model": s.review_model,
+        "independent_review": s.review_model != s.llm_model}), encoding="utf-8")
 
 
 def test_embeddings_consistent(real_runtime):

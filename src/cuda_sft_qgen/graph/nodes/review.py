@@ -13,6 +13,8 @@ from cuda_sft_qgen.graph.nodes.review_chair import (
     _enhanced_steering,
     _parallel_chair_decision,
     _parallel_chair_decisions,
+    _curate_select,
+    render_chair_prompt,
     review_chair_node,
 )
 from cuda_sft_qgen.graph.nodes.review_score import _question_fingerprint, review_score_node

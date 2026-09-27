@@ -46,6 +46,20 @@ def test_non_english_tests_claim_warns():
     assert "tests_claim_not_english" in q.warnings
 
 
+def test_full_topic_path_domain_is_canonicalized():
+    obj = _obj()
+    obj["draft_plan"]["seed_analysis"]["domain_id"] = "T02.smem.smem_bank_stride_gcd"
+    q = _q(obj)
+    assert q.draft_plan["seed_analysis"]["domain_id"] == "T02"
+    assert "seed_domain_mismatch" not in q.draft_validation_errors
+
+
+def test_different_seed_domain_remains_pending():
+    obj = _obj()
+    obj["draft_plan"]["seed_analysis"]["domain_id"] = "T08.tma.tma_encode"
+    assert "seed_domain_mismatch" in _q(obj).draft_validation_errors
+
+
 def test_brief_fields_copied():
     q = _q(_obj(), scenario="reduction", arch_target="sm_80", hardware="ampere", exploration=True)
     assert (q.scenario, q.arch_target, q.exploration) == ("reduction", "sm_80", True)

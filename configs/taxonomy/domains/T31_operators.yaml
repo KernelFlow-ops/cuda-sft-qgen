@@ -1,5 +1,6 @@
 id: T31
 name: 融合算子实现要点
+weight: 0.9
 children:
 - id: bias_act_fusion
   name: Bias+activation 融合
@@ -13,7 +14,7 @@ children:
     - 2
     - 3
     kind: mechanism
-
+  target_leaves: 12
 - id: embedding_gather
   name: Embedding gather
   leaves:
@@ -26,7 +27,7 @@ children:
     - 2
     - 3
     kind: mechanism
-
+  target_leaves: 12
 - id: layernorm_rms
   name: LayerNorm / RMSNorm
   leaves:
@@ -47,7 +48,7 @@ children:
     difficulty:
     - 3
     kind: numeric
-
+  target_leaves: 12
 - id: quantize_elem
   name: 量化
   leaves:
@@ -60,7 +61,7 @@ children:
     - 2
     - 3
     kind: formula
-
+  target_leaves: 12
 - id: rope
   name: RoPE
   leaves:
@@ -81,7 +82,7 @@ children:
     - 3
     - 4
     kind: failure
-
+  target_leaves: 12
 - id: silu_gelu_glu
   name: SiLU / GELU / GLU
   leaves:
@@ -103,7 +104,7 @@ children:
     - 2
     - 3
     kind: mechanism
-
+  target_leaves: 12
 - id: softmax_epilogue
   name: Softmax epilogue
   leaves:
@@ -124,7 +125,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
-
+  target_leaves: 12
 - id: transpose_permute
   name: Transpose / permute
   leaves:
@@ -136,4 +137,10 @@ children:
     difficulty:
     - 3
     kind: failure
-
+  target_leaves: 12
+- id: topk_sampling
+  name: Top-k/Top-p 采样与 argmax 核
+  arch:
+  - any
+  target_leaves: 10
+  leaves: []

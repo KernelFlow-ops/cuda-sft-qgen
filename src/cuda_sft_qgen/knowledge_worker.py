@@ -14,7 +14,8 @@ from typing import Any, Callable
 import httpx
 
 from cuda_sft_qgen.keys import PRI_TAXONOMY
-from cuda_sft_qgen.store.knowledge import KnowledgeStore, official_url
+from cuda_sft_qgen.knowledge.doc_index import DocIndex
+from cuda_sft_qgen.store.knowledge import KnowledgeStore, _norm_ws, official_url
 
 logger = logging.getLogger(__name__)
 DEFAULT_SOURCE = "https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html"
@@ -24,6 +25,14 @@ DEFAULT_INVENTORY_SOURCES = (
     ("release_notes", "https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html"),
     ("nsight", "https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html"),
 )
+_TITLE_END = re.compile(r"(要求|约束|机制|用法|区别|原理|规则|语义|配置|流程)\s*$")
+_ASSERT_MARK = re.compile(r"=|→|必须|不能|会|导致|等于|返回|\bmust\b|\bcannot\b|\breturns\b|\brequires\b|\bequals\b|\bis\s|\bare\s", re.I)
+
+
+def needs_refine(leaf: Any) -> bool:
+    """Identify legacy leaves that lack evidence hints or a testable claim."""
+    claim = str(getattr(leaf, "claim", "") or "")
+    return not getattr(leaf, "hints", None) or bool(_TITLE_END.search(claim)) or not bool(_ASSERT_MARK.search(claim))
 
 
 class _DocumentText(HTMLParser):
@@ -148,9 +157,15 @@ class KnowledgeWorker:
         self.archive = archive
         self.fetcher = official_fetcher or fetch_official_document
         self.config = getattr(settings, "knowledge_cfg", None) or ((getattr(settings, "default_yaml", {}) or {}).get("knowledge") or {})
+        raw_dir = Path(str(self.config.get("docs_dir") or "data/docs"))
+        root = Path(getattr(settings, "root", None) or Path.cwd())
+        docs_dir = raw_dir if raw_dir.is_absolute() else root / raw_dir
+        self.doc_index = DocIndex.from_dir(docs_dir) if docs_dir.is_dir() else DocIndex([])
+        self._retrieved_local = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_schedule = time.monotonic()
+        self._jobs_run = 0
         self._documents: dict[str, tuple[float, str]] = {}
         self._taxonomy_index = None
         self._taxonomy_signature: tuple = ()
@@ -159,26 +174,44 @@ class KnowledgeWorker:
         """Start the daemon poll loop if it is not already running."""
         if self._thread is not None and self._thread.is_alive():
             return
+        if self._jobs_run >= max(0, int(self.config.get("worker_max_jobs_per_run", 20))):
+            return
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="knowledge-audit", daemon=True)
         self._thread.start()
 
-    def stop(self, timeout: float = 1.0) -> None:
-        """Signal the loop to exit and join the worker thread."""
+    def stop(self, timeout: float | None = None) -> None:
+        """Signal shutdown and wait for an active job to finish by default."""
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=max(0, timeout))
+            self._thread.join(timeout=None if timeout is None else max(0, timeout))
 
     close = stop
 
     def _loop(self) -> None:
-        while not self._stop.is_set():
+        max_jobs = max(0, int(self.config.get("worker_max_jobs_per_run", 20)))
+        while not self._stop.is_set() and self._jobs_run < max_jobs:
             try:
                 if time.monotonic() - self._last_schedule >= 60:
+                    if self._stop.is_set():
+                        break
                     self.store.enqueue_daily_audits(int(self.config.get("audit_batch_size", 100)), interval_seconds=float(self.config.get("audit_interval_seconds", 86400)))
+                    if self._stop.is_set():
+                        break
+                    self.store.schedule_legacy_backlog(
+                        batch_per_l2=int(self.config.get("legacy_batch_per_l2", 20)),
+                        due_days=float(self.config.get("legacy_due_days", 14)),
+                    )
+                    if self._stop.is_set():
+                        break
                     self.enqueue_external_inventory()
                     self._last_schedule = time.monotonic()
+                if self._stop.is_set():
+                    break
                 if self.run_once():
+                    self._jobs_run += 1
+                    if self._jobs_run >= max_jobs:
+                        break
                     self._stop.wait(max(0.1, float(self.config.get("worker_poll_seconds", 5))))
                     continue
             except Exception:
@@ -435,6 +468,8 @@ class KnowledgeWorker:
 
     def run_once(self) -> bool:
         """Lease and execute one job. Returns True if a job ran."""
+        if self._stop.is_set():
+            return False
         self.deliver_impacts()
         pool = getattr(self.llm, "pool", None)
         busy = getattr(pool, "llm_busy_for_taxonomy", None)
@@ -445,38 +480,193 @@ class KnowledgeWorker:
             busy_value = busy()
             if isinstance(busy_value, bool) and busy_value:
                 return False
+        if self._stop.is_set():
+            return False
         job = self.store.take_job()
         if job is None:
             return False
         try:
-            if job["kind"] == "audit":
-                self._audit(job["payload"])
-            elif job["kind"] == "external_inventory":
-                self.external_inventory_once(
-                    force=bool(job["payload"].get("force")), apply=True
-                )
-            elif job["kind"] in {"expand", "expand_pack"}:
-                self._expand(job["payload"])
-            elif job["kind"] == "relate":
-                self._relate(job["payload"])
-            else:
-                raise ValueError(f"unknown knowledge job: {job['kind']}")
+            from cuda_sft_qgen.observability import agent_role
+
+            with agent_role("knowledge"):
+                if job["kind"] == "audit":
+                    self._audit(job["payload"])
+                elif job["kind"] == "compute_verify":
+                    self._compute_verify(job["payload"])
+                elif job["kind"] == "external_inventory":
+                    self.external_inventory_once(
+                        force=bool(job["payload"].get("force")), apply=True
+                    )
+                elif job["kind"] in {"expand", "expand_pack"}:
+                    self._expand(job["payload"])
+                elif job["kind"] == "relate":
+                    self._relate(job["payload"])
+                else:
+                    raise ValueError(f"unknown knowledge job: {job['kind']}")
             self.store.finish_job(job["id"])
         except Exception as exc:
             logger.warning("knowledge job %s failed: %s", job["id"], exc)
             self.store.finish_job(job["id"], error=str(exc)[:1000])
         return True
 
-    def _audit(self, payload: dict) -> None:
+    def _complete_json(self, *args, **kwargs):
+        from cuda_sft_qgen.observability import agent_role
+
+        with agent_role("knowledge"):
+            return self.llm.complete_json(*args, **kwargs)
+
+    def _compute_verify(self, payload: dict) -> None:
+        """Extract and deterministically check one formula or numeric claim."""
         claim = self.store.get_claim(payload["claim_id"])
-        if claim is None or claim["revision"] != payload["revision"] or claim["status"] in {"retired", "quarantined"}:
+        if (claim is None or claim["revision"] != payload["revision"]
+                or claim["status"] in {"retired", "quarantined"}):
             return
+        if claim.get("kind") not in {"formula", "numeric"}:
+            raise ValueError("computation path only for formula/numeric")
+
+        from cuda_sft_qgen import hardware_facts
+        from cuda_sft_qgen.prompts import load_prompt
+
+        facts_path = getattr(self.settings, "hardware_facts_path", None)
+        if facts_path is None:
+            root = Path(getattr(self.settings, "root", None) or Path.cwd())
+            facts_path = root / "configs" / "hardware_facts.yaml"
+        facts_text = hardware_facts.render_all_verified(hardware_facts.load(str(facts_path)))
+        verified_claims = [
+            str(item.get("claim") or "")
+            for item in self.store.list_claims("verified")
+            if item.get("l2_id") == claim.get("l2_id") and item.get("id") != claim["id"]
+        ][:20]
+        user = {
+            "claim": claim["claim"],
+            "kind": claim["kind"],
+            "hardware_facts": facts_text,
+            "verified_claims": verified_claims,
+        }
+        obj = self._complete_json([
+            {"role": "system", "content": load_prompt("compute_extract")},
+            {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
+        ], retries=1, priority=PRI_TAXONOMY)
+
+        expression = str(obj.get("expression") or "").strip()
+        trace = str(obj.get("trace") or "")
+        if not expression:
+            self.store.record_insufficient_audit(
+                claim["id"], claim["revision"], reason=trace or "not_computable",
+            )
+            return
+
+        trusted_sources = [_norm_ws(facts_text)]
+        trusted_sources.extend(_norm_ws(text) for text in verified_claims)
+        constants = obj.get("constants_used")
+        if not isinstance(constants, list) or any(
+            not isinstance(constant, str)
+            or not _norm_ws(constant)
+            or not any(_norm_ws(constant) in source for source in trusted_sources)
+            for constant in constants
+        ):
+            self.store.record_insufficient_audit(
+                claim["id"], claim["revision"], reason="unsupported_constant",
+            )
+            return
+
+        variables = obj.get("variables")
+        if not isinstance(variables, dict):
+            self.store.record_insufficient_audit(
+                claim["id"], claim["revision"], reason="invalid_variables",
+            )
+            return
+        expected = str(obj.get("expected") or "").strip()
+        if not expected:
+            self.store.record_insufficient_audit(
+                claim["id"], claim["revision"], reason="missing_expected_value",
+            )
+            return
+        try:
+            self.store.apply_computation_check(
+                claim["id"], claim["revision"], expression=expression,
+                variables=variables, expected=expected, trace=trace,
+            )
+        except ValueError as exc:
+            self.store.record_insufficient_audit(
+                claim["id"], claim["revision"], reason=f"computation_invalid:{exc}",
+            )
+
+    def refine_legacy_batch(self, l2_key: str, *, limit: int = 10, apply: bool = False) -> dict:
+        """Rewrite one L2 batch into falsifiable provisional claims."""
+        if self.taxonomy is None:
+            raise ValueError("taxonomy is required for legacy refinement")
+        from cuda_sft_qgen.taxonomy_expand import validate_leaf
+        from cuda_sft_qgen.taxonomy_manager import TaxonomyManager
+
+        taxonomy = self.store.overlay_taxonomy(self.taxonomy)
+        selected = sorted(
+            (leaf for leaf in taxonomy.leaves
+             if f"{leaf.domain_id}.{leaf.l2_id}" == l2_key
+             and leaf.status == "legacy_unreviewed" and needs_refine(leaf)),
+            key=lambda leaf: leaf.l3_id,
+        )[:max(0, int(limit))]
+        ids = [leaf.l3_id for leaf in selected]
+        rows: list[dict[str, Any]] = []
+        if not selected:
+            return {"l2": l2_key, "selected": 0, "valid_suggestions": 0, "applied": 0, "rows": rows}
+
+        manager = TaxonomyManager(taxonomy, self.llm, settings=self.settings)
+        result = manager.refine_leaf_quality(ids)
+        suggestions = {str(item.get("l3_id")): item for item in result.get("suggestions") or []
+                       if isinstance(item, dict) and item.get("l3_id")}
+        all_ids = {leaf.l3_id for leaf in taxonomy.leaves}
+        valid_count = applied = 0
+        for leaf in selected:
+            suggestion = suggestions.get(leaf.l3_id) or {}
+            proposed = str(suggestion.get("suggested_claim") or "").strip()
+            hints = suggestion.get("suggested_hints")
+            reason = "missing_suggestion"
+            if proposed and isinstance(hints, list) and hints and all(isinstance(hint, str) and hint.strip() for hint in hints):
+                item = {"l3_id": leaf.l3_id, "claim": proposed, "kind": leaf.kind,
+                        "types": list(leaf.types), "difficulty": list(leaf.difficulty), "hints": hints}
+                reason = validate_leaf(
+                    item, l2_id=leaf.l2_id, existing_ids=all_ids - {leaf.l3_id},
+                    existing_claims=[other.claim for other in taxonomy.leaves if other.l3_id != leaf.l3_id],
+                ) or ""
+            elif proposed:
+                reason = "missing_hints"
+            valid = not reason
+            if valid:
+                valid_count += 1
+                if apply:
+                    revision = self.store.revise(
+                        leaf.l3_id, {"claim": proposed, "hints": hints, "status": "provisional"},
+                        reason="legacy_refine", expected_revision=leaf.revision,
+                    )
+                    kind = "compute_verify" if leaf.kind in {"formula", "numeric"} else "audit"
+                    prefix = "compute" if kind == "compute_verify" else "audit"
+                    self.store.enqueue(kind, {"claim_id": leaf.l3_id, "revision": revision},
+                                       f"{prefix}:{leaf.l3_id}:{revision}")
+                    applied += 1
+            rows.append({"l3_id": leaf.l3_id, "old": leaf.claim, "new": proposed,
+                         "hints": hints if isinstance(hints, list) else [], "valid": valid, "reason": reason})
+        if applied:
+            self.deliver_impacts()
+        return {"l2": l2_key, "selected": len(selected), "valid_suggestions": valid_count,
+                "applied": applied, "rows": rows}
+
+    def retrieve_documents(self, claim: dict) -> list[tuple[str, str]]:
+        """Prefer local documentation chunks, falling back to official URLs."""
+        query = claim["claim"] + " " + " ".join(claim.get("hints") or [])
+        hits = self.doc_index.search(query, k=6) if len(self.doc_index) else []
+        self._retrieved_local = bool(hits)
+        if hits:
+            by_url: dict[str, list[str]] = {}
+            for chunk, _score in hits:
+                by_url.setdefault(chunk.url, []).append(chunk.text)
+            return [(url, "\n\n".join(texts)) for url, texts in by_url.items()]
         urls = [str(url) for url in claim.get("sources", []) if official_url(str(url))]
         urls.extend(str(url) for url in self.config.get("official_sources", []) if official_url(str(url)))
         # URL suggestions are merely retrieval candidates, never evidence by themselves.
         if not urls:
             from cuda_sft_qgen.prompts import load_prompt
-            suggestions = self.llm.complete_json([
+            suggestions = self._complete_json([
                 {"role": "system", "content": load_prompt("url_suggest")},
                 {"role": "user", "content": claim["claim"]},
             ], retries=1, priority=PRI_TAXONOMY)
@@ -495,11 +685,18 @@ class KnowledgeWorker:
                 failures.append(str(exc))
         if not retrieved:
             raise RuntimeError("official source retrieval failed: " + "; ".join(failures))
-        related_claims = self.store.relation_candidates(claim["id"])
+        return retrieved
+
+    def _audit(self, payload: dict) -> None:
+        claim = self.store.get_claim(payload["claim_id"])
+        if claim is None or claim["revision"] != payload["revision"] or claim["status"] in {"retired", "quarantined"}:
+            return
+        retrieved = self.retrieve_documents(claim)
+        related_claims = self.store.relation_candidates(claim["id"], limit=8, embedder=self.embedder)
         from cuda_sft_qgen.prompts import load_prompt
-        review = self.llm.complete_json([
+        review = self._complete_json([
             {"role": "system", "content": load_prompt("audit")},
-            {"role": "user", "content": json.dumps({"claim": claim, "related_claims": related_claims, "documents": [{"url": url, "text": _passages(doc, claim["claim"])} for url, doc in retrieved]}, ensure_ascii=False)},
+            {"role": "user", "content": json.dumps({"claim": claim, "related_claims": related_claims, "documents": [{"url": url, "text": doc if self._retrieved_local else _passages(doc, claim["claim"])} for url, doc in retrieved]}, ensure_ascii=False)},
         ], retries=1, priority=PRI_TAXONOMY)
         verdict = str(review.get("verdict") or "insufficient")
         if verdict not in {"supported", "contradicted", "insufficient"}:
@@ -507,7 +704,7 @@ class KnowledgeWorker:
         url = str(review.get("url") or "")
         quote = str(review.get("quote") or "").strip()
         document = dict(retrieved).get(url, "")
-        if verdict != "insufficient" and (not quote or quote not in document):
+        if verdict != "insufficient" and (not quote or _norm_ws(quote) not in _norm_ws(document)):
             verdict = "insufficient"
         if verdict == "supported":
             # A real quote can still support only half a generated assertion.
@@ -522,7 +719,7 @@ class KnowledgeWorker:
                 verdict = "insufficient"
                 review["reason"] = "quoted_evidence_missing_material_identifiers_or_numbers"
             else:
-                confirmation = self.llm.complete_json([
+                confirmation = self._complete_json([
                     {"role": "system", "content": load_prompt("audit") +
                      "\nIndependently check EVERY material clause using only this retrieved excerpt. "
                      "Do not infer unstated constraints. Return supported only if all clauses follow."},
@@ -531,7 +728,7 @@ class KnowledgeWorker:
                 ], retries=0, priority=PRI_TAXONOMY)
                 second_quote = str(confirmation.get("quote") or "").strip()
                 if (confirmation.get("verdict") != "supported" or confirmation.get("url") != url
-                        or not second_quote or second_quote not in quote):
+                        or not second_quote or _norm_ws(second_quote) not in _norm_ws(quote)):
                     verdict = "insufficient"
                     review["reason"] = "independent_audit_not_confirmed"
         before = self.store.impact_events()
@@ -717,10 +914,10 @@ class KnowledgeWorker:
         if claim is None or claim["status"] in {"retired", "quarantined"}:
             return
         from cuda_sft_qgen.prompts import load_prompt
-        candidates = self.store.relation_candidates(claim["id"], limit=8)
+        candidates = self.store.relation_candidates(claim["id"], limit=8, embedder=self.embedder)
         if not candidates:
             return
-        review = self.llm.complete_json([
+        review = self._complete_json([
             {"role": "system", "content": load_prompt("relate")},
             {"role": "user", "content": json.dumps({"claim": claim, "candidates": [
                 {"id": c["id"], "claim": c["claim"], "l2_id": c.get("l2_id")} for c in candidates

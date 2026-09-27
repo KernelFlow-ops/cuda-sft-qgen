@@ -192,8 +192,9 @@ def _privacy_audit(report: dict[str, Any]) -> dict[str, Any]:
     serialized = json.dumps(public, ensure_ascii=False, sort_keys=True)
     configured_secrets: list[str] = []
     for name, value in os.environ.items():
-        if name == "NVIDIA_API_KEYS" or name.startswith("NVIDIA_API_KEY"):
-            configured_secrets.extend(part.strip() for part in value.split(",") if len(part.strip()) >= 8)
+        if name.endswith(("_API_KEY", "_API_KEYS")) or "_API_KEY_" in name:
+            configured_secrets.extend(part.strip() for part in value.replace(";", ",").split(",")
+                                      if len(part.strip()) >= 8)
     secret_matches = sum(secret in serialized for secret in set(configured_secrets))
     passed = private_key_matches == 0 and secret_matches == 0
     return {
@@ -793,7 +794,7 @@ def run_agent_pilot(
         "brief_set_sha256": _stable_hash(public_briefs),
         "taxonomy": {},
         "config": {
-            "writer_model": settings.nvidia_model,
+            "writer_model": settings.llm_model,
             "review_model": settings.review_model,
             "embedding_model": settings.embedding_model,
             "request_timeout_seconds": PILOT_REQUEST_TIMEOUT_SECONDS,
@@ -843,6 +844,10 @@ def run_agent_pilot(
             review_delegate = runtime.review_llm or writer_delegate
             runtime.llm = _BudgetedLLM(writer_delegate, budget, f"{group_name}:writer")
             runtime.review_llm = _BudgetedLLM(review_delegate, budget, f"{group_name}:review")
+            if getattr(runtime, "evolver_llm", None) is not None:
+                runtime.evolver_llm = _BudgetedLLM(runtime.evolver_llm, budget, f"{group_name}:evolver")
+            if getattr(runtime, "salvage_llm", None) is not None:
+                runtime.salvage_llm = _BudgetedLLM(runtime.salvage_llm, budget, f"{group_name}:salvage")
             token = set_runtime(runtime)
             group_report: dict[str, Any] = {
                 "group": group_name,

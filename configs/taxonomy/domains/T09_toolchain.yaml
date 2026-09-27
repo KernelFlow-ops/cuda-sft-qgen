@@ -1,5 +1,6 @@
 id: T09
 name: 编译、PTX 与工具链
+weight: 0.8
 children:
 - id: nvcc
   name: nvcc / ptxas
@@ -72,6 +73,7 @@ children:
     difficulty:
     - 2
     kind: api
+  target_leaves: 12
 - id: ptx_sass
   name: PTX 与 SASS
   leaves:
@@ -141,6 +143,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: ptx_cache
   name: PTX 缓存提示
   leaves:
@@ -211,6 +214,7 @@ children:
     - 2
     - 3
     kind: failure
+  target_leaves: 12
 - id: abi_regs
   name: ABI 与寄存器预算
   leaves:
@@ -281,6 +285,7 @@ children:
     - 2
     - 3
     kind: formula
+  target_leaves: 12
 - id: sass_mma
   name: SASS MMA 识别
   leaves:
@@ -350,6 +355,7 @@ children:
     difficulty:
     - 4
     kind: feature
+  target_leaves: 12
 - id: fatbin_arch
   name: fatbin 与架构
   leaves:
@@ -420,6 +426,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: device_link
   name: 设备链接 nvlink
   leaves:
@@ -490,6 +497,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 12
 - id: cuobjdump
   name: cuobjdump / nvdisasm
   leaves:
@@ -561,6 +569,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: inline_regs
   name: 内联 PTX 约束
   leaves:
@@ -629,6 +638,7 @@ children:
     - 3
     - 4
     kind: mechanism
+  target_leaves: 12
 - id: fast_math
   name: fast math 与 FTZ
   leaves:
@@ -699,6 +709,7 @@ children:
     difficulty:
     - 2
     kind: mechanism
+  target_leaves: 12
 - id: nvrtc
   name: NVRTC / JIT
   leaves:
@@ -770,6 +781,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 12
 - id: ptx_target
   name: PTX .version / .target
   leaves:
@@ -838,6 +850,7 @@ children:
     difficulty:
     - 4
     kind: feature
+  target_leaves: 12
 - id: lineinfo_debug
   name: 调试符号与 lineinfo
   leaves:
@@ -907,3 +920,10 @@ children:
     difficulty:
     - 2
     kind: failure
+  target_leaves: 12
+- id: forward_compat
+  name: 驱动/运行时向前兼容与 JIT
+  arch:
+  - any
+  target_leaves: 10
+  leaves: []

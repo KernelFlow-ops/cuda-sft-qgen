@@ -15,9 +15,7 @@ def get_agent_status():
             "name": "架构重构与状态管理",
             "status": "🔄 运行中",
             "files_expected": [
-                "src/cuda_sft_qgen/graph/state_v2.py",
                 "src/cuda_sft_qgen/observability.py",
-                "tests/graph/test_state_validation.py",
                 "tests/test_observability.py",
             ]
         },

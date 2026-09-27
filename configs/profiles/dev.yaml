@@ -11,7 +11,6 @@ generation:
   evolver_fraction: 0.20
   fewshot_positives: 3
   fewshot_negatives: 1
-  prompt_cot: false
 
 mixup:
   enabled: false
@@ -21,7 +20,7 @@ review:
   semantic_dup_threshold: 0.92
   semantic_gray_threshold: 0.88
   llm_every_k_batches: 2
-  answer_consistency_enabled: false
+  rip_keep_per_bucket: 3
 
 taxonomy:
   target_leaves_per_l2: 20

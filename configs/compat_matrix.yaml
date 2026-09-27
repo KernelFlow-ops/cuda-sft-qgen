@@ -1,0 +1,91 @@
+# Hard compatibility rules for joint brief sampling (planner patch P2-01).
+# Sampling order: leaf -> kind(from leaf) -> question_type (∩ leaf.types ∩ kind_to_types) -> answer_format
+# (∩ type_to_formats ∩ angle.formats) -> difficulty (leaf band) -> bloom (difficulty_to_bloom) -> arch_target
+# (leaf/L2 arch ∩ claim regex) -> granularity (domain_to_granularity) -> persona (persona.domains) -> scenario.
+kind_to_types:
+  formula: [conceptual, layout, profiling, optimization, code_complete, counterfactual]
+  numeric: [conceptual, layout, profiling, optimization, compare, counterfactual]
+  api: [syntax, code_complete, debug, compare, optimization]
+  feature: [syntax, conceptual, compare, counterfactual, layout]
+  failure: [debug, counterfactual, profiling, code_complete, optimization]
+  mechanism: [conceptual, compare, profiling, counterfactual, layout, optimization]
+type_to_formats:
+  conceptual: [numeric, multi_numeric, short_answer, single_choice, multi_choice]
+  syntax: [single_choice, multi_choice, fill_in, short_answer]
+  code_complete: [fill_in, code_complete]
+  debug: [code_fix, short_answer, single_choice, trace_output]
+  optimization: [short_answer, multi_numeric]
+  layout: [multi_numeric, numeric, multi_choice, short_answer]
+  compare: [short_answer, multi_choice, multi_numeric]
+  counterfactual: [short_answer, single_choice, multi_numeric]
+  profiling: [multi_numeric, short_answer, numeric]
+difficulty_to_bloom:
+  "1": [remember, understand, apply]
+  "2": [understand, apply, analyze]
+  "3": [apply, analyze, evaluate, create]
+  "4": [analyze, evaluate, create]
+arch_claim_rules:          # regex on claim/hints -> allowed arch_targets (intersected with L2.arch)
+  - {match: "tcgen05|TMEM|UMMA|NVFP4|MXFP4", allow: [sm_100a]}
+  - {match: "wgmma|setmaxnreg", allow: [sm_90a]}
+  - {match: "TMA|cp\\.async\\.bulk|tensormap|expect_tx|cluster|DSMEM", allow: [sm_90, sm_90a, sm_100a]}
+  - {match: "cp\\.async\\.(ca|cg)|ldmatrix|mma\\.sync", allow: [sm_80, sm_86, sm_89, sm_90, sm_100a, sm_120]}
+  - {match: "sm_120|GeForce Blackwell|RTX 50", allow: [sm_120]}
+compare_items_may_name_two_archs: true
+forbidden_combinations:
+  - {question_type: syntax, difficulty: 4}
+  - {answer_format: trace_output, kind: failure, note: "no scheduling-dependent traces"}
+  - {bloom: remember, granularity: system}
+# Evolver operators allowed per leaf kind (planner assigns exactly one; writer may not switch).
+kind_to_operators:
+  formula: [deepen, layout-eq, profiler, format-shift, scenario-transfer, decompose-reverse]
+  numeric: [deepen, profiler, format-shift, scenario-transfer, decompose-reverse, compare]
+  api: [inject-bug, compare, counterfactual, format-shift, re-arch]
+  feature: [re-arch, compare, counterfactual, format-shift]
+  failure: [inject-bug, counterfactual, profiler, scenario-transfer, trace]
+  mechanism: [deepen, compare, counterfactual, profiler, scenario-transfer, re-arch]
+# Leaf-count policy (mirrors quotas_v2.per_leaf; planner reads it from here).
+per_leaf: {min: 2, soft_max: 8, hard_max: 12}
+provisional_exploration_share: 0.10
+
+# Granularity allowed per real L1 (configs/taxonomy/cuda.yaml); 'default' covers unlisted L1s.
+domain_to_granularity:
+  default: [kernel, api]
+  T05: [kernel, pipeline]
+  T08: [kernel, pipeline, api]
+  T09: [api, system]
+  T10: [system]
+  T12: [kernel, pipeline, system]
+  T13: [kernel, pipeline]
+  T14: [system, pipeline, api]
+  T21: [kernel, pipeline]
+  T22: [api, system]
+  T23: [api, system]
+  T24: [kernel, system]
+  T25: [kernel, pipeline, system]
+  T27: [kernel, system]
+  T28: [api, system, kernel]
+  T31: [kernel, pipeline]
+# Scenario whitelist per real L1 (planner picks from this list; 'default' covers unlisted L1s).
+domain_to_scenarios:
+  default: [generic, elementwise, reduction, scan, histogram, transpose, stencil, gemm, softmax]
+  T02: [generic, elementwise, transpose, stencil, gemm, spmv, reduction, histogram, data_pipeline]
+  T05: [generic, elementwise, reduction, transpose, stencil, gemm, attention, softmax, layernorm]
+  T06: [generic, gemm, attention, conv, quantization]
+  T07: [generic, gemm, attention, transpose, conv]
+  T08: [generic, gemm, attention, conv, kv_cache]
+  T09: [generic, deployment]
+  T10: [generic, distributed_training, moe_routing, inference_serving]
+  T11: [generic, gemm, sort, scan, reduction, conv, attention]
+  T12: [generic, elementwise, gemm, attention, reduction, data_pipeline, inference_serving]
+  T13: [generic, reduction, scan, histogram, sort, transpose, stencil, spmv, gemm, conv, attention, softmax, layernorm, moe_routing, kv_cache, graph_analytics, scientific]
+  T14: [generic, data_pipeline, inference_serving, distributed_training]
+  T15: [generic, reduction, softmax, layernorm, scientific, quantization]
+  T20: [generic, gemm, attention, transpose]
+  T21: [generic, gemm, attention, conv]
+  T22: [generic, inference_serving, kv_cache]
+  T23: [generic, deployment, data_pipeline]
+  T24: [generic, distributed_training, moe_routing]
+  T25: [generic, elementwise, gemm, attention, reduction, stencil]
+  T28: [generic, reduction, deployment, inference_serving]
+  T29: [generic, spmv, scientific, gemm]
+  T31: [generic, elementwise, softmax, layernorm, attention, quantization, moe_routing, kv_cache]

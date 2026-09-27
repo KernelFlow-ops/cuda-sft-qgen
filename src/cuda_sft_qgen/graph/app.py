@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import fcntl
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
@@ -32,6 +34,22 @@ from cuda_sft_qgen.graph.state import PipelineState
 from cuda_sft_qgen.runtime import Runtime, build_runtime, reset_runtime, set_runtime
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def pipeline_lock(data_dir: Path):
+    """Serialize archive initialization and all writes for one data directory."""
+    data_dir.mkdir(parents=True, exist_ok=True)
+    run_lock = (data_dir / "pipeline.lock").open("a")
+    try:
+        try:
+            fcntl.flock(run_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError(f"Another generation pipeline is using {data_dir}") from None
+        yield
+    finally:
+        fcntl.flock(run_lock, fcntl.LOCK_UN)
+        run_lock.close()
 
 
 def build_graph():
@@ -82,6 +100,8 @@ def run_pipeline(
     *,
     rebuild_taxonomy: bool = False,
     runtime: Runtime | None = None,
+    lock_held: bool = False,
+    retry_reviews: bool = False,
 ) -> dict[str, Any]:
     """Run generate+review until target, iteration limit, or pending-only stop.
 
@@ -100,33 +120,32 @@ def run_pipeline(
     Raises:
         RuntimeError: If another pipeline already holds the data-dir lock.
     """
+    from cuda_sft_qgen.llm import FakeLLM
+
+    if (settings.fake_llm or (runtime is not None and isinstance(runtime.llm, FakeLLM))
+            or (runtime is not None and runtime.review_llm is not None
+                and isinstance(runtime.review_llm, FakeLLM))):
+        raise RuntimeError("Question generation requires a real LLM API client")
+    if not lock_held:
+        with pipeline_lock(settings.data_dir):
+            return run_pipeline(settings, rebuild_taxonomy=rebuild_taxonomy,
+                                runtime=runtime, lock_held=True, retry_reviews=retry_reviews)
     own_runtime = runtime is None
     rt = runtime or build_runtime(settings)
-    try:
-        run_lock = (settings.data_dir / "pipeline.lock").open("a")
-    except Exception:
-        if own_runtime:
-            rt.close()
-        raise
-    try:
-        fcntl.flock(run_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        run_lock.close()
-        if own_runtime:
-            rt.close()
-        raise RuntimeError(f"Another generation pipeline is using {settings.data_dir}") from None
     token = set_runtime(rt)
     # Each planner loop can take planner + generate + salvage + drain +
     # review_score + chair + archive + taxonomy_manager (~8-10 nodes).
     recursion_limit = max(200, settings.max_iterations * 12)
     try:
+        if retry_reviews:
+            rt.store.requeue_reviews(include_exhausted=True)
         rt.refresh_knowledge(force=True)
         rt.reconcile_index()
         if (not settings.fake_llm and settings.knowledge_cfg.get("enabled", True)
                 and settings.taxonomy_manager_cfg.get("enabled", True)):
             from cuda_sft_qgen.knowledge_worker import KnowledgeWorker
             rt.knowledge_worker = KnowledgeWorker(
-                rt.knowledge, rt.llm, embedder=rt.embedder, settings=settings,
+                rt.knowledge, rt.knowledge_llm or rt.llm, embedder=rt.embedder, settings=settings,
                 taxonomy=rt.taxonomy, archive=rt.store,
             )
             rt.knowledge_worker.start()
@@ -139,20 +158,21 @@ def run_pipeline(
                 {"recursion_limit": recursion_limit},
             )
         rt.refresh_knowledge(force=True)
-        result["accepted_count"] = len(rt.store.load_accepted())
+        result["accepted_count"] = rt.store.status_counts()["verified_accepted"]
         result["rejected_count"] = len(rt.store.load_rejected())
         result["pending"] = [q.model_dump() for q in rt.store.load_pending()]
         result["done"] = result["accepted_count"] >= settings.target_question_count
-        if not result["done"] and result["pending"]:
+        if not result["done"] and rt.verification_budget_exhausted:
+            result["status"] = "verification_budget_exhausted"
+        elif not result["done"] and result["pending"]:
             result["status"] = "review_pending"
         rt.store.compute_stats()
         return result
     finally:
         if rt.knowledge_worker is not None:
-            rt.knowledge_worker.stop()
+            # A job may still be using SQLite, the LLM, and the archive.
+            rt.knowledge_worker.stop(timeout=None)
         reset_runtime(token)
-        fcntl.flock(run_lock, fcntl.LOCK_UN)
-        run_lock.close()
         if own_runtime:
             closer = getattr(rt, "close", None)
             if callable(closer):

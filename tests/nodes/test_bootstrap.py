@@ -8,6 +8,8 @@ from cuda_sft_qgen.graph.nodes.bootstrap import bootstrap_node
 from cuda_sft_qgen.models import Question, SteeringBrief
 from cuda_sft_qgen.runtime import set_runtime
 
+REAL_ORIGIN = {"writer_real_api": True, "writer_provider": "openai", "writer_model": "test-model"}
+
 
 def test_bootstrap_node_empty(fake_runtime, temp_data_dir):
     """Test bootstrap node with empty store."""
@@ -30,8 +32,8 @@ def test_bootstrap_node_with_data(fake_runtime, sample_question):
     set_runtime(fake_runtime)
 
     # Add some accepted and rejected questions
-    fake_runtime.store.append_accepted(sample_question(id="q1"))
-    fake_runtime.store.append_accepted(sample_question(id="q2"))
+    fake_runtime.store.append_accepted(sample_question(id="q1", generation_provenance=REAL_ORIGIN))
+    fake_runtime.store.append_accepted(sample_question(id="q2", generation_provenance=REAL_ORIGIN))
     fake_runtime.store.append_rejected(sample_question(id="q3", question=""))
 
     pending_q = sample_question(id="q4")
@@ -55,8 +57,8 @@ def test_bootstrap_node_target_reached(fake_runtime, sample_question):
     set_runtime(fake_runtime)
     fake_runtime.settings.target_question_count = 2
 
-    fake_runtime.store.append_accepted(sample_question(id="q1"))
-    fake_runtime.store.append_accepted(sample_question(id="q2"))
+    fake_runtime.store.append_accepted(sample_question(id="q1", generation_provenance=REAL_ORIGIN))
+    fake_runtime.store.append_accepted(sample_question(id="q2", generation_provenance=REAL_ORIGIN))
 
     state = {}
     result = bootstrap_node(state)
@@ -64,3 +66,12 @@ def test_bootstrap_node_target_reached(fake_runtime, sample_question):
     assert result["accepted_count"] == 2
     assert result["done"] is True
     assert result["target"] == 2
+
+
+def test_bootstrap_does_not_count_unknown_writer_origin(fake_runtime, sample_question):
+    set_runtime(fake_runtime)
+    fake_runtime.settings.target_question_count = 1
+    fake_runtime.store.append_accepted(sample_question(id="legacy"))
+    result = bootstrap_node({})
+    assert result["accepted_count"] == 0
+    assert result["done"] is False

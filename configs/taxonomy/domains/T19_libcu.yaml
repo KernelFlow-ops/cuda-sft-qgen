@@ -1,5 +1,6 @@
 id: T19
 name: 'libcu++ / cuda::'
+weight: 0.7
 children:
 - id: cuda_barrier
   name: cuda::barrier
@@ -101,6 +102,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 10
 - id: cuda_pipeline
   name: cuda::pipeline
   leaves:
@@ -195,6 +197,7 @@ children:
     difficulty:
     - 3
     kind: formula
+  target_leaves: 10
 - id: annotated_ptr
   name: annotated_ptr
   leaves:
@@ -273,6 +276,7 @@ children:
     difficulty:
     - 3
     kind: numeric
+  target_leaves: 10
 - id: mdspan
   name: mdspan
   leaves:
@@ -357,6 +361,7 @@ children:
     difficulty:
     - 3
     kind: feature
+  target_leaves: 10
 - id: atomic_ref
   name: atomic_ref
   leaves:
@@ -438,6 +443,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 10
 - id: cuda_ptx
   name: cuda::ptx
   leaves:
@@ -527,6 +533,7 @@ children:
     difficulty:
     - 4
     kind: formula
+  target_leaves: 10
 - id: nv_target
   name: nv/target
   leaves:
@@ -600,6 +607,7 @@ children:
     - 2
     - 3
     kind: api
+  target_leaves: 10
 - id: cuda_std
   name: cuda::std
   leaves:
@@ -679,6 +687,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 10
 - id: cuda_atomic
   name: cuda::atomic
   leaves:
@@ -753,6 +762,7 @@ children:
     difficulty:
     - 3
     kind: numeric
+  target_leaves: 10
 - id: memcpy_async_lib
   name: cuda::memcpy_async
   leaves:
@@ -821,6 +831,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 10
 - id: cuda_semaphore
   name: latch 与 semaphore
   leaves:
@@ -894,6 +905,7 @@ children:
     difficulty:
     - 2
     kind: feature
+  target_leaves: 10
 - id: access_policy
   name: Access Policy Window
   leaves:
@@ -962,3 +974,4 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 10

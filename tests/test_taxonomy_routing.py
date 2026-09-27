@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from cuda_sft_qgen.config import load_settings
-from cuda_sft_qgen.graph.app import run_pipeline
 from cuda_sft_qgen.graph.nodes.architect import taxonomy_manager_node
 from cuda_sft_qgen.graph.routing import (
     route_after_archive,
@@ -96,16 +95,3 @@ def test_manage_taxonomy_parser_has_tick():
     assert args.tick is True
     assert args.fake is True
     assert args.max_calls == 2
-
-
-def test_fake_pipeline_still_reaches_target(tmp_path):
-    settings = load_settings(
-        fake_llm=True,
-        target=4,
-        review_batch_size=2,
-        data_dir=tmp_path,
-    )
-    settings.max_iterations = 20
-    result = run_pipeline(settings)
-    assert result["accepted_count"] >= 4
-    assert int(result.get("taxonomy_ticks") or 0) == 0

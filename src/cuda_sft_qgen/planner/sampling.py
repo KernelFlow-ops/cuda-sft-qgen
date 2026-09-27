@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import random
 import re
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any, Sequence
@@ -17,6 +18,9 @@ from typing import Any, Sequence
 import yaml
 
 from cuda_sft_qgen.models import Question, QuestionBrief, SteeringBrief
+from cuda_sft_qgen.planner import joint as joint_sampler
+from cuda_sft_qgen.planner.joint import AxisWeights, LeafCoverage
+from cuda_sft_qgen.enums import ANSWER_FORMATS, ARCH_TARGETS, ARCH_TO_HARDWARE
 from cuda_sft_qgen.planner.pair_mining import (
     PairCandidate,
     env_mixup_enabled,
@@ -88,23 +92,16 @@ def load_angles(path: Path | None = None) -> dict[str, list[dict[str, Any]]]:
 
 
 def _instance_hint(leaf: Leaf, rng: random.Random) -> str:
-    """Pick a concrete fragment of the claim so writers do not stay generic."""
-    if leaf.hints:
-        return rng.choice(list(leaf.hints))
-    # Do not split on `/` — it appears in fractions (3/5) and API paths.
-    parts = re.split(r"[、，,]| vs |\s+and\s+", leaf.claim)
-    parts = [p.strip(" .") for p in parts if len(p.strip()) >= 6]
-    return rng.choice(parts) if parts else leaf.claim[:80]
+    """Choose a leaf hint without copying a claim fragment into the scene."""
+    return rng.choice(list(leaf.hints)) if leaf.hints else ""
 
 
-def _stems_for_leaf(accepted: Sequence[Question], l3_id: str, k: int = 3) -> list[str]:
-    out: list[str] = []
-    for q in reversed(list(accepted)):
-        if q.l3_id == l3_id and (q.question or "").strip():
-            out.append(q.question.strip()[:80])
-        if len(out) >= k:
-            break
-    return out
+def _stems_for_leaf(accepted: Sequence[Question], pending: Sequence[Question], l3_id: str,
+                    k: int = 4, limit: int = 600) -> list[str]:
+    """Return recent accepted and pending stems for the selected leaf."""
+    pool = [q for q in list(accepted) + list(pending)
+            if q.l3_id == l3_id and (q.question or "").strip()]
+    return [q.question.strip()[:limit] for q in pool[-k:]]
 
 
 def _pick_angle(
@@ -269,6 +266,10 @@ def plan_briefs(
     knowledge: Any | None = None,
     mixup_config: dict[str, Any] | None = None,
     embedder: Any | None = None,
+    compat: dict | None = None,
+    scope: dict | None = None,
+    coverage: dict[str, LeafCoverage] | None = None,
+    joint: bool | None = None,
 ) -> list[QuestionBrief]:
     """Sample ``n`` writer/evolver briefs from residual quotas and steering.
 
@@ -277,12 +278,18 @@ def plan_briefs(
     health. Knowledge context is attached when a store is provided.
     """
     rng = rng or random.Random()
+    if joint is None:
+        joint = bool((adaptive_config or {}).get("joint_sampling", True))
+    joint = bool(joint and compat)
+    now = time.time()
     resolved_mixup = _resolve_mixup_config(mixup_config, adaptive_config)
     active_claims = {
         leaf.l3_id: leaf
         for leaf in taxonomy.leaves
         if not leaf.retired and str(getattr(leaf, "status", "") or "").lower()
         not in {"retired", "quarantined", "provisional"}
+        and not (joint and getattr(leaf, "status", "") == "legacy_unreviewed"
+                 and 0 < float(getattr(leaf, "audit_due_at", 0.0) or 0.0) < now)
     }
     parent_reuse_counts: Counter[str] = Counter()
     for existing in list(accepted) + list(pending):
@@ -302,6 +309,8 @@ def plan_briefs(
         k: [_as_angle_card(x) for x in (v or [])] for k, v in raw_angles.items()
     }
     pool = list(accepted) + list(pending)
+    pool_counts = Counter(q.l3_id for q in pool)
+    coverage = coverage or {}
     l1_counts = _count_axis(pool, "l1")
     type_counts = _count_axis(pool, "question_type")
     diff_counts = _count_axis(pool, "difficulty")
@@ -313,7 +322,8 @@ def plan_briefs(
     l1_ids = taxonomy.l1_ids()
     uniform = {d: 1.0 / max(len(l1_ids), 1) for d in l1_ids}
     # Mix quota band with uniform so empty domains get boosted.
-    l1_weights = residual_weights(l1_counts, uniform, overrep_factor=2.0)
+    l1_weights = (joint_sampler.l1_weights(taxonomy, scope or {}, l1_counts, len(pool))
+                  if joint else residual_weights(l1_counts, uniform, overrep_factor=2.0))
     for key in steering.underrepresented:
         l1 = key.split(".")[0]
         if l1 in l1_weights:
@@ -364,11 +374,25 @@ def plan_briefs(
         {str(k): float(v) for k, v in (quotas.get("bloom") or {}).items()}
         or {b: 1 / len(BLOOMS) for b in BLOOMS},
     )
+    axis_weights = None
+    l2meta = joint_sampler.l2_meta(taxonomy) if joint else {}
+    if joint:
+        arch_target_quota = quotas.get("arch_target") or {key: 1 / len(ARCH_TARGETS) for key in ARCH_TARGETS}
+        format_quota = quotas.get("answer_format") or {key: 1 / len(ANSWER_FORMATS) for key in ANSWER_FORMATS}
+        axis_weights = AxisWeights(
+            type=type_w, difficulty=diff_w, bloom=bloom_w, granularity=gran_w,
+            language=lang_w,
+            arch=residual_weights(_count_axis(pool, "arch_target"), arch_target_quota),
+            format=residual_weights(_count_axis(pool, "answer_format"), format_quota),
+        )
 
     persona_ids = list(personas.keys()) or ["cuda_interviewer"]
     leaves_by_l1: dict[str, list[Leaf]] = {}
     for leaf in taxonomy.leaves:
-        if leaf.retired or str(getattr(leaf, "status", "") or "") in {"quarantined", "provisional"}:
+        status = str(getattr(leaf, "status", "") or "")
+        audit_due_at = float(getattr(leaf, "audit_due_at", 0.0) or 0.0)
+        expired_legacy = status == "legacy_unreviewed" and audit_due_at > 0 and now > audit_due_at
+        if leaf.retired or status in {"quarantined", "provisional"} or (joint and expired_legacy):
             continue
         l2_key = f"{leaf.domain_id}.{leaf.l2_id}"
         if l2_key in blocked_l2:
@@ -378,7 +402,10 @@ def plan_briefs(
     if not usable_l1:
         leaves_by_l1 = {}
         for leaf in taxonomy.leaves:
-            if leaf.retired or str(getattr(leaf, "status", "") or "") in {"quarantined", "provisional"}:
+            status = str(getattr(leaf, "status", "") or "")
+            audit_due_at = float(getattr(leaf, "audit_due_at", 0.0) or 0.0)
+            expired_legacy = status == "legacy_unreviewed" and audit_due_at > 0 and now > audit_due_at
+            if leaf.retired or status in {"quarantined", "provisional"} or (joint and expired_legacy):
                 continue
             leaves_by_l1.setdefault(leaf.domain_id, []).append(leaf)
         usable_l1 = list(leaves_by_l1)
@@ -408,7 +435,8 @@ def plan_briefs(
             min_samples=int(adaptive_config.get("min_samples_threshold", 5) or 5),
         )
 
-        l1_weights = sampler.adjust_weights(l1_weights, leaf_stats, rng=rng)
+        if not joint:
+            l1_weights = sampler.adjust_weights(l1_weights, leaf_stats, rng=rng)
 
     n_evolver = 0
     if seed_pool:
@@ -422,7 +450,20 @@ def plan_briefs(
     used_l3: set[str] = set()
     used_pair: set[tuple[str, str]] = set()
     all_leaves = [lf for v in leaves_by_l1.values() for lf in v]
-    if not all_leaves:
+    exploration_pool = [
+        leaf for leaf in taxonomy.leaves
+        if not leaf.retired and (
+            getattr(leaf, "status", "") == "provisional"
+            or (getattr(leaf, "status", "") == "legacy_unreviewed"
+                and float(getattr(leaf, "audit_due_at", 0.0) or 0.0) > 0
+                and now > float(getattr(leaf, "audit_due_at", 0.0) or 0.0))
+        )
+    ] if joint else []
+    generic_count = sum(q.scenario == "generic" for q in pool)
+    per_leaf = compat["per_leaf"] if joint else {}
+    initially_eligible = [leaf for leaf in all_leaves
+                          if joint_sampler.leaf_weight(pool_counts[leaf.l3_id], per_leaf) > 0] if joint else []
+    if not all_leaves and not exploration_pool:
         raise ValueError("No active taxonomy claims are available for planning")
 
     def choose_leaf(candidates: list[Leaf]) -> Leaf:
@@ -436,72 +477,83 @@ def plan_briefs(
     leaf_by_id = {leaf.l3_id: leaf for leaf in all_leaves}
     for i in range(n):
         mixup_spec = mixup_specs[i] if i < len(mixup_specs) else None
-        l1 = _weighted_choice(rng, l1_weights)
-        candidates = leaves_by_l1[l1]
-        unused = [lf for lf in candidates if lf.l3_id not in used_l3]
-        if unused:
-            leaf = choose_leaf(unused)
-        elif len(used_l3) < len(all_leaves):
-            pool_unused = [lf for lf in all_leaves if lf.l3_id not in used_l3]
-            leaf = choose_leaf(pool_unused or candidates)
+        exploration = False
+        if joint and exploration_pool and (not all_leaves or
+                rng.random() < float(compat.get("provisional_exploration_share", 0.0))):
+            leaf = rng.choice(exploration_pool)
+            exploration = True
         else:
-            leaf = choose_leaf(candidates)
+            l1 = _weighted_choice(rng, l1_weights)
+            candidates = leaves_by_l1[l1]
+            if joint:
+                available = [lf for lf in candidates if joint_sampler.leaf_weight(pool_counts[lf.l3_id], per_leaf) > 0]
+                if not available:
+                    available = [lf for lf in all_leaves if joint_sampler.leaf_weight(pool_counts[lf.l3_id], per_leaf) > 0]
+                available = available or initially_eligible or candidates
+                weights = {lf.l3_id: joint_sampler.leaf_weight(pool_counts[lf.l3_id], per_leaf)
+                           * (0.5 + sampler.compute_health_score(leaf_stats[lf.l3_id]) if sampler else 1.0)
+                           for lf in available}
+                by_id = {lf.l3_id: lf for lf in available}
+                leaf = by_id[joint_sampler.weighted_choice(rng, weights)]
+            else:
+                unused = [lf for lf in candidates if lf.l3_id not in used_l3]
+                if unused:
+                    leaf = choose_leaf(unused)
+                elif len(used_l3) < len(all_leaves):
+                    pool_unused = [lf for lf in all_leaves if lf.l3_id not in used_l3]
+                    leaf = choose_leaf(pool_unused or candidates)
+                else:
+                    leaf = choose_leaf(candidates)
         if mixup_spec is not None:
             pair, _mode = mixup_spec
             # The generated question remains anchored to the lower-difficulty
             # parent's leaf; the second parent is supplied as a compatible
             # constraint in the evolver seed/context below.
-            anchored = leaf_by_id.get(str(getattr(pair.high, "l3_id", "")))
+            anchored = leaf_by_id.get(str(getattr(pair.low, "l3_id", "")))
             if anchored is None:
-                anchored = leaf_by_id.get(str(getattr(pair.low, "l3_id", "")))
+                anchored = leaf_by_id.get(str(getattr(pair.high, "l3_id", "")))
             if anchored is not None:
                 leaf = anchored
-        # Prefer leaf-native types if they have residual mass.
-        native = [t for t in leaf.types if t in type_w]
-        if native and rng.random() < 0.7:
-            tw = {t: type_w.get(t, 0.05) for t in native}
-            qtype = _weighted_choice(rng, tw)
-        else:
-            qtype = _weighted_choice(rng, type_w)
-        native_d = [str(d) for d in leaf.difficulty if str(d) in diff_w]
-        if native_d and rng.random() < 0.7:
-            difficulty = int(_weighted_choice(rng, {d: diff_w.get(d, 0.05) for d in native_d}))
-        else:
-            difficulty = int(_weighted_choice(rng, diff_w))
-        if mixup_spec is not None:
-            # Use a deterministic target as a request; independent review may
-            # revise the assessed difficulty later.
-            difficulty = int(mixup_payload(*mixup_spec)["difficulty_target"])
-        bloom = _weighted_choice(rng, bloom_w) if bloom_w else rng.choice(BLOOMS)
-        # Definition-only remember+conceptual is allowed but rare.
-        if bloom == "remember" and qtype == "conceptual" and rng.random() < 0.7:
-            bloom = "apply"
-        allowed_hw = leaf_hardware_allowed(leaf)
-        hw_filtered = {k: v for k, v in (hw_w or {}).items() if k in allowed_hw}
-        arch_specific = [name for name in ("ampere", "hopper", "blackwell") if name in allowed_hw]
-        # Arch-locked claims still allow agnostic for compare items; otherwise
-        # prefer a named architecture so Ampere stems do not grow TMA.
-        if arch_specific and qtype != "compare":
-            named = {k: v for k, v in hw_filtered.items() if k != "agnostic"}
-            if named:
-                hw_filtered = named
-        if hw_filtered:
-            hardware = _weighted_choice(rng, hw_filtered)
-        elif "agnostic" in allowed_hw:
-            hardware = "agnostic"
-        else:
-            hardware = next(iter(allowed_hw))
-        granularity = _weighted_choice(rng, gran_w) if gran_w else "kernel"
-        language = _weighted_choice(rng, lang_w) if lang_w else "zh"
-        if mixup_spec is not None:
-            # Pair compatibility is wasted if the subsequent quota draw assigns
-            # a different language/architecture to its child. Carry the parents'
-            # common environment into the synthesis request.
-            parent = mixup_spec[0].high
-            hardware = parent.hardware
-            granularity = parent.granularity
-            language = parent.language
-        persona = rng.choice(persona_ids)
+                exploration = False
+        if not joint:
+            # Keep the legacy axis sampler intact for the rollback switch.
+            native = [t for t in leaf.types if t in type_w]
+            if native and rng.random() < 0.7:
+                tw = {t: type_w.get(t, 0.05) for t in native}
+                qtype = _weighted_choice(rng, tw)
+            else:
+                qtype = _weighted_choice(rng, type_w)
+            native_d = [str(d) for d in leaf.difficulty if str(d) in diff_w]
+            if native_d and rng.random() < 0.7:
+                difficulty = int(_weighted_choice(rng, {d: diff_w.get(d, 0.05) for d in native_d}))
+            else:
+                difficulty = int(_weighted_choice(rng, diff_w))
+            if mixup_spec is not None:
+                difficulty = int(mixup_payload(*mixup_spec)["difficulty_target"])
+            bloom = _weighted_choice(rng, bloom_w) if bloom_w else rng.choice(BLOOMS)
+            if bloom == "remember" and qtype == "conceptual" and rng.random() < 0.7:
+                bloom = "apply"
+            allowed_hw = leaf_hardware_allowed(leaf)
+            hw_filtered = {k: v for k, v in (hw_w or {}).items() if k in allowed_hw}
+            arch_specific = [name for name in ("ampere", "hopper", "blackwell") if name in allowed_hw]
+            if arch_specific and qtype != "compare":
+                named = {k: v for k, v in hw_filtered.items() if k != "agnostic"}
+                if named:
+                    hw_filtered = named
+            if hw_filtered:
+                hardware = _weighted_choice(rng, hw_filtered)
+            elif "agnostic" in allowed_hw:
+                hardware = "agnostic"
+            else:
+                hardware = next(iter(allowed_hw))
+            granularity = _weighted_choice(rng, gran_w) if gran_w else "kernel"
+            language = _weighted_choice(rng, lang_w) if lang_w else "zh"
+            if mixup_spec is not None:
+                parent = mixup_spec[0].high
+                hardware = parent.hardware
+                granularity = parent.granularity
+                language = parent.language
+            persona = rng.choice(persona_ids)
         role: str = "writer"
         seed_q = None
         seed_id = None
@@ -518,22 +570,51 @@ def plan_briefs(
                 f"PARENT B (higher difficulty):\n{getattr(pair.high, 'question', '')}"
             ).strip()
         if mixup_spec is None and i < n_evolver:
-            seed_candidates = [q for q in seed_pool if q.l3_id == leaf.l3_id]
-            if not seed_candidates and knowledge is not None:
-                related = set(knowledge.related_claim_ids(leaf.l3_id))
-                seed_candidates = [q for q in seed_pool if q.l3_id in related]
+            related = set(knowledge.related_claim_ids(leaf.l3_id)) if knowledge is not None else set()
+            rel = [q for q in seed_pool if q.l3_id in related]
+            same = [q for q in seed_pool if q.l3_id == leaf.l3_id]
+            seed_candidates = same or rel
             if seed_candidates:
                 seed = rng.choice(seed_candidates)
                 role = "evolver"
                 seed_q = seed.question
                 seed_id = seed.id
+        answer_format, scenario, arch_target, operator = "", "generic", "any", None
+        sampled_card = None
+        if joint:
+            axes = joint_sampler.sample_axes(
+                leaf, rng=rng, weights=axis_weights, compat=compat, angles=angle_table,
+                personas=personas,
+                l2_arch=l2meta.get((leaf.domain_id, leaf.l2_id), {}).get("arch") or ["any"],
+                coverage=coverage.get(leaf.l3_id, LeafCoverage()), role=role,
+                generic_share=generic_count / max(len(pool) + i, 1),
+                generic_cap=float(quotas.get("scenario_generic_max_share", 1.0)),
+            )
+            qtype, difficulty, bloom = axes.question_type, axes.difficulty, axes.bloom
+            arch_target, hardware = axes.arch_target, axes.hardware
+            granularity, language, persona = axes.granularity, axes.language, axes.persona
+            answer_format, scenario, operator = axes.answer_format, axes.scenario, axes.operator
+            sampled_card = axes.card
+            if mixup_spec is not None:
+                difficulty = int(mixup_payload(*mixup_spec)["difficulty_target"])
+                parent = mixup_spec[0].high
+                hardware, granularity, language = parent.hardware, parent.granularity, parent.language
+                allowed = joint_sampler.allowed_arch_targets(
+                    leaf, l2meta.get((leaf.domain_id, leaf.l2_id), {}).get("arch") or ["any"],
+                    compat.get("arch_claim_rules") or [],
+                )
+                parent_arch = getattr(parent, "arch_target", "")
+                arch_target = (parent_arch if parent_arch in allowed else
+                               next((name for name in allowed if ARCH_TO_HARDWARE[name] == hardware), allowed[0]))
+                hardware = ARCH_TO_HARDWARE[arch_target]
         hint = _instance_hint(leaf, rng)
+        must_include = hint
         if mixup_context is not None:
             parent_claims = [
                 str(getattr(mixup_context_item, "tests_claim", "") or "").strip()
                 for mixup_context_item in (mixup_spec[0].low, mixup_spec[0].high)
             ]
-            hint = (
+            must_include = (
                 f"MIXUP_MODE={mixup_context['mode']}; target difficulty="
                 f"{mixup_context['difficulty_target']}; raw target="
                 f"{mixup_context['difficulty_raw_score']}. "
@@ -541,19 +622,29 @@ def plan_briefs(
                 + " | ".join(claim for claim in parent_claims if claim)
                 + f". Concrete instance: {hint}"
             )
-        card = _pick_angle(rng, qtype, angle_table, kind=leaf.kind or None)
+        card = sampled_card if joint else _pick_angle(rng, qtype, angle_table, kind=leaf.kind or None)
         angle = str(card.get("ask") or "")
         if (leaf.l3_id, angle) in used_pair:
-            card = _pick_angle(
-                rng, qtype, angle_table, avoid=angle, kind=leaf.kind or None
-            )
+            if joint:
+                alternatives = [item for item in angle_table.get(qtype, [])
+                                if item.get("ask") != angle
+                                and (leaf.l3_id, str(item.get("ask") or "")) not in used_pair
+                                and (leaf.kind or "mechanism") in (item.get("kinds") or [])]
+                if alternatives:
+                    card = rng.choice(alternatives)
+                    allowed_formats = [fmt for fmt in compat["type_to_formats"][qtype]
+                                       if fmt in (card.get("formats") or [])]
+                    if allowed_formats and answer_format not in allowed_formats:
+                        answer_format = allowed_formats[0]
+            else:
+                card = _pick_angle(rng, qtype, angle_table, avoid=angle, kind=leaf.kind or None)
             angle = str(card.get("ask") or angle)
         used_l3.add(leaf.l3_id)
         used_pair.add((leaf.l3_id, angle))
 
         # Breadth vs depth signal
         leaf_questions = [q for q in accepted if q.l3_id == leaf.l3_id]
-        n_leaf = len(leaf_questions)
+        n_leaf = pool_counts[leaf.l3_id] if joint else len(leaf_questions)
         if n_leaf < 3:
             breadth_signal = "BREADTH"
             breadth_guidance = f"This leaf has only {n_leaf} questions; explore different facets of the claim"
@@ -609,12 +700,12 @@ def plan_briefs(
                 hardware=hardware,
                 granularity=granularity,
                 language=language,
-                must_include=hint,
+                must_include=must_include,
                 must_avoid=avoid,
                 anti_templates=anti,
                 angle=angle,
                 instance_hint=hint,
-                must_avoid_stems=_stems_for_leaf(accepted, leaf.l3_id),
+                must_avoid_stems=_stems_for_leaf(accepted, pending, leaf.l3_id),
                 angle_guide="\n".join(guide_parts),
                 angle_id=str(card.get("id") or ""),
                 kind=leaf.kind or "mechanism",
@@ -634,11 +725,23 @@ def plan_briefs(
                     if mixup_context and (mixup_context.get("difficulty_raw_score")) is not None
                     else None
                 ),
+                answer_format=answer_format,
+                scenario=scenario,
+                arch_target=arch_target,
+                operator=operator,
+                used_angles=sorted(coverage.get(leaf.l3_id, LeafCoverage()).angles),
+                used_formats=sorted(coverage.get(leaf.l3_id, LeafCoverage()).formats),
+                used_scenarios=sorted(coverage.get(leaf.l3_id, LeafCoverage()).scenarios),
+                exploration=exploration,
             )
         )
         # Light recency penalty so a batch does not collapse onto one L1.
-        l1_weights[leaf.domain_id] = l1_weights.get(leaf.domain_id, 1.0) * 0.7
+        if leaf.domain_id in l1_weights:
+            l1_weights[leaf.domain_id] *= 0.7
         l2_key = f"{leaf.domain_id}.{leaf.l2_id}"
         l2_counts[l2_key] = l2_counts.get(l2_key, 0) + 1
+        pool_counts[leaf.l3_id] += 1
+        if scenario == "generic":
+            generic_count += 1
     rng.shuffle(briefs)
     return briefs

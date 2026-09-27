@@ -1,5 +1,6 @@
 id: T29
 name: 计算库深水
+weight: 0.5
 children:
 - id: cusparse_spmm
   name: cuSPARSE SpMM
@@ -82,6 +83,7 @@ children:
     difficulty:
     - 3
     kind: numeric
+  target_leaves: 8
 - id: cusolver_dn
   name: cuSOLVER 稠密分解
   leaves:
@@ -163,6 +165,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 8
 - id: cutensor_contraction
   name: cuTENSOR 收缩
   leaves:
@@ -246,6 +249,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 8
 - id: cufft_layout
   name: cuFFT 布局
   leaves:
@@ -328,6 +332,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 8
 - id: cublasdx_matmul
   name: MatmulDx / cuBLASDx
   leaves:
@@ -407,6 +412,7 @@ children:
     - 3
     - 4
     kind: failure
+  target_leaves: 8
 - id: cublaslt_epilogue
   name: cuBLASLt epilogue
   leaves:
@@ -481,6 +487,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 8
 - id: cublaslt_workspace
   name: cuBLASLt workspace 与对齐
   leaves:
@@ -553,6 +560,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 8
 - id: cufft_workspace
   name: cuFFT workspace 与 plan
   leaves:
@@ -624,6 +632,7 @@ children:
     - 2
     - 3
     kind: failure
+  target_leaves: 8
 - id: cusparse_spmv
   name: cuSPARSE SpMV
   leaves:
@@ -693,6 +702,7 @@ children:
     - 2
     - 3
     kind: numeric
+  target_leaves: 8
 - id: math_det_flags
   name: 确定性标志与算法锁定
   leaves:
@@ -766,6 +776,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 8
 - id: lib_ptr_align
   name: 库指针对齐
   leaves:
@@ -839,6 +850,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 8
 - id: mathdx_fft
   name: cuFFTDx / MathDx 约束
   leaves:
@@ -907,3 +919,4 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 8

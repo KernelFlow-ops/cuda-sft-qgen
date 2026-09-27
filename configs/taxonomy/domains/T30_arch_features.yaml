@@ -1,5 +1,6 @@
 id: T30
 name: 架构特性编年
+weight: 0.9
 children:
 - id: sm80_cp_async
   name: SM80 异步拷贝
@@ -89,6 +90,11 @@ children:
     difficulty:
     - 2
     kind: feature
+  arch:
+  - sm_80
+  - sm_86
+  - sm_89
+  target_leaves: 10
 - id: sm80_mma_sparse
   name: SM80 MMA 与 2:4 稀疏
   leaves:
@@ -178,6 +184,11 @@ children:
     difficulty:
     - 3
     kind: feature
+  arch:
+  - sm_80
+  - sm_86
+  - sm_89
+  target_leaves: 10
 - id: sm90_tma_cluster
   name: SM90 TMA 与 Cluster
   leaves:
@@ -271,6 +282,10 @@ children:
     - 3
     - 4
     kind: feature
+  arch:
+  - sm_90
+  - sm_90a
+  target_leaves: 10
 - id: sm90_wgmma
   name: SM90 WGMMA
   leaves:
@@ -366,6 +381,9 @@ children:
     - 3
     - 4
     kind: feature
+  arch:
+  - sm_90a
+  target_leaves: 10
 - id: sm100_tmem
   name: SM100 TMEM
   leaves:
@@ -454,6 +472,9 @@ children:
     difficulty:
     - 4
     kind: feature
+  arch:
+  - sm_100a
+  target_leaves: 10
 - id: sm100_umma
   name: SM100 UMMA / tcgen05
   leaves:
@@ -543,6 +564,9 @@ children:
     difficulty:
     - 4
     kind: feature
+  arch:
+  - sm_100a
+  target_leaves: 10
 - id: dp4a_int
   name: dp4a 与整数点积
   leaves:
@@ -615,6 +639,7 @@ children:
     - 2
     - 3
     kind: feature
+  target_leaves: 10
 - id: cache_policy
   name: 缓存策略
   leaves:
@@ -688,6 +713,7 @@ children:
     - 2
     - 3
     kind: feature
+  target_leaves: 10
 - id: cluster_cta
   name: Thread block cluster
   leaves:
@@ -761,6 +787,11 @@ children:
     - 2
     - 3
     kind: feature
+  arch:
+  - sm_90
+  - sm_90a
+  - sm_100a
+  target_leaves: 10
 - id: fp8_tensor
   name: FP8 Tensor Core
   leaves:
@@ -832,6 +863,12 @@ children:
     - 2
     - 3
     kind: feature
+  arch:
+  - sm_89
+  - sm_90
+  - sm_90a
+  - sm_100a
+  target_leaves: 10
 - id: green_ctx
   name: Green context
   leaves:
@@ -901,6 +938,10 @@ children:
     difficulty:
     - 3
     kind: feature
+  arch:
+  - sm_90
+  - sm_100a
+  target_leaves: 10
 - id: tma_tensormap
   name: TMA tensor map
   leaves:
@@ -974,6 +1015,11 @@ children:
     - 3
     - 4
     kind: feature
+  arch:
+  - sm_90
+  - sm_90a
+  - sm_100a
+  target_leaves: 10
 - id: async_bulk
   name: cp.async.bulk
   leaves:
@@ -1045,6 +1091,11 @@ children:
     difficulty:
     - 4
     kind: feature
+  arch:
+  - sm_90
+  - sm_90a
+  - sm_100a
+  target_leaves: 10
 - id: sparse_tc
   name: 结构稀疏 Tensor Core
   leaves:
@@ -1116,3 +1167,4 @@ children:
     difficulty:
     - 3
     kind: feature
+  target_leaves: 10

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from cuda_sft_qgen.jsonutil import _scan_fields, normalize_language, parse_question_payload
+from cuda_sft_qgen.jsonutil import (
+    _scan_fields, extract_complete_json_field, normalize_language, parse_question_payload,
+)
 
 
 SAMPLE_SYNCTHREADS = """{
@@ -56,6 +58,13 @@ SAMPLE_INNER_QUOTES = """{
   "tests_claim": "device lambda capture rules",
   "language": "en"
 }"""
+
+
+def test_complete_field_can_be_read_from_broken_outer_json():
+    raw = '{"question": "CUDA warp?", "draft_plan": {"mode": "single"}, broken}'
+    assert extract_complete_json_field(raw, "question") == "CUDA warp?"
+    assert extract_complete_json_field(raw, "draft_plan") == {"mode": "single"}
+    assert extract_complete_json_field(raw, "missing") is None
 
 
 def test_syncthreads_divergent_fence():

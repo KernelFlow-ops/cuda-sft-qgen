@@ -24,8 +24,10 @@ Operators and the dimension each MUST change:
 11. decompose-reverse — give the result and ask for the missing parameter (e.g. given occupancy, find max regs).
 
 Rules
+- Apply the Writer's complete JSON and factual contract. Keep every required private field; change the seed's
+  reasoning task while preserving one claim and the assigned angle.
 - Match operator to leaf kind: profiler only for mechanism/failure/numeric/formula leaves; layout-eq only when an
   address mapping exists; re-arch only when the target architecture really has a counterpart mechanism.
 - The child's `draft_target` must differ from the seed's answer.
 - State in `draft_plan.construct` which dimension changed and why the seed's answer no longer applies.
-- Same JSON contract as the writer, plus "operator": "{{operator}}".
+- Same output schema as the writer, plus "operator": "{{operator}}".

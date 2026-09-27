@@ -7,7 +7,6 @@ import pytest
 
 from cuda_sft_qgen.config import load_settings
 from cuda_sft_qgen.errors import RateLimitError
-from cuda_sft_qgen.graph.app import run_pipeline
 from cuda_sft_qgen.graph.nodes.generate import enqueue_retry
 from cuda_sft_qgen.models import QuestionBrief
 from cuda_sft_qgen.runtime import build_runtime, set_runtime, reset_runtime
@@ -108,56 +107,6 @@ def test_retry_queue_max_attempts(temp_data_dir, sample_brief):
         assert any(q.l3_id == brief.l3_id for q in rejected)
     finally:
         reset_runtime(token)
-
-
-def test_retry_recovery_in_pipeline(temp_data_dir):
-    """Test pipeline recovers from retry queue."""
-    settings = load_settings(
-        fake_llm=True,
-        target=5,
-        data_dir=str(temp_data_dir),
-    )
-    settings.embedding_provider = "fake"
-    settings.retry_drain_enabled = True
-    settings.retry_base_cooldown_sec = 0.1
-    settings.max_iterations = 10
-
-    runtime = build_runtime(settings)
-    token = set_runtime(runtime)
-
-    try:
-        # Manually add a retry item
-        brief_data = {
-            "topic_path": ["compute", "occupancy", "cuda_retry_001"],
-            "l3_id": "cuda_retry_001",
-            "l3_claim": "Test retry recovery",
-            "question_type": "conceptual",
-            "difficulty": 2,
-            "bloom": "understand",
-            "persona": "cuda_interviewer",
-            "hardware": "hopper",
-            "granularity": "kernel",
-            "language": "zh",
-            "role": "writer",
-        }
-        runtime.store.enqueue_retry({
-            "brief": brief_data,
-            "reason": "429",
-            "attempts": 1,
-            "next_ok_at": time.time(),
-        })
-
-        reset_runtime(token)
-
-        # Run pipeline
-        result = run_pipeline(settings, runtime=None)
-
-        # Pipeline should process retry queue
-        assert result["accepted_count"] >= 0
-    finally:
-        closer = getattr(runtime, "close", None)
-        if callable(closer):
-            closer()
 
 
 def test_retry_queue_exponential_backoff(temp_data_dir, sample_brief):

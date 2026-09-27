@@ -1,5 +1,6 @@
 id: T05
 name: 性能优化方法论
+weight: 1.0
 children:
 - id: access
   name: 访存优化
@@ -79,6 +80,7 @@ children:
     difficulty:
     - 2
     kind: api
+  target_leaves: 12
 - id: fusion
   name: 融合与持久化
   leaves:
@@ -155,6 +157,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: roofline
   name: Roofline 与瓶颈
   leaves:
@@ -231,6 +234,7 @@ children:
     difficulty:
     - 2
     kind: formula
+  target_leaves: 12
 - id: txn_count
   name: 合并事务计数
   leaves:
@@ -298,6 +302,7 @@ children:
     difficulty:
     - 3
     kind: formula
+  target_leaves: 12
 - id: vectorize
   name: 向量化失败诊断
   leaves:
@@ -368,6 +373,7 @@ children:
     - 2
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: unroll_cost
   name: 展开与指令缓存
   leaves:
@@ -432,6 +438,7 @@ children:
     difficulty:
     - 2
     kind: mechanism
+  target_leaves: 12
 - id: cache_blocking
   name: Cache blocking 与 tiling
   leaves:
@@ -500,6 +507,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: instruction_mix
   name: 指令混合与管道
   leaves:
@@ -567,6 +575,7 @@ children:
     - 2
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: kernel_split
   name: 拆核与融合边界
   leaves:
@@ -635,6 +644,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: occupancy_trade
   name: 占用与延迟隐藏权衡
   leaves:
@@ -702,6 +712,7 @@ children:
     - 2
     - 3
     kind: formula
+  target_leaves: 12
 - id: prefetch_sw
   name: 软件预取与异步搬移
   leaves:
@@ -767,6 +778,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: epilogue_opt
   name: Epilogue 与写回
   leaves:
@@ -834,6 +846,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: stride_layout
   name: 步长布局与合并失败
   leaves:
@@ -903,3 +916,4 @@ children:
     - 2
     - 3
     kind: formula
+  target_leaves: 12

@@ -27,6 +27,9 @@ def test_retry_due_items_roundtrip(tmp_path: Path):
     due = store.due_retry_items(limit=10)
     assert len(due) == 1
     assert due[0]["brief"]["l3_id"] == "a"
+    assert store.retry_queue_size() == 2
+    assert len(store.load_retry_queue()) == 1
+    store.complete_retry(due[0]["task_id"])
     assert store.retry_queue_size() == 1
 
 

@@ -49,7 +49,7 @@ def mock_runtime():
     rt.knowledge = None
     rt.review_llm = None
     rt.settings.review = {}
-    rt.settings.nvidia_model = "test-reviewer"
+    rt.settings.review_model = "test-reviewer"
     rt.llm.complete_json.return_value = {
         "id": "test-q-001",
         "action": "accept",
@@ -58,6 +58,11 @@ def mock_runtime():
                     "hardware_compatibility", "answer_leakage", "metadata", "duplication")},
         "evidence": ["The claim and stem agree."],
         "internal_reference_answer": "Expected answer",
+        "value_scores": {
+            "pedagogical_value": 4,
+            "discriminativeness": 4,
+            "realism": 4,
+        },
         "assessed_metadata": {"question_type": "conceptual", "difficulty": 2,
                               "bloom": "apply", "hardware": "hopper",
                               "granularity": "api", "language": "en"},
@@ -85,6 +90,86 @@ def test_compact_knowledge_empty_is_not_reject_signal():
     slim = _compact_knowledge({"claims": [], "evidence": []})
     assert slim["status"] == "missing"
     assert slim["evidence"] == []
+
+
+def _cute_shape_chair_question(base: Question) -> Question:
+    return base.model_copy(update={
+        "question": (
+            "What are the shapes from zipped_divide and tiled_divide?\n"
+            "```cpp\n"
+            "__global__ void build_attention_layouts() {\n"
+            "using namespace cute;\n"
+            "auto score = make_layout(make_shape(_12{}, _18{}));\n"
+            "auto tile = make_tile(_3{}, _2{});\n"
+            "auto z = zipped_divide(score, tile);\n"
+            "auto t = tiled_divide(score, tile);\n"
+            "(void)z; (void)t;\n"
+            "}\n```\n"
+            "A. Both calls are well-formed; z has shape ((_3,_2),(_4,_9)) and t has shape (_6,(_4,_9)).\n"
+            "B. Both calls are well-formed; z has shape (_6,(_4,_9)) and t has shape ((_3,_2),(_4,_9)).\n"
+            "C. Both calls are well-formed; z has shape ((_3,_2),(_4,_9)) and t has shape ((_3,_2),(_4,_9)).\n"
+            "D. Both calls are well-formed; z has shape (_6,_4,_9) and t has shape (_6,_4,_9)."
+        ),
+        "answer_format": "single_choice",
+        "draft_target": "A",
+        "internal_reference_answer": "A",
+    })
+
+
+def test_cute_shape_guard_contradiction_overrides_chair_accept(mock_question, mock_runtime):
+    from cuda_sft_qgen.review.cute_shapes import check_cute_shapes
+
+    question = _cute_shape_chair_question(mock_question)
+    shape_result = check_cute_shapes(question)
+    assert shape_result["reason"] == "no_correct_option"
+    verified = {
+        "status": "fail",
+        "reason": "cute_shape_contradiction",
+        "evidence": {"cute_shapes": shape_result, "votes": [{"answer": "A"}] * 5},
+    }
+    item = {"question": question.model_dump(), "decision": {"verdict": "gray"}}
+
+    with patch("cuda_sft_qgen.graph.nodes.review_chair.get_runtime", return_value=mock_runtime):
+        with patch("cuda_sft_qgen.graph.nodes.review_chair.load_prompt", return_value="Test prompt"):
+            result = _parallel_chair_decision(item, "Test prompt", verified)
+
+    assert result["action"] == "reject"
+    assert result["reason"].startswith("chair:correctness:cute_shape_guard:no_correct_option")
+    assert result["review"]["model_action"] == "accept"
+
+
+def test_unsupported_cute_shape_guard_keeps_chair_accept_pending(mock_question, mock_runtime):
+    question = _cute_shape_chair_question(mock_question)
+    unsupported = {
+        "status": "pending",
+        "reason": "cute_shape_unsupported",
+        "evidence": {"cute_shapes": {"status": "unsupported", "reason": "source_dynamic"}},
+    }
+    item = {"question": question.model_dump(), "decision": {"verdict": "gray"}}
+
+    with patch("cuda_sft_qgen.graph.nodes.review_chair.get_runtime", return_value=mock_runtime):
+        with patch("cuda_sft_qgen.graph.nodes.review_chair.load_prompt", return_value="Test prompt"):
+            result = _parallel_chair_decision(item, "Test prompt", unsupported)
+
+    assert result["action"] == "pending"
+    assert result["reason"] == "verification:cute_shape_unsupported"
+
+
+def test_other_verifier_failure_does_not_use_cute_shape_force_reject(mock_question, mock_runtime):
+    question = _cute_shape_chair_question(mock_question)
+    ordinary_failure = {
+        "status": "fail",
+        "reason": "runtime_claim_contradicted",
+        "evidence": {"stdout": "unexpected"},
+    }
+    item = {"question": question.model_dump(), "decision": {"verdict": "gray"}}
+
+    with patch("cuda_sft_qgen.graph.nodes.review_chair.get_runtime", return_value=mock_runtime):
+        with patch("cuda_sft_qgen.graph.nodes.review_chair.load_prompt", return_value="Test prompt"):
+            result = _parallel_chair_decision(item, "Test prompt", ordinary_failure)
+
+    assert result["action"] == "pending"
+    assert result["reason"] == "verification:runtime_claim_contradicted"
 
 
 class TestParallelChairDecision:
@@ -123,7 +208,7 @@ class TestParallelChairDecision:
 
                 assert result["id"] == "test-q-001"
                 assert result["action"] == "reject"
-                assert result["reason"] == "duplicate question"
+                assert result["reason"] == "chair:duplicate:duplicate question"
 
     def test_llm_failure_fallback(self, mock_question, mock_runtime):
         """Test that LLM failure remains pending."""

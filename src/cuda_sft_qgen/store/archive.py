@@ -167,7 +167,11 @@ class Archive:
                     self._put_question(q, {"accept": "accepted", "reject": "rejected",
                                            "pending": "pending"}[action])
                 counts = dict(self._db.execute("SELECT status,count(*) FROM questions GROUP BY status"))
-                state = {**run_state, "accepted_count": counts.get("accepted", 0)}
+                previous = self._get_meta("run", {})
+                state = {**previous, **run_state,
+                         "accepted_count": self.status_counts()["verified_accepted"]}
+                for key in ("iteration", "review_rounds"):
+                    state[key] = max(int(previous.get(key) or 0), int(run_state.get(key) or 0))
                 self._set_meta("run", state)
                 self._set_meta("steering", steering.model_dump() if isinstance(steering, SteeringBrief) else steering)
             # Projections may be rebuilt after a failure; the transaction above is authoritative.
@@ -226,6 +230,9 @@ class Archive:
         skipped = 0
         for q in self.load_accepted():
             details = dict(getattr(q, "review_details", {}) or {})
+            if not self.has_real_writer_origin(q):
+                skipped += 1
+                continue
             if details.get("reviewer_model") in {None, "", "fake"}:
                 skipped += 1
                 continue
@@ -379,6 +386,39 @@ class Archive:
             self._db.execute("UPDATE generation_tasks SET status='complete',updated_at=? WHERE id=?",
                              (time.time(), task_id))
 
+    def generation_task_payload(self, task_id: str) -> dict | None:
+        """Recover the original Writer brief for a bounded review repair."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT payload FROM generation_tasks WHERE id=?", (task_id,)
+            ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def enqueue_review_repair(self, source_id: str, payload: dict[str, Any]) -> bool:
+        """Persist one post-Chair repair per rejected source question."""
+        task_id = "review_repair:" + source_id
+        with self._lock, self._db:
+            cursor = self._db.execute(
+                "INSERT OR IGNORE INTO generation_tasks VALUES (?,?,?,?)",
+                (task_id, json.dumps(payload, ensure_ascii=False), "repair_pending", time.time()),
+            )
+        return cursor.rowcount > 0
+
+    def unfinished_review_repairs(self) -> list[dict[str, Any]]:
+        """Recover post-Chair repairs left unfinished by a previous process."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id,payload FROM generation_tasks WHERE status='repair_pending' ORDER BY rowid"
+            ).fetchall()
+        return [{"repair_task_id": row[0], **json.loads(row[1])} for row in rows]
+
+    def complete_review_repair(self, task_id: str) -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                "UPDATE generation_tasks SET status='complete',updated_at=? WHERE id=?",
+                (time.time(), task_id),
+            )
+
     def unfinished_generation_tasks(self) -> list[dict]:
         """Briefs that were in-flight when the process last stopped."""
         with self._lock:
@@ -406,6 +446,50 @@ class Archive:
     def load_pending(self) -> list[Question]:
         """Pending / deferred-review questions."""
         return self._load_status("pending")
+
+    def status_counts(self) -> dict[str, int]:
+        """Read archive totals without parsing every stored question."""
+        with self._lock:
+            rows = self._db.execute("SELECT status, COUNT(*) FROM questions GROUP BY status").fetchall()
+            verified = self._db.execute("""
+                SELECT COUNT(*) FROM questions
+                WHERE status='accepted'
+                  AND json_extract(payload, '$.generation_provenance.writer_real_api')=1
+                  AND json_extract(payload, '$.generation_provenance.writer_provider') IN ('nvidia','openai')
+                  AND COALESCE(json_extract(payload, '$.generation_provenance.writer_model'),'') != ''
+            """).fetchone()[0]
+        return {**dict(rows), "verified_accepted": verified}
+
+    @staticmethod
+    def has_real_writer_origin(question: Question | dict) -> bool:
+        """Require an explicit API Writer record; missing legacy metadata is untrusted."""
+        provenance = (question.get("generation_provenance") if isinstance(question, dict)
+                      else question.generation_provenance) or {}
+        return (provenance.get("writer_real_api") is True
+                and provenance.get("writer_provider") in {"nvidia", "openai"}
+                and bool(provenance.get("writer_model")))
+
+    def coverage_history(self) -> dict[str, "LeafCoverage"]:
+        """Count per-leaf axes used by accepted and pending questions."""
+        from cuda_sft_qgen.planner.joint import LeafCoverage
+
+        out: dict[str, LeafCoverage] = {}
+        for question in self.load_accepted() + self.load_pending():
+            if not question.l3_id:
+                continue
+            cov = out.setdefault(question.l3_id, LeafCoverage())
+            cov.count += 1
+            if question.angle_id:
+                cov.angles[question.angle_id] += 1
+            if question.answer_format:
+                cov.formats[question.answer_format] += 1
+            if question.scenario:
+                cov.scenarios[question.scenario] += 1
+            if question.arch_target:
+                cov.archs[question.arch_target] += 1
+            if question.operator:
+                cov.operators[question.operator] += 1
+        return out
 
     def append_accepted(self, question: Question) -> None:
         """Insert or update an accepted question and refresh JSONL."""
@@ -451,9 +535,14 @@ class Archive:
         """Checkpoint iteration/review_rounds/accepted_count for resume."""
         with self._lock:
             with self._db:
-                self._set_meta("run", payload)
+                previous = self._get_meta("run", {})
+                merged = {**previous, **payload}
+                for key in ("iteration", "review_rounds"):
+                    merged[key] = max(int(previous.get(key) or 0), int(payload.get(key) or 0))
+                merged["accepted_count"] = self.status_counts()["verified_accepted"]
+                self._set_meta("run", merged)
             self.run_path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
             )
 
     def load_run_state(self) -> dict[str, Any]:
@@ -573,7 +662,8 @@ class Archive:
 
     def retry_queue_size(self) -> int:
         """Total retry tasks, including those not yet due."""
-        return len(self.load_retry_queue())
+        with self._lock:
+            return self._db.execute("SELECT COUNT(*) FROM retry_tasks").fetchone()[0]
 
     def due_retry_count(self, now: float | None = None) -> int:
         """Number of retry tasks whose due time has passed and are unleased."""
@@ -652,9 +742,12 @@ class Archive:
         accepted = self.load_accepted()
         rejected = self.load_rejected()
         pending = self.load_pending()
+        verified_count = sum(self.has_real_writer_origin(q) for q in accepted)
         stats: dict[str, Any] = {
             "accepted": len(accepted),
             "accepted_count": len(accepted),
+            "verified_accepted_count": verified_count,
+            "unverified_accepted_count": len(accepted) - verified_count,
             "rejected": len(rejected),
             "rejected_count": len(rejected),
             "pending": len(pending),

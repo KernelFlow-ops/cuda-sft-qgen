@@ -68,7 +68,6 @@ def validate_modules() -> dict[str, Any]:
     print_section("Module Import Validation")
 
     modules = [
-        "cuda_sft_qgen.graph.state_v2",
         "cuda_sft_qgen.observability",
         "cuda_sft_qgen.planner_v2",
         "cuda_sft_qgen.executor",
@@ -98,7 +97,6 @@ def validate_files() -> dict[str, bool]:
     root = Path(__file__).parent
     expected_files = [
         # New modules
-        "src/cuda_sft_qgen/graph/state_v2.py",
         "src/cuda_sft_qgen/observability.py",
         "src/cuda_sft_qgen/planner_v2.py",
         "src/cuda_sft_qgen/executor.py",
@@ -107,7 +105,6 @@ def validate_files() -> dict[str, bool]:
         "src/cuda_sft_qgen/taxonomy/expander.py",
         "src/cuda_sft_qgen/config_v2.py",
         # Tests
-        "tests/graph/test_state_validation.py",
         "tests/test_observability.py",
         "tests/test_planner_adaptive.py",
         "tests/test_priority_executor.py",

@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from cuda_sft_qgen.cli import build_parser
+from cuda_sft_qgen import gate as gate_module
 from cuda_sft_qgen.gate import (
     build_quality_report,
     classify_reject_reason,
     compare_gate_reports,
+    llm_activity,
     median_baseline,
     percentile,
+    stage_activity,
     write_quality_sample,
     write_verdict_md,
 )
@@ -190,14 +195,174 @@ def test_quality_report_classifies_chair_fail_checks():
 def test_quality_sample_writes_jsonl(tmp_path: Path):
     accepted = [_question(id="q_ok", internal_reference_answer="42")]
     rejected = [_question(id="q_bad", question="", reject_reason="sieve_too_short", review_status="rejected")]
+    pending = [_question(id="q_pending", internal_reference_answer="secret", review_status="pending")]
     path = tmp_path / "quality_sample.jsonl"
-    records = write_quality_sample(accepted, rejected, [], path, limit=10)
+    records = write_quality_sample(accepted, rejected, pending, path, limit=10)
     assert path.exists()
     lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert lines[0]["id"] == "q_ok"
-    assert lines[0]["internal_reference_answer"] == "42"
     assert lines[1]["id"] == "q_bad"
-    assert len(records) == 2
+    assert lines[2]["id"] == "q_pending"
+    assert all("internal_reference_answer" not in row for row in lines)
+    assert all("reason" not in row and "warnings" not in row for row in lines)
+    assert lines[1]["reason_code"] == "sieve"
+    assert len(records) == 3
+
+
+def test_llm_activity_reports_observed_model_priority_groups():
+    metrics = {
+        "counters": {
+            "llm_requests{model=writer-v1,priority=0}": 3,
+            "llm_failures{model=writer-v1,priority=0}": 1,
+            "llm_requests{model=chair-v2,priority=2}": 2,
+        },
+        "histograms": {
+            "llm_seconds{model=writer-v1,priority=0}": {
+                "count": 3, "avg": 4.0, "max": 8.0, "p50": 3.0, "p95": 7.0,
+            },
+        },
+    }
+    settings = SimpleNamespace(agent_apis={
+        "writer": SimpleNamespace(model="writer-v1"),
+        "evolver": SimpleNamespace(model="evolver-v1"),
+        "review": SimpleNamespace(model="chair-v2"),
+    })
+    groups = llm_activity(metrics, settings)["request_groups"]
+    assert groups[0]["calls"] == 3
+    assert groups[0]["failures"] == 1
+    assert groups[0]["role_candidates"] == ["writer"]
+    assert groups[0]["duration_seconds"]["p95"] == 7.0
+    assert groups[1]["calls"] == 2
+    assert "verifier" in groups[1]["role_candidates"]
+
+
+def test_llm_activity_attributes_explicit_agent_role():
+    settings = SimpleNamespace(agent_apis={"review": SimpleNamespace(model="chair-v2")})
+    metrics = {"counters": {"llm_requests{model=chair-v2,priority=2,role=verifier}": 5}}
+    group = llm_activity(metrics, settings)["request_groups"][0]
+    assert group["role"] == "verifier"
+    assert group["role_candidates"] == ["verifier"]
+    assert group["calls"] == 5
+
+
+def test_stage_activity_recovers_overlapping_intervals(tmp_path: Path):
+    from datetime import datetime
+
+    started = 1_700_000_000.0
+    stamp = lambda seconds: datetime.fromtimestamp(started + seconds).strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
+    path = tmp_path / "pipeline.log"
+    path.write_text("\n".join([
+        f"{stamp(5)} INFO cuda_sft_qgen.graph.pipeline: review_stage start pending=2",
+        f"{stamp(7)} INFO cuda_sft_qgen.graph.nodes.salvage: repair_stage start items=1",
+        f"{stamp(8)} INFO cuda_sft_qgen.graph.pipeline: review_stage done duration_s=3.00",
+        f"{stamp(9)} INFO cuda_sft_qgen.graph.nodes.salvage: repair_batch items=1 ok=1 retry=0",
+        f"{stamp(10)} INFO cuda_sft_qgen.graph.nodes.generate: generate_batch done ok=1 salvage=0 retry=0 fail=0 pending=1 duration_s=10.0 ok_per_min=6",
+    ]) + "\n", encoding="utf-8")
+    activity = stage_activity(path, started)
+    assert activity["interval_counts"] == {"review": 1, "repair": 1, "generation": 1}
+    assert activity["overlaps"]["generation+review"]["overlap_seconds"] == pytest.approx(3.0)
+    assert activity["overlaps"]["generation+repair"]["overlap_seconds"] == pytest.approx(2.0)
+    assert activity["overlaps"]["repair+review"]["overlap_seconds"] == pytest.approx(1.0)
+
+
+def test_run_gate_secures_output_tree_on_return(tmp_path: Path, monkeypatch):
+    output = tmp_path / "private-gate"
+
+    def write_artifacts(_settings, output, **_kwargs):
+        nested = output / "nested"
+        nested.mkdir()
+        (output / "report.json").write_text("{}", encoding="utf-8")
+        (nested / "sample.jsonl").write_text("{}\n", encoding="utf-8")
+        return {"verdict": "baseline"}
+
+    monkeypatch.setattr(gate_module, "_run_gate_impl", write_artifacts)
+    report = gate_module.run_gate(SimpleNamespace(), output, phase="test")
+    assert report["verdict"] == "baseline"
+    assert output.stat().st_mode & 0o777 == 0o700
+    assert (output / "nested").stat().st_mode & 0o777 == 0o700
+    assert (output / "report.json").stat().st_mode & 0o777 == 0o600
+    assert (output / "nested" / "sample.jsonl").stat().st_mode & 0o777 == 0o600
+
+
+def test_gate_holds_pipeline_lock_through_runtime_lifecycle(tmp_path: Path, fake_settings, monkeypatch):
+    from cuda_sft_qgen.graph import app as graph_app
+    from cuda_sft_qgen import pack as pack_module
+
+    real_pipeline_lock = graph_app.pipeline_lock
+    events = []
+    lock_active = False
+
+    @contextmanager
+    def tracked_lock(data_dir):
+        nonlocal lock_active
+        with real_pipeline_lock(data_dir):
+            lock_active = True
+            events.append("lock_enter")
+            try:
+                yield
+            finally:
+                events.append("lock_exit")
+                lock_active = False
+
+    class Store:
+        def load_accepted(self):
+            return []
+
+        def load_rejected(self):
+            return []
+
+        def load_pending(self):
+            return []
+
+    class Runtime:
+        store = Store()
+        knowledge = None
+
+        def refresh_knowledge(self, *, force=False):
+            assert lock_active
+            assert force is True
+            events.append("knowledge_refresh")
+
+        def close(self):
+            assert lock_active
+            events.append("runtime_close")
+
+    def build_runtime(_settings):
+        assert lock_active
+        events.append("runtime_build")
+        return Runtime()
+
+    def run_pipeline(_settings, *, runtime, lock_held):
+        assert lock_active
+        assert lock_held is True
+        assert runtime is not None
+        events.append("pipeline")
+        return {"status": "archived", "done": True}
+
+    def load_pack(path):
+        assert lock_active
+        assert path.name == "pack.yaml"
+        events.append("pack_load")
+        return object()
+
+    def ingest_pack(_knowledge, _pack, **kwargs):
+        assert lock_active
+        assert kwargs == {"apply": True, "enqueue_jobs": False}
+        events.append("pack_ingest")
+        return {}
+
+    monkeypatch.setattr(graph_app, "pipeline_lock", tracked_lock)
+    monkeypatch.setattr(pack_module, "load_pack", load_pack)
+    monkeypatch.setattr(pack_module, "ingest_pack", ingest_pack)
+    monkeypatch.setattr(gate_module, "build_runtime", build_runtime)
+    monkeypatch.setattr(gate_module, "run_pipeline", run_pipeline)
+    output = tmp_path / "gate-lock"
+    report = gate_module.run_gate(fake_settings, output, phase="lock-test", target=1, allow_fake=True,
+                                  ingest_packs=[tmp_path / "pack.yaml"])
+
+    assert report["status"] == "archived"
+    assert events == ["lock_enter", "runtime_build", "pack_load", "pack_ingest", "knowledge_refresh",
+                      "pipeline", "runtime_close", "lock_exit"]
 
 
 def test_verdict_markdown_includes_quality(tmp_path: Path):

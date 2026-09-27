@@ -15,13 +15,15 @@ def test_pending_room_caps_new_briefs_under_hard_limit():
 
 def test_pending_room_zero_when_over_total_capacity():
     retry_room, room = pending_room(pending_n=10, active_n=4, capacity=6, total_capacity=8)
-    assert retry_room == 2
+    assert retry_room == 0
     assert room == 0
 
 
-def test_chair_review_trigger_is_min_of_batch_and_workers():
+def test_chair_review_trigger_hands_off_first_item():
     settings = SimpleNamespace(review_batch_size=20, review={"chair_max_workers": 4})
-    assert chair_review_trigger(settings) == 4
+    assert chair_review_trigger(settings) == 1
+    settings.review["chair_trigger_count"] = 3
+    assert chair_review_trigger(settings) == 3
     settings.review_batch_size = 2
     assert chair_review_trigger(settings) == 2
 

@@ -28,7 +28,6 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("-v", "--verbose", action="store_true")
     g.add_argument("--target", type=int, default=None)
     g.add_argument("--batch", type=int, default=None, help="REVIEW_BATCH_SIZE")
-    g.add_argument("--fake", action="store_true", help="use FakeLLM, no API key")
     g.add_argument("--rebuild-taxonomy", action="store_true")
     g.add_argument(
         "--data-dir",
@@ -41,7 +40,6 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("-v", "--verbose", action="store_true")
     r.add_argument("--target", type=int, default=None)
     r.add_argument("--batch", type=int, default=None)
-    r.add_argument("--fake", action="store_true")
     r.add_argument("--data-dir", default=None, help="output directory to resume")
     r.add_argument("--retry-reviews", action="store_true", help="explicitly requeue delayed and exhausted reviews")
     r.set_defaults(func=cmd_resume, rebuild_taxonomy=False)
@@ -51,13 +49,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_stats)
 
     kb = sub.add_parser("knowledge", help="query, audit, and export the versioned knowledge graph")
-    kb.add_argument("action", choices=["stats", "query", "audit", "impact", "export", "graph", "viz", "ingest-pack", "expand", "relate", "inventory"])
+    kb.add_argument("action", choices=["stats", "query", "audit", "impact", "export", "graph", "viz", "ingest-pack", "expand", "relate", "inventory", "verify", "compute-verify", "backlog", "refine-legacy"])
     kb.add_argument("--data-dir", default=None)
     kb.add_argument("--claim", default=None)
     kb.add_argument("--output", default=None)
     kb.add_argument("--limit", type=int, default=100)
     kb.add_argument("--hops", type=int, default=None, help="graph/query BFS depth (query default 1, graph default 2)")
     kb.add_argument("--pack", default=None, help="pack yaml path (ingest-pack) or pack id (expand)")
+    kb.add_argument("--reviewer", default=None, help="reviewer name for expert verification")
+    kb.add_argument("--l2", default=None, help="L2 key for legacy refinement")
+    kb.add_argument("--note", default=None, help="expert verification note")
     kb.add_argument("--apply", action="store_true", help="write pack/expand results to the knowledge store")
     kb.add_argument("--fake", action="store_true")
     kb.set_defaults(func=cmd_knowledge)
@@ -80,7 +81,6 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--target", type=int, default=100)
     bench.add_argument("--max-iterations", type=int, default=40)
     bench.add_argument("--timeout", type=float, default=3600)
-    bench.add_argument("--fake", action="store_true")
     bench.set_defaults(func=cmd_benchmark)
 
     gate = sub.add_parser(

@@ -1,5 +1,6 @@
 id: T02
 name: 内存层次与数据移动
+weight: 1.4
 children:
 - id: global_mem
   name: 全局内存
@@ -87,6 +88,7 @@ children:
     - 2
     - 3
     kind: formula
+  target_leaves: 14
 - id: shared_mem
   name: 共享内存
   leaves:
@@ -172,6 +174,7 @@ children:
     - 2
     - 3
     kind: numeric
+  target_leaves: 14
 - id: uvm
   name: 统一内存
   leaves:
@@ -251,6 +254,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 14
 - id: special
   name: 特殊存储
   leaves:
@@ -328,6 +332,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 14
 - id: cache_policy
   name: L1/L2 缓存策略
   leaves:
@@ -404,6 +409,7 @@ children:
     difficulty:
     - 3
     kind: feature
+  target_leaves: 14
 - id: pinned_host
   name: 页锁定与映射内存
   leaves:
@@ -481,6 +487,7 @@ children:
     difficulty:
     - 3
     kind: numeric
+  target_leaves: 14
 - id: l2_residency
   name: L2 驻留与压缩
   leaves:
@@ -547,6 +554,13 @@ children:
     difficulty:
     - 3
     kind: failure
+  arch:
+  - sm_80
+  - sm_86
+  - sm_89
+  - sm_90
+  - sm_100a
+  target_leaves: 14
 - id: malloc_api
   name: 设备分配 API
   leaves:
@@ -617,6 +631,7 @@ children:
     - 2
     - 3
     kind: failure
+  target_leaves: 14
 - id: pitched_2d
   name: Pitch 与 2D/3D 布局
   leaves:
@@ -685,6 +700,7 @@ children:
     difficulty:
     - 2
     kind: failure
+  target_leaves: 14
 - id: memcpy_kind
   name: 拷贝方向与异步
   leaves:
@@ -754,6 +770,7 @@ children:
     difficulty:
     - 1
     kind: failure
+  target_leaves: 14
 - id: l1_policy
   name: L1 缓存与只读路径
   leaves:
@@ -823,6 +840,7 @@ children:
     difficulty:
     - 3
     kind: numeric
+  target_leaves: 14
 - id: prefetch_hint
   name: 预取与缓存提示
   leaves:
@@ -890,6 +908,11 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  arch:
+  - sm_80
+  - sm_90
+  - sm_100a
+  target_leaves: 14
 - id: mempool_async
   name: 异步内存池
   leaves:
@@ -958,6 +981,7 @@ children:
     difficulty:
     - 2
     kind: feature
+  target_leaves: 14
 - id: alignment_vec
   name: 对齐与向量加载
   leaves:
@@ -1026,6 +1050,7 @@ children:
     difficulty:
     - 2
     kind: mechanism
+  target_leaves: 14
 - id: op_smem_budget
   name: 算子 smem 预算
   leaves:
@@ -1094,3 +1119,4 @@ children:
     difficulty:
     - 3
     kind: numeric
+  target_leaves: 14

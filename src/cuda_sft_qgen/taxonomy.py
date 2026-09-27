@@ -35,6 +35,7 @@ class Leaf:
     retired: bool = False
     revision: int = 1
     status: str = "legacy_unreviewed"
+    audit_due_at: float = 0.0
     sources: tuple[str, ...] = ()
     applicability: dict[str, Any] = field(default_factory=dict)
 
@@ -111,6 +112,7 @@ def _leaf_from_item(
         retired=bool(item.get("retired") or False),
         revision=int(item.get("revision") or 1),
         status=str(item.get("status") or "legacy_unreviewed"),
+        audit_due_at=float(item.get("audit_due_at") or 0),
         sources=tuple(item.get("sources") or []),
         applicability=dict(item.get("applicability") or {}),
     )
@@ -197,11 +199,9 @@ def dump_taxonomy(taxonomy: Taxonomy, path: Path | None = None) -> None:
             if dpath is None:
                 dpath = root / "domains" / f"{did}.yaml"
                 taxonomy.domain_files[did] = dpath
-            payload = {
-                "id": domain["id"],
-                "name": domain.get("name", did),
-                "children": domain.get("children") or [],
-            }
+            payload = {key: value for key, value in domain.items() if key != "children"}
+            payload.setdefault("name", did)
+            payload["children"] = domain.get("children") or []
             _dump_yaml(dpath, payload)
             include.append(str(dpath.relative_to(root)))
         _dump_yaml(

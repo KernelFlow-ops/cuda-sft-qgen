@@ -16,6 +16,7 @@ from cuda_sft_qgen.errors import ReviewError
 from cuda_sft_qgen.graph.state import PipelineState
 from cuda_sft_qgen.models import Question
 from cuda_sft_qgen.observability import trace_node
+from cuda_sft_qgen.review.dedup import gist_verdict
 from cuda_sft_qgen.review.diversity import build_diversity_report
 from cuda_sft_qgen.review.fingerprint import Fingerprint, fingerprint
 from cuda_sft_qgen.runtime import get_runtime
@@ -44,14 +45,17 @@ def review_score_node(state: PipelineState) -> dict:
                 pending.append(q)
         accepted = rt.store.load_accepted()
         by_id = {q.id: q for q in accepted}
-        scored, vectors, nn_values = [], [], []
+        scored, vectors, gist_vectors, nn_values = [], [], [], []
         if pending:
-            drain = getattr(rt, "drain_prefetch", None)
-            if callable(drain):
-                drain()
+            wait_prefetch = getattr(rt, "wait_prefetch", None)
+            if callable(wait_prefetch):
+                wait_prefetch([q.question for q in pending])
             vecs = rt.embedder.embed([q.question for q in pending])
+            gist_vecs = rt.embedder.embed([q.tests_claim or q.question for q in pending])
+            gist_index = getattr(rt, "gist_index", None)
             indices, scores = rt.index.search(vecs, top_k=int(rt.settings.review.get("top_k", 8)))
             vectors = vecs.tolist()
+            gist_vectors = gist_vecs.tolist()
             for i, q in enumerate(pending):
                 neighbors = []
                 for idx, score in zip(indices[i].tolist(), scores[i].tolist()):
@@ -70,6 +74,26 @@ def review_score_node(state: PipelineState) -> dict:
                 if decision.nearest_id in by_id and not any(n["id"] == decision.nearest_id for n in neighbors):
                     neighbor = by_id[decision.nearest_id]
                     neighbors.append({"id": neighbor.id, "question": neighbor.question, "l3_claim": neighbor.l3_claim})
+                if gist_index is not None and len(gist_index):
+                    gist_ids, gist_scores = gist_index.search(gist_vecs[i:i + 1], top_k=5)
+                    best_id, best_cos = None, None
+                    for index, score in zip(gist_ids[0].tolist(), gist_scores[0].tolist()):
+                        if 0 <= index < len(gist_index.ids):
+                            other = by_id.get(gist_index.ids[index])
+                            if other is not None and other.id != q.id and other.language != q.language:
+                                best_id, best_cos = other.id, float(score)
+                                break
+                    decision = gist_verdict(
+                        decision, best_cos,
+                        dup=float(rt.settings.review.get("gist_dup_threshold", 0.92)),
+                        gray=float(rt.settings.review.get("gist_gray_threshold", 0.86)),
+                        nearest_id=best_id,
+                    )
+                    if best_id and best_id in by_id and not any(n["id"] == best_id for n in neighbors):
+                        other = by_id[best_id]
+                        neighbors = neighbors[:5] + [{"id": other.id, "question": other.question,
+                                                       "l3_claim": other.l3_claim, "similarity": best_cos}]
+                neighbors = neighbors[:6]
                 q.dup_verdict = decision.verdict
                 q.nearest_id, q.nearest_cosine = decision.nearest_id, decision.nearest_cosine
                 q.template_jaccard, q.hamming = decision.template_jaccard, decision.hamming
@@ -90,7 +114,7 @@ def review_score_node(state: PipelineState) -> dict:
         return {
             "status": "review_scored",
             "last_diversity": {"report": report.model_dump(), "scored": scored,
-                               "vectors": vectors, "deferred": deferred},
+                               "vectors": vectors, "gist_vectors": gist_vectors, "deferred": deferred},
             "log": [f"review_score n={len(pending)} deferred={len(deferred)}"],
         }
     except Exception as exc:

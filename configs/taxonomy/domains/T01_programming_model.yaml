@@ -1,5 +1,6 @@
 id: T01
 name: CUDA 编程模型与语法
+weight: 1.0
 children:
 - id: qualifiers
   name: 执行空间限定符
@@ -83,6 +84,7 @@ children:
     - 2
     - 3
     kind: api
+  target_leaves: 12
 - id: launch
   name: 执行配置与启动
   leaves:
@@ -164,6 +166,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: language
   name: CUDA C++ 方言
   leaves:
@@ -243,6 +246,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 12
 - id: cg_syntax
   name: Cooperative Groups 语法
   leaves:
@@ -322,6 +326,9 @@ children:
     difficulty:
     - 3
     kind: failure
+  arch:
+  - any
+  target_leaves: 12
 - id: hierarchy
   name: 网格层次与索引公式
   leaves:
@@ -404,6 +411,7 @@ children:
     difficulty:
     - 2
     kind: failure
+  target_leaves: 12
 - id: device_attr
   name: 设备属性与启动约束
   leaves:
@@ -482,6 +490,7 @@ children:
     difficulty:
     - 2
     kind: numeric
+  target_leaves: 12
 - id: grid_constant
   name: kernel 参数与常量路径
   leaves:
@@ -560,6 +569,11 @@ children:
     - 2
     - 3
     kind: formula
+  arch:
+  - sm_70
+  - sm_80
+  - sm_90
+  target_leaves: 12
 - id: launch_api
   name: 启动 API 与属性
   leaves:
@@ -632,6 +646,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: builtin_vars
   name: 内建变量与只读寄存器
   leaves:
@@ -696,6 +711,7 @@ children:
     difficulty:
     - 2
     kind: failure
+  target_leaves: 12
 - id: kernel_symbol
   name: kernel 符号与函数指针
   leaves:
@@ -767,6 +783,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 12
 - id: rdc_link
   name: 可重定位设备代码与链接
   leaves:
@@ -836,6 +853,7 @@ children:
     difficulty:
     - 2
     kind: failure
+  target_leaves: 12
 - id: dim_limits
   name: 网格与块维上限公式
   leaves:
@@ -906,6 +924,7 @@ children:
     difficulty:
     - 2
     kind: formula
+  target_leaves: 12
 - id: cxx_dialect
   name: 设备 C++ 方言与扩展 lambda
   leaves:
@@ -976,6 +995,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 12
 - id: occupancy_cfg
   name: 占用 API 与启动配置
   leaves:
@@ -1046,3 +1066,4 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12

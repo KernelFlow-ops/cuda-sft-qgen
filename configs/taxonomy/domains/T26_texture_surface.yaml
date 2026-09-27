@@ -1,5 +1,6 @@
 id: T26
 name: 纹理/表面/只读路径
+weight: 0.4
 children:
 - id: texture_object
   name: 纹理对象
@@ -79,6 +80,7 @@ children:
     difficulty:
     - 2
     kind: api
+  target_leaves: 8
 - id: surface_object
   name: 表面对象
   leaves:
@@ -152,6 +154,7 @@ children:
     difficulty:
     - 2
     kind: mechanism
+  target_leaves: 8
 - id: ldg_readonly
   name: __ldg 只读路径
   leaves:
@@ -223,6 +226,7 @@ children:
     difficulty:
     - 2
     kind: mechanism
+  target_leaves: 8
 - id: bindless
   name: Bindless 句柄
   leaves:
@@ -295,6 +299,7 @@ children:
     - 2
     - 3
     kind: feature
+  target_leaves: 8
 - id: l1_tex_cache
   name: L1/纹理缓存
   leaves:
@@ -367,6 +372,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 8
 - id: tex_normalized
   name: 归一化坐标
   leaves:
@@ -441,6 +447,7 @@ children:
     - 2
     - 3
     kind: formula
+  target_leaves: 8
 - id: tex_mipmap
   name: Mipmap 采样
   leaves:
@@ -513,6 +520,7 @@ children:
     difficulty:
     - 2
     kind: formula
+  target_leaves: 8
 - id: tex_layer
   name: Layered 与 Cubemap
   leaves:
@@ -585,6 +593,7 @@ children:
     - 2
     - 3
     kind: formula
+  target_leaves: 8
 - id: tex_address_filter
   name: 寻址与过滤模式
   leaves:
@@ -658,6 +667,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 8
 - id: cuda_array
   name: CUDA Array 布局
   leaves:
@@ -731,6 +741,7 @@ children:
     difficulty:
     - 2
     kind: api
+  target_leaves: 8
 - id: tex_vs_global
   name: 纹理 vs 表面 vs 全局
   leaves:
@@ -803,6 +814,7 @@ children:
     - 2
     - 3
     kind: mechanism
+  target_leaves: 8
 - id: tex_gather
   name: Texture gather 与多点
   leaves:
@@ -873,6 +885,7 @@ children:
     - 2
     - 3
     kind: api
+  target_leaves: 8
 - id: tex_coord
   name: 1D/2D/3D 坐标与采样
   leaves:
@@ -946,3 +959,4 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 8

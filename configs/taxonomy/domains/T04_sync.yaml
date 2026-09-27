@@ -1,5 +1,6 @@
 id: T04
 name: 同步与并发
+weight: 1.2
 children:
 - id: barriers
   name: 块内与 warp 同步
@@ -87,6 +88,7 @@ children:
     - 1
     - 2
     kind: failure
+  target_leaves: 14
 - id: atomics
   name: 原子与内存序
   leaves:
@@ -165,6 +167,7 @@ children:
     - 2
     - 3
     kind: failure
+  target_leaves: 14
 - id: async_copy
   name: 异步拷贝
   leaves:
@@ -242,6 +245,12 @@ children:
     - 3
     - 4
     kind: feature
+  arch:
+  - sm_80
+  - sm_86
+  - sm_89
+  - sm_90
+  target_leaves: 14
 - id: memory_order
   name: CUDA 内存序
   leaves:
@@ -322,6 +331,7 @@ children:
     - 3
     - 4
     kind: api
+  target_leaves: 14
 - id: mbarrier
   name: mbarrier 协议
   leaves:
@@ -401,6 +411,12 @@ children:
     difficulty:
     - 4
     kind: failure
+  arch:
+  - sm_80
+  - sm_90
+  - sm_90a
+  - sm_100a
+  target_leaves: 14
 - id: cuda_pipeline
   name: cuda::pipeline
   leaves:
@@ -467,6 +483,10 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  arch:
+  - sm_80
+  - sm_90
+  target_leaves: 14
 - id: named_barrier
   name: Named barrier 与 arrive-wait
   leaves:
@@ -536,6 +556,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 14
 - id: cluster_sync
   name: Cluster 同步
   leaves:
@@ -606,6 +627,11 @@ children:
     difficulty:
     - 3
     kind: failure
+  arch:
+  - sm_90
+  - sm_90a
+  - sm_100a
+  target_leaves: 14
 - id: fence_ptx
   name: PTX fence 与代理
   leaves:
@@ -673,6 +699,7 @@ children:
     difficulty:
     - 4
     kind: mechanism
+  target_leaves: 14
 - id: cg_barrier
   name: Cooperative Groups 同步
   leaves:
@@ -744,6 +771,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 14
 - id: atomic_ops
   name: 原子操作变体
   leaves:
@@ -813,6 +841,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 14
 - id: semaphore_lib
   name: cuda::barrier 与信号量
   leaves:
@@ -881,6 +910,7 @@ children:
     difficulty:
     - 4
     kind: feature
+  target_leaves: 14
 - id: red_instr
   name: 归约写与原子吞吐
   leaves:
@@ -951,3 +981,4 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 14

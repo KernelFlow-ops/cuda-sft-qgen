@@ -1,5 +1,6 @@
 id: T23
 name: CUDA Python 与 DSL
+weight: 0.5
 children:
 - id: cuda_core
   name: cuda.core
@@ -97,6 +98,7 @@ children:
     hints:
     - kernel 还在用就 buffer.close()
     - 换 dealloc stream 后立刻 GC
+  target_leaves: 8
 - id: cute_dsl
   name: CuTe DSL
   leaves:
@@ -192,6 +194,7 @@ children:
     difficulty:
     - 3
     kind: formula
+  target_leaves: 8
 - id: cutlass_python
   name: CUTLASS Python
   leaves:
@@ -285,6 +288,7 @@ children:
     - 2
     - 3
     kind: failure
+  target_leaves: 8
 - id: kernel_dtype
   name: kernel dtype 绑定
   leaves:
@@ -380,6 +384,7 @@ children:
     difficulty:
     - 3
     kind: numeric
+  target_leaves: 8
 - id: launch_interop
   name: 启动与互操作
   leaves:
@@ -475,6 +480,7 @@ children:
     - 2
     - 3
     kind: failure
+  target_leaves: 8
 - id: cuda_bindings
   name: cuda.bindings
   leaves:
@@ -571,6 +577,7 @@ children:
     difficulty:
     - 2
     kind: mechanism
+  target_leaves: 8
 - id: array_interface
   name: CUDA Array Interface
   leaves:
@@ -663,6 +670,7 @@ children:
     - 2
     - 3
     kind: numeric
+  target_leaves: 8
 - id: stream_objects
   name: Python 流对象
   leaves:
@@ -757,6 +765,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 8
 - id: cupy_numba_runtime
   name: CuPy/Numba 运行时约束
   leaves:
@@ -852,6 +861,7 @@ children:
     difficulty:
     - 2
     kind: formula
+  target_leaves: 8
 - id: tvm_triton_lowering
   name: TVM/Triton 降到 CUDA
   leaves:
@@ -948,3 +958,4 @@ children:
     - 2
     - 3
     kind: failure
+  target_leaves: 8

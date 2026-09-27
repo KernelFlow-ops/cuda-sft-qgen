@@ -127,7 +127,8 @@ def run_review_benchmark(settings: Settings, output: Path | str, *,
     output = Path(output)
     if output.resolve() == cases_path.resolve():
         raise ValueError("Benchmark output must not overwrite its case fixture")
-    prompt = load_prompt("chair")
+    from cuda_sft_qgen.graph.nodes.review_chair import render_chair_prompt
+    prompt = render_chair_prompt(settings)
     model = settings.review_model
     report: dict[str, Any] = {
         "schema_version": 1, "benchmark": "question_quality", "mode": "real_llm",
@@ -135,7 +136,8 @@ def run_review_benchmark(settings: Settings, output: Path | str, *,
         "scope": "Independent per-question quality; empty neighbors; no corpus deduplication evaluation",
         "fixture": {"path": str(cases_path),
                     "sha256": hashlib.sha256(cases_path.read_bytes()).hexdigest()},
-        "reviewer": {"model": model, "base_url": settings.nvidia_base_url,
+        "reviewer": {"model": model, "base_url": settings.agent_apis["review"].base_url,
+                     "provider": settings.agent_apis["review"].provider,
                      "temperature": 0.0, "thinking_level": settings.review.get("thinking_level", "medium"),
                      "max_tokens": settings.review.get("max_tokens", 8192)},
         "system_prompt": prompt,
@@ -161,7 +163,7 @@ def run_review_benchmark(settings: Settings, output: Path | str, *,
                 case_started = time.monotonic()
                 case_timestamp = _timestamp()
                 first_call = len(recorder.calls)
-                decision = _parallel_chair_decision(item, prompt)
+                decision = _parallel_chair_decision(item, prompt, allow_fixture_origin=True)
                 if decision.get("action") not in {"accept", "reject", "pending"}:
                     decision = {"id": question.id, "action": "pending", "reason": "invalid_benchmark_decision"}
                 report["results"].append({

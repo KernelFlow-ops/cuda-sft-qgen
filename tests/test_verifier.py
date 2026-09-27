@@ -1,6 +1,7 @@
 """Deterministic verifier tests; real API coverage lives in the pilot command."""
 
 import json
+import threading
 
 import pytest
 
@@ -98,6 +99,45 @@ def _scalar_question(target="1", **overrides):
     )
 
 
+def _cute_shape_question(*, correct: bool = True, dynamic: bool = False) -> Question:
+    dimension = "M" if dynamic else "_12{}"
+    code = (
+        f"constexpr auto layout = make_layout(make_shape({dimension}, Int<18>{{}}));\n"
+        "constexpr auto tiler = make_tile(_3{}, _3{});\n"
+        "constexpr auto z = zipped_divide(layout, tiler);\n"
+        "constexpr auto t = tiled_divide(layout, tiler);"
+    )
+    correct_option = (
+        "Both calls are well-formed; z has shape ((_3,_3),(_4,_6)) "
+        "and t has shape ((_3,_3),_4,_6)."
+    )
+    wrong_options = [
+        "Both calls are well-formed; z has shape ((_3,_3),_4,_6) "
+        "and t has shape ((_3,_3),(_4,_6)).",
+        "Both calls are well-formed; z has shape ((_4,_6),(_3,_3)) "
+        "and t has shape ((_4,_6),_3,_3).",
+        "Both calls are well-formed; z has shape ((_3,_3),(_4,_5)) "
+        "and t has shape ((_3,_3),_4,_5).",
+    ]
+    options = [correct_option, *wrong_options] if correct else wrong_options + [
+        "Both calls are well-formed; z has shape ((_3,_2),(_4,_6)) "
+        "and t has shape ((_3,_2),_4,_6)."
+    ]
+    stem = "What are the shapes from zipped_divide and tiled_divide?\n```cpp\n" + code + "\n```\n"
+    stem += "\n".join(f"{letter}. {option}" for letter, option in zip("ABCD", options))
+    return _question(
+        stem,
+        draft_target="A",
+        internal_reference_answer="A",
+        answer_format="single_choice",
+        draft_plan={"structured": True},
+        verification_spec={
+            "mode": "scalar", "answer_type": "enum", "expected_behavior": "select the shape pair",
+            "rubric": ["one unique correct choice"],
+        },
+    )
+
+
 def test_blind_solver_never_receives_target_spec_rubric_or_parents():
     reviewer = ScriptedReviewer([{"answer": "1", "evidence": "fraction sum"}] * 3)
     result = evaluate_candidate(
@@ -110,6 +150,91 @@ def test_blind_solver_never_receives_target_spec_rubric_or_parents():
     assert "draft_target" not in encoded
     assert "rubric" not in encoded
     assert "secret" not in encoded
+
+
+def test_cute_shape_contradiction_fails_before_solver_votes():
+    reviewer = ScriptedReviewer([{"answer": "A", "evidence": "choice A"}] * 5)
+
+    result = evaluate_candidate(
+        _cute_shape_question(correct=False), reviewer,
+        {"answer_consistency_enabled": True, "verification_solver_k": 5},
+    )
+
+    assert result["status"] == "fail"
+    assert result["reason"] == "cute_shape_contradiction"
+    assert result["evidence"]["cute_shapes"]["reason"] == "no_correct_option"
+    assert reviewer.payloads == []
+
+
+def test_cute_shape_guard_cannot_be_bypassed_by_disabled_fake_or_legacy_paths():
+    from cuda_sft_qgen.llm import FakeLLM
+
+    bad = _cute_shape_question(correct=False)
+    disabled = evaluate_candidate(bad, ScriptedReviewer([]), {})
+    fake = evaluate_candidate(
+        bad, object.__new__(FakeLLM), {"answer_consistency_enabled": True},
+    )
+    legacy = evaluate_candidate(
+        bad.model_copy(update={"draft_plan": None, "verification_spec": {}}),
+        ScriptedReviewer([]), {"answer_consistency_enabled": True},
+    )
+
+    assert disabled["status"] == fake["status"] == legacy["status"] == "fail"
+    assert all(result["reason"] == "cute_shape_contradiction" for result in (disabled, fake, legacy))
+
+
+def test_unsupported_cute_shape_guard_stays_pending_when_feature_is_disabled():
+    result = evaluate_candidate(_cute_shape_question(dynamic=True), ScriptedReviewer([]), {})
+
+    assert result["status"] == "pending"
+    assert result["reason"] == "cute_shape_unsupported"
+    assert result["evidence"]["cute_shapes"]["status"] == "unsupported"
+
+
+def test_cute_shape_pass_is_recorded_alongside_independent_votes():
+    reviewer = ScriptedReviewer([{"answer": "A", "evidence": "shape calculation"}] * 3)
+
+    result = evaluate_candidate(
+        _cute_shape_question(), reviewer,
+        {"answer_consistency_enabled": True, "verification_solver_k": 3},
+    )
+
+    assert result["status"] == "pass"
+    assert result["evidence"]["cute_shapes"]["status"] == "pass"
+    assert result["evidence"]["cute_shapes"]["answer_key"] == "A"
+    assert len(reviewer.payloads) == 3
+
+
+def test_unsupported_cute_shape_candidate_is_pending_with_guard_evidence():
+    reviewer = ScriptedReviewer([{"answer": "A", "evidence": "shape calculation"}] * 3)
+
+    result = evaluate_candidate(
+        _cute_shape_question(dynamic=True), reviewer,
+        {"answer_consistency_enabled": True, "verification_solver_k": 3},
+    )
+
+    assert result["status"] == "pending"
+    assert result["reason"] == "cute_shape_unsupported"
+    assert result["evidence"]["cute_shapes"]["status"] == "unsupported"
+    assert reviewer.payloads == []
+
+
+def test_blind_solver_votes_can_run_concurrently():
+    barrier = threading.Barrier(3)
+
+    class ParallelReviewer:
+        def complete_json(self, messages, **kwargs):
+            assert "draft_target" not in messages[1]["content"]
+            barrier.wait(timeout=2)
+            return {"answer": "1", "evidence": "fraction sum"}
+
+    result = evaluate_candidate(
+        _scalar_question(), ParallelReviewer(),
+        {"answer_consistency_enabled": True, "verification_solver_k": 3,
+         "verification_parallel_enabled": True},
+    )
+    assert result["status"] == "pass"
+    assert len(result["evidence"]["votes"]) == 3
 
 
 def test_incomplete_votes_and_target_mismatch_are_pending():
@@ -151,19 +276,30 @@ def test_open_mode_uses_three_answers_and_one_rubric_call():
         {"score": .7, "evidence": "adequate"},
         {"score": .8, "evidence": "specific"},
     ]}]
-    reviewer = ScriptedReviewer(outputs)
+    class ParamReviewer(ScriptedReviewer):
+        def __init__(self, values):
+            super().__init__(values)
+            self.params = []
+
+        def complete_json(self, messages, **kwargs):
+            self.params.append(kwargs)
+            return super().complete_json(messages, **kwargs)
+
+    reviewer = ParamReviewer(outputs)
     q = _question(
         "Explain this CUDA tradeoff.", draft_target="private",
         draft_plan={"structured": True},
         verification_spec={"mode": "open", "answer_type": "text",
-                           "expected_behavior": "explains tradeoff", "rubric": ["CUDA-correct"]},
+                           "expected_behavior": "explains tradeoff", "rubric": ["CUDA-correct", "explains the tradeoff"]},
     )
     result = evaluate_candidate(q, reviewer, {"answer_consistency_enabled": True})
     assert result["status"] == "pass"
     assert result["evidence"]["rip_score"] == .7
     assert len(reviewer.payloads) == 4
     assert "rubric" not in reviewer.payloads[0]
-    assert reviewer.payloads[-1]["rubric"] == ["CUDA-correct"]
+    assert reviewer.payloads[-1]["rubric"] == ["CUDA-correct", "explains the tradeoff"]
+    assert reviewer.params[-1]["thinking_level"] == "medium"
+    assert reviewer.params[-1]["max_tokens"] <= 2048
 
 
 def test_open_low_score_is_valid_rip_evidence_not_global_reject():
@@ -173,7 +309,7 @@ def test_open_low_score_is_valid_rip_evidence_not_global_reject():
     ]}]
     q = _question("Explain CUDA.", draft_target="private", draft_plan={"structured": True},
                   verification_spec={"mode": "open", "answer_type": "text",
-                                     "expected_behavior": "explanation", "rubric": ["correct"]})
+                                     "expected_behavior": "explanation", "rubric": ["correct", "specific"]})
     result = evaluate_candidate(q, ScriptedReviewer(outputs), {"answer_consistency_enabled": True})
     assert result["status"] == "pass"
     assert result["evidence"]["rip_score"] == .1

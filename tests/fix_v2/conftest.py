@@ -36,17 +36,17 @@ def _truthy(v: str | None) -> bool:
 
 def env_problems() -> list[str]:
     """Why the real-LLM environment is unusable (empty list = usable)."""
-    keys = [os.getenv(k, "").strip() for k in ("NVIDIA_API_KEY", "NVIDIA_API_KEY_2", "NVIDIA_API_KEY_3")]
-    keys += [k.strip() for k in os.getenv("NVIDIA_API_KEYS", "").replace(";", ",").split(",")]
     problems = []
-    if not any(keys):
-        problems.append("no NVIDIA_API_KEY in .env")
     if _truthy(os.getenv("FAKE_LLM")):
         problems.append("FAKE_LLM is enabled; real-LLM tests require FAKE_LLM=0")
     if os.getenv("EMBEDDING_PROVIDER", "nvidia").strip().lower() == "fake":
         problems.append("EMBEDDING_PROVIDER=fake is not allowed")
-    if not os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3-ultra-550b-a55b").strip():
-        problems.append("NVIDIA_MODEL is empty")
+    from cuda_sft_qgen.config import load_settings
+    try:
+        settings = load_settings(fake_llm=False)
+        problems.extend(f"missing {name}" for name in settings.missing_api_keys + settings.missing_api_fields)
+    except ValueError as exc:
+        problems.append(str(exc))
     return problems
 
 

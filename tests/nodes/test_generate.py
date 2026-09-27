@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pytest
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from cuda_sft_qgen.graph.nodes.generate import (
     generate_batch_node,
@@ -11,6 +13,7 @@ from cuda_sft_qgen.graph.nodes.generate import (
     generate_from_brief,
     salvage_item,
 )
+from cuda_sft_qgen.graph.nodes.generate_core import GenerateOutcome
 from cuda_sft_qgen.models import QuestionBrief, SteeringBrief
 from cuda_sft_qgen.runtime import set_runtime
 
@@ -38,19 +41,33 @@ def test_question_from_obj_basic(sample_brief):
 
 
 def test_generate_from_brief_fake_llm(fake_runtime, sample_brief, sample_steering_brief):
-    """Test question generation with fake LLM."""
+    """FakeLLM cannot synthesize a question even through the node helper."""
     set_runtime(fake_runtime)
-    brief = sample_brief()
-    steering = sample_steering_brief()
+    with pytest.raises(RuntimeError, match="real LLM API"):
+        generate_from_brief(sample_brief(), sample_steering_brief())
 
-    question = generate_from_brief(brief, steering)
 
-    assert question.question
-    assert len(question.question) > 0
-    assert question.l3_id == brief.l3_id
-    assert question.question_type == brief.question_type
-    assert question.source == "writer"
-    assert question.review_status == "pending"
+def test_evolver_brief_uses_evolver_client(fake_runtime, sample_brief, sample_steering_brief, monkeypatch):
+    monkeypatch.setenv("WRITER_THINKING_LEVEL", "high")
+    monkeypatch.setenv("EVOLVER_THINKING_LEVEL", "medium")
+    fake_runtime.llm = MagicMock()
+    fake_runtime.evolver_llm = MagicMock()
+    fake_runtime.evolver_llm.complete.return_value = (
+        '{"question":"How does CUDA occupancy constrain a kernel launch?",'
+        '"tests_claim":"CUDA occupancy determines SM utilization"}'
+    )
+    fake_runtime.prompt_builder = SimpleNamespace(build=lambda *args, **kwargs: SimpleNamespace(
+        system="system", user="user", cache_key="", generation_provenance={}
+    ))
+    set_runtime(fake_runtime)
+    question = generate_from_brief(
+        sample_brief(role="evolver", seed_question="Earlier occupancy question"),
+        sample_steering_brief(),
+    )
+    assert question.source == "evolver"
+    fake_runtime.evolver_llm.complete.assert_called_once()
+    assert fake_runtime.evolver_llm.complete.call_args.kwargs["thinking_level"] == "medium"
+    fake_runtime.llm.complete.assert_not_called()
 
 
 def test_generate_batch_node_empty(fake_runtime):
@@ -68,26 +85,6 @@ def test_generate_batch_node_empty(fake_runtime):
     assert result["status"] == "generated_0"
     assert result["pending"] == []
     assert result["salvage_items"] == []
-
-
-def test_generate_batch_node_basic(fake_runtime, sample_brief, sample_steering_brief):
-    """Test generate batch node with briefs."""
-    set_runtime(fake_runtime)
-
-    briefs = [sample_brief(l3_id=f"cuda_{i:03d}").model_dump() for i in range(5)]
-
-    state = {
-        "batch_briefs": briefs,
-        "steering_brief": sample_steering_brief().model_dump(),
-        "pending": [],
-    }
-
-    result = generate_batch_node(state)
-
-    assert "generated_" in result["status"]
-    assert len(result["pending"]) > 0
-    assert result["batch_briefs"] == []
-    assert "generate" in result["log"][0]
 
 
 def test_generate_batch_node_with_existing_pending(
@@ -110,25 +107,6 @@ def test_generate_batch_node_with_existing_pending(
     # Should have at least the original pending question
     assert len(result["pending"]) >= 1
     assert any(q["id"] == "q_existing" for q in result["pending"])
-
-
-def test_generate_batch_node_concurrency(fake_runtime, sample_brief, sample_steering_brief):
-    """Test generate batch node with multiple workers."""
-    set_runtime(fake_runtime)
-    fake_runtime.settings.writer_concurrency = 4
-
-    briefs = [sample_brief(l3_id=f"cuda_{i:03d}").model_dump() for i in range(10)]
-
-    state = {
-        "batch_briefs": briefs,
-        "steering_brief": sample_steering_brief().model_dump(),
-        "pending": [],
-    }
-
-    result = generate_batch_node(state)
-
-    assert len(result["pending"]) > 0
-    assert result["batch_briefs"] == []
 
 
 def test_generate_or_salvage_does_not_inline_by_default(
@@ -158,6 +136,23 @@ def test_generate_or_salvage_does_not_inline_by_default(
     assert called["n"] == 0
 
 
+def test_inline_salvage_keeps_real_writer_origin(fake_runtime, sample_brief, monkeypatch):
+    from cuda_sft_qgen.graph.nodes import generate_core
+
+    set_runtime(fake_runtime)
+    fake_runtime.settings.default_yaml["generation"]["salvage_inline"] = True
+    monkeypatch.setenv("SALVAGE_INLINE", "1")
+    seen = []
+    monkeypatch.setattr(generate_core, "_safe_generate", lambda *a, **k: GenerateOutcome(
+        status="salvage", brief=sample_brief().model_dump(), raw="broken", writer_real_api=True
+    ))
+    monkeypatch.setattr(generate_core, "salvage_item", lambda item: (seen.append(item) or GenerateOutcome(
+        status="retry", brief=item["brief"]
+    )))
+    generate_or_salvage(sample_brief().model_dump(), SteeringBrief())
+    assert seen[0]["writer_real_api"] is True
+
+
 def test_salvage_item_skips_llm_when_raw_has_no_question(
     fake_runtime, sample_brief
 ):
@@ -170,4 +165,4 @@ def test_salvage_item_skips_llm_when_raw_has_no_question(
         }
     )
     assert out.status == "retry"
-    assert out.reason == "json_parse"
+    assert out.reason == "salvage_question_unverifiable"

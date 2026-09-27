@@ -1,5 +1,6 @@
 id: T21
 name: CUTLASS 3.x/4.x 流水
+weight: 0.8
 children:
 - id: collective_builder
   name: Collective Builder
@@ -91,6 +92,7 @@ children:
     - 2
     - 3
     kind: api
+  target_leaves: 10
 - id: mainloop_pipeline
   name: mainloop 流水深度
   leaves:
@@ -178,6 +180,7 @@ children:
     difficulty:
     - 3
     kind: formula
+  target_leaves: 10
 - id: epilogue_fusion
   name: epilogue 融合
   leaves:
@@ -257,6 +260,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 10
 - id: tile_scheduler
   name: Tile 调度器
   leaves:
@@ -339,6 +343,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 10
 - id: stream_k
   name: Stream-K
   leaves:
@@ -422,6 +427,7 @@ children:
     difficulty:
     - 4
     kind: failure
+  target_leaves: 10
 - id: pingpong_wg
   name: Pingpong 调度
   leaves:
@@ -496,6 +502,9 @@ children:
     difficulty:
     - 3
     kind: api
+  arch:
+  - sm_90a
+  target_leaves: 10
 - id: sm90_collective
   name: Sm90 collectives
   leaves:
@@ -565,6 +574,9 @@ children:
     difficulty:
     - 3
     kind: feature
+  arch:
+  - sm_90a
+  target_leaves: 10
 - id: sm100_collective
   name: Sm100 collectives
   leaves:
@@ -633,6 +645,9 @@ children:
     difficulty:
     - 4
     kind: feature
+  arch:
+  - sm_100a
+  target_leaves: 10
 - id: evt_visitor
   name: Epilogue Visitor Tree
   leaves:
@@ -703,6 +718,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 10
 - id: raster_along
   name: Tile raster
   leaves:
@@ -772,6 +788,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 10
 - id: kernel_schedule
   name: KernelSchedule 标签
   leaves:
@@ -840,6 +857,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 10
 - id: cluster_tma
   name: Cluster TMA
   leaves:
@@ -910,3 +928,8 @@ children:
     difficulty:
     - 3
     kind: numeric
+  arch:
+  - sm_90
+  - sm_90a
+  - sm_100a
+  target_leaves: 10

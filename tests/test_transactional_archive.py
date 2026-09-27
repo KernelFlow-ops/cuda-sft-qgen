@@ -16,7 +16,9 @@ def decision(q, action="accept"):
 
 def test_commit_survives_projection_failure_without_conflicting_status(tmp_path, sample_question, monkeypatch):
     archive = Archive(tmp_path)
-    q = sample_question()
+    q = sample_question(generation_provenance={
+        "writer_real_api": True, "writer_provider": "openai", "writer_model": "test-model",
+    })
     archive.save_pending([q])
     monkeypatch.setattr(archive, "export_compatibility", lambda: (_ for _ in ()).throw(OSError("disk full")))
     with pytest.raises(OSError):
@@ -67,7 +69,9 @@ def test_retry_lease_can_be_recovered_after_worker_crash(tmp_path):
 
 def test_knowledge_correction_withdraws_export_and_preserves_audit(tmp_path, sample_question):
     archive = Archive(tmp_path)
-    q = sample_question(claim_revision=1, review_details={
+    q = sample_question(claim_revision=1, generation_provenance={
+                        "writer_real_api": True, "writer_provider": "openai", "writer_model": "test-real-model",
+                        }, review_details={
                         "id": "q_test_001", "action": "accept", "reason": "verified",
                         "checks": QualityChecks(**{k: "pass" for k in QualityChecks.model_fields}).model_dump(),
                         "evidence": ["private"],
@@ -87,6 +91,21 @@ def test_knowledge_correction_withdraws_export_and_preserves_audit(tmp_path, sam
     assert len(archive.load_pending()) == 1
 
 
+def test_real_review_cannot_export_question_without_real_writer_origin(tmp_path, sample_question):
+    archive = Archive(tmp_path)
+    q = sample_question(review_details={
+        "id": "q_test_001", "action": "accept", "reason": "verified",
+        "checks": QualityChecks(**{k: "pass" for k in QualityChecks.model_fields}).model_dump(),
+        "evidence": ["checked"],
+        "assessed_metadata": AssessedMetadata(question_type="conceptual", difficulty=2,
+            bloom="understand", hardware="hopper", granularity="kernel", language="zh").model_dump(),
+        "internal_reference_answer": "private answer", "reviewer_model": "real",
+        "reviewer_independent": True,
+    })
+    archive.append_accepted(q)
+    assert archive.export_training(tmp_path / "strict.jsonl")["questions"] == 0
+
+
 def test_unfinished_generation_tasks_resume_idempotently(tmp_path):
     archive = Archive(tmp_path)
     brief = {"l3_id": "a"}
@@ -96,6 +115,15 @@ def test_unfinished_generation_tasks_resume_idempotently(tmp_path):
     assert len(resumed.unfinished_generation_tasks()) == 1
     resumed.complete_generation_task(task_id)
     assert not archive.unfinished_generation_tasks()
+
+
+def test_review_checkpoint_cannot_roll_back_newer_writer_iteration(tmp_path):
+    archive = Archive(tmp_path)
+    archive.save_run_state({"iteration": 3, "review_rounds": 0, "accepted_count": 99})
+    archive.commit_review([], {}, {"iteration": 1, "review_rounds": 1})
+    assert archive.load_run_state() == {"iteration": 3, "review_rounds": 1, "accepted_count": 0}
+    archive.save_run_state({"iteration": 2, "review_rounds": 0, "accepted_count": 99})
+    assert archive.load_run_state() == {"iteration": 3, "review_rounds": 1, "accepted_count": 0}
 
 
 def test_training_export_revalidates_every_quality_check(tmp_path, sample_question):

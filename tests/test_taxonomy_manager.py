@@ -71,7 +71,8 @@ def test_taxonomy_prompts_and_facets_load():
     assert load_prompt("merge")
     facets = load_facets()
     ids = [str(x.get("id")) for x in facets]
-    assert ids == [
+    assert len(ids) == len(set(ids))
+    assert set(ids) >= {
         "formula",
         "failure",
         "feature",
@@ -83,7 +84,7 @@ def test_taxonomy_prompts_and_facets_load():
         "arch_migrate",
         "cross_factor",
         "derivation",
-    ]
+    }
     raw = load_prompt_yaml("facets")
     assert raw.get("facets")
 

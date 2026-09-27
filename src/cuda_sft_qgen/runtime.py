@@ -13,7 +13,7 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -44,18 +44,30 @@ class Runtime:
     deduper: Deduper
     taxonomy: Taxonomy
     pool: ApiKeyPool | None = None
+    embed_key_pool: ApiKeyPool | None = None
+    role_pools: dict[str, ApiKeyPool] = field(default_factory=dict)
     prompt_cache: PromptCache | None = None
     embedding_cache: EmbeddingCache | None = None
     prompt_builder: StructuredPrompt | None = None
     _embed_pool: ThreadPoolExecutor | None = None
-    _prefetch_futs: list[Future] = field(default_factory=list)
+    _prefetch_futs: dict[str, Future] = field(default_factory=dict)
     _prefetch_lock: threading.Lock = field(default_factory=threading.Lock)
     review_llm: LLMClient | None = None
+    evolver_llm: LLMClient | None = None
+    salvage_llm: LLMClient | None = None
+    knowledge_llm: LLMClient | None = None
     knowledge: KnowledgeStore | None = None
     knowledge_worker: object | None = None
     _knowledge_refreshed_at: float = 0.0
     _verification_lock: threading.Lock = field(default_factory=threading.Lock)
     _verification_calls: int = 0
+    _verification_exhausted: bool = False
+    gist_index: VectorIndex | None = None
+
+    @property
+    def verification_budget_exhausted(self) -> bool:
+        with self._verification_lock:
+            return self._verification_exhausted
 
     def reserve_verification_call(self) -> bool:
         """Atomically enforce the run-wide solver/judge call ceiling.
@@ -67,8 +79,11 @@ class Runtime:
         limit = int(self.settings.review.get("verification_run_max_calls", 600))
         with self._verification_lock:
             if self._verification_calls >= max(0, limit):
+                self._verification_exhausted = True
                 return False
             self._verification_calls += 1
+            if self._verification_calls >= limit:
+                self._verification_exhausted = True
             return True
 
     def reconcile_index(self) -> None:
@@ -143,14 +158,26 @@ class Runtime:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("embed prefetch failed: %s", exc)
 
-        fut = self._embed_pool.submit(_run)
         with self._prefetch_lock:
-            self._prefetch_futs.append(fut)
+            if text in self._prefetch_futs:
+                return
+            self._prefetch_futs[text] = self._embed_pool.submit(_run)
+
+    def wait_prefetch(self, texts: list[str]) -> None:
+        """Wait only for embeddings needed by the current review wave."""
+        with self._prefetch_lock:
+            futs = [self._prefetch_futs.pop(text) for text in set(texts)
+                    if text in self._prefetch_futs]
+        for fut in futs:
+            try:
+                fut.result()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("embed prefetch join failed: %s", exc)
 
     def drain_prefetch(self) -> None:
         """Wait for outstanding prefetch futures (best-effort)."""
         with self._prefetch_lock:
-            futs = list(self._prefetch_futs)
+            futs = list(self._prefetch_futs.values())
             self._prefetch_futs.clear()
         for fut in futs:
             try:
@@ -217,31 +244,57 @@ def build_runtime(settings: Settings) -> Runtime:
     """
     store = Archive(settings.data_dir)
     taxonomy = load_taxonomy(settings.taxonomy_path)
-    knowledge = KnowledgeStore(settings.data_dir / "knowledge.sqlite3")
+    knowledge = KnowledgeStore(settings.data_dir / "knowledge.sqlite3",
+                               toolkit_version=str(settings.knowledge_cfg.get("toolkit_version", "")))
     knowledge.import_taxonomy(taxonomy)
     taxonomy = knowledge.overlay_taxonomy(taxonomy)
-    pool: ApiKeyPool | None = None
-    if not settings.fake_llm and settings.nvidia_api_keys:
-        pool = build_key_pool(
-            settings.nvidia_api_keys,
-            base_url=settings.nvidia_base_url,
-            timeout=float(settings.generation.get("request_timeout_seconds", 90)),
-            llm_per_key=settings.llm_per_key_concurrency,
-            embed_per_key=settings.embed_per_key_concurrency,
-            embed_oversub=settings.embed_oversub,
-            llm_chair_reserve=int(settings.review.get("chair_slot_reserve", 1) or 0),
-        )
-    llm = build_llm(settings, pool)
-    review_model = getattr(settings, "review_model", settings.nvidia_model)
-    review_llm = (build_llm(replace(settings, nvidia_model=review_model), pool)
-                  if review_model != settings.nvidia_model else None)
-    embedder = build_embedder(settings, pool)
+    pools: dict[tuple[str, tuple[str, ...]], ApiKeyPool] = {}
+    writer_api = settings.agent_apis["writer"]
+    review_api = settings.agent_apis["review"]
+    writer_connection = (writer_api.base_url, tuple(writer_api.api_keys))
+    review_connection = (review_api.base_url, tuple(review_api.api_keys))
+
+    def pool_for(base_url: str, keys: list[str]) -> ApiKeyPool | None:
+        if settings.fake_llm or not keys:
+            return None
+        connection = (base_url, tuple(keys))
+        if connection not in pools:
+            pools[connection] = build_key_pool(
+                keys,
+                base_url=base_url,
+                timeout=float(settings.generation.get("request_timeout_seconds", 90)),
+                llm_per_key=(int(settings.review.get("llm_per_key_concurrency", settings.llm_per_key_concurrency))
+                             if connection == review_connection != writer_connection
+                             else settings.llm_per_key_concurrency),
+                embed_per_key=settings.embed_per_key_concurrency,
+                embed_oversub=settings.embed_oversub,
+                llm_chair_reserve=(int(settings.review.get("chair_slot_reserve", 1) or 0)
+                                   if connection == writer_connection == review_connection else 0),
+            )
+        return pools[connection]
+
+    role_pools = {role: pool_for(api.base_url, api.api_keys)
+                  for role, api in settings.agent_apis.items()}
+    pool = role_pools["writer"]
+    embed_key_pool = (pool_for(settings.embedding_base_url, settings.embedding_api_keys)
+                      if settings.embedding_provider == "nvidia" else None)
+    llm = build_llm(settings, pool, writer_api)
+    review_llm = (build_llm(settings, role_pools["review"], review_api)
+                  if review_api != writer_api else None)
+    evolver_llm = (build_llm(settings, role_pools["evolver"], settings.agent_apis["evolver"])
+                   if settings.agent_apis["evolver"] != writer_api else None)
+    salvage_llm = (build_llm(settings, role_pools["salvage"], settings.agent_apis["salvage"])
+                   if settings.agent_apis["salvage"] != writer_api else None)
+    knowledge_llm = (build_llm(settings, role_pools["knowledge"], settings.agent_apis["knowledge"])
+                     if settings.agent_apis["knowledge"] != writer_api else None)
+    embedder = build_embedder(settings, embed_key_pool)
     index_path = settings.data_dir / "embeddings.npz"
     try:
         index = VectorIndex.load(index_path)
     except (ValueError, OSError, EOFError):
         logger.warning("Vector index is unreadable; it will be rebuilt from the archive")
         index = VectorIndex()
+    accepted = store.load_accepted()
     prompt_cache = PromptCache()
     embedding_cache: EmbeddingCache | None = None
     if settings.embedding_cache_enabled:
@@ -250,18 +303,27 @@ def build_runtime(settings: Settings) -> Runtime:
             settings.data_dir / "embed_cache.npz",
         )
         embedder.cache = embedding_cache
-        accepted = store.load_accepted()
         for q in accepted:
             if not q.exact_hash:
                 continue
             vec = index.vector_for(q.id)
             if vec is not None:
                 embedding_cache.warm(q.exact_hash, vec)
+    gist_path = settings.data_dir / "gist_embeddings.npz"
+    try:
+        gist_index = VectorIndex.load(gist_path)
+    except (ValueError, OSError, EOFError):
+        logger.warning("Gist index is unreadable; it will be rebuilt from the archive")
+        gist_index = VectorIndex()
+    missing_gist = [q for q in accepted if q.tests_claim and q.id not in gist_index.ids]
+    if missing_gist:
+        gist_index.add([q.id for q in missing_gist], embedder.embed([q.tests_claim for q in missing_gist]))
+        gist_index.save(gist_path)
     prompt_builder = StructuredPrompt(settings, cache=prompt_cache)
     deduper = Deduper(settings)
-    for q in store.load_accepted():
+    for q in accepted:
         deduper.add_question(q)
-    workers = pool.embed_capacity if pool is not None else max(1, settings.embed_chunk_size)
+    workers = embed_key_pool.embed_capacity if embed_key_pool is not None else max(1, settings.embed_chunk_size)
     embed_pool = ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="embed-pre")
     return Runtime(
         settings=settings,
@@ -272,10 +334,16 @@ def build_runtime(settings: Settings) -> Runtime:
         deduper=deduper,
         taxonomy=taxonomy,
         pool=pool,
+        embed_key_pool=embed_key_pool,
+        role_pools={role: p for role, p in role_pools.items() if p is not None},
         prompt_cache=prompt_cache,
         embedding_cache=embedding_cache,
         prompt_builder=prompt_builder,
         _embed_pool=embed_pool,
         review_llm=review_llm,
+        evolver_llm=evolver_llm,
+        salvage_llm=salvage_llm,
+        knowledge_llm=knowledge_llm,
         knowledge=knowledge,
+        gist_index=gist_index,
     )

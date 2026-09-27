@@ -1,4 +1,4 @@
-"""Tests for NVIDIA API key env parsing (NVIDIA_API_KEY / _2 / KEYS)."""
+"""Tests for per-role API key env parsing (WRITER_API_KEY / _2 / KEYS)."""
 
 from __future__ import annotations
 
@@ -7,25 +7,25 @@ from cuda_sft_qgen.keys import parse_api_keys
 
 def test_parse_three_numbered_keys():
     env = {
-        "NVIDIA_API_KEY": "nvapi-aaa",
-        "NVIDIA_API_KEY_2": "nvapi-bbb",
-        "NVIDIA_API_KEY_3": "nvapi-ccc",
+        "WRITER_API_KEY": "nvapi-aaa",
+        "WRITER_API_KEY_2": "nvapi-bbb",
+        "WRITER_API_KEY_3": "nvapi-ccc",
     }
     assert parse_api_keys(env) == ["nvapi-aaa", "nvapi-bbb", "nvapi-ccc"]
 
 
 def test_parse_skips_empty_and_duplicates():
     env = {
-        "NVIDIA_API_KEY": "nvapi-aaa",
-        "NVIDIA_API_KEY_2": "",
-        "NVIDIA_API_KEY_3": "nvapi-aaa",
-        "NVIDIA_API_KEYS": "nvapi-aaa, nvapi-ddd",
+        "WRITER_API_KEY": "nvapi-aaa",
+        "WRITER_API_KEY_2": "",
+        "WRITER_API_KEY_3": "nvapi-aaa",
+        "WRITER_API_KEYS": "nvapi-aaa, nvapi-ddd",
     }
     assert parse_api_keys(env) == ["nvapi-aaa", "nvapi-ddd"]
 
 
 def test_parse_comma_list_only():
-    env = {"NVIDIA_API_KEYS": "k1;k2,k3"}
+    env = {"WRITER_API_KEYS": "k1;k2,k3"}
     assert parse_api_keys(env) == ["k1", "k2", "k3"]
 
 

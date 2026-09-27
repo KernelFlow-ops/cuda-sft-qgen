@@ -1,13 +1,14 @@
-"""Throughput and quality gate for a 10-question generate+review run.
+"""Throughput and quality gate for a small generate+review run.
 
-Compares wall time and accept rate against a baseline, and records error
-taxonomy plus a sample of stems with private reference answers. CUDA
-correctness is the chair's job; this module only measures process health.
+Compares wall time and accept rate against a baseline, and records quality
+diagnostics without exporting private reference answers.
 """
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime
 import hashlib
+from itertools import combinations
 import json
 import logging
 import os
@@ -31,7 +32,21 @@ THROUGHPUT_RED = 0.80
 NODE_P95_RED = 1.30
 ERROR_RE = re.compile(r"\b(ERROR|CRITICAL|Traceback)\b")
 WARN_RE = re.compile(r"\bWARNING\b")
-GATE_NODES = ("planner", "generate", "generate_batch", "salvage", "review_score", "review_chair")
+GATE_NODES = (
+    "bootstrap", "architect", "taxonomy_health", "planner", "generate",
+    "generate_batch", "salvage", "review_score", "review_chair", "archive",
+    "taxonomy_manager",
+)
+LOG_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S,%f"
+LOG_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3,6}")
+METRIC_LABEL_RE = re.compile(r"^([^{]+)\{([^}]*)\}$")
+STAGE_LOG_RE = {
+    "generate": re.compile(r"generate_batch done .*?duration_s=(?P<duration>[0-9.]+)"),
+    "review_start": re.compile(r"review_stage start\b"),
+    "review_done": re.compile(r"review_stage done duration_s=(?P<duration>[0-9.]+)"),
+    "repair_start": re.compile(r"repair_stage start\b"),
+    "repair_done": re.compile(r"repair_batch items=\d+ ok=\d+ retry=\d+"),
+}
 CHECK_NAMES = (
     "correctness",
     "answerability",
@@ -92,6 +107,134 @@ def node_seconds(metrics: dict[str, Any]) -> dict[str, dict[str, float]]:
         if key in histograms:
             out[node] = _histogram(metrics, key)
     return out
+
+
+def _metric_labels(key: str) -> tuple[str, dict[str, str]]:
+    """Split the collector's ``name{key=value,...}`` representation."""
+    match = METRIC_LABEL_RE.match(key)
+    if not match:
+        return key, {}
+    labels = dict(part.split("=", 1) for part in match.group(2).split(",") if "=" in part)
+    return match.group(1), labels
+
+
+def llm_activity(metrics: dict[str, Any], settings: Any) -> dict[str, Any]:
+    """Summarize actual requests by role, model, and scheduler priority."""
+    counters = metrics.get("counters") or {}
+    histograms = metrics.get("histograms") or {}
+    groups: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for key, count in counters.items():
+        metric, labels = _metric_labels(key)
+        if metric not in {"llm_requests", "llm_failures"}:
+            continue
+        group_key = (labels.get("priority", "unknown"), labels.get("model", "unknown"),
+                     labels.get("role", "unspecified"))
+        group = groups.setdefault(group_key, {
+            "priority": group_key[0], "model": group_key[1], "role": group_key[2],
+            "calls": 0, "failures": 0,
+        })
+        group["calls" if metric == "llm_requests" else "failures"] += int(count or 0)
+
+    for key, histogram in histograms.items():
+        metric, labels = _metric_labels(key)
+        if metric != "llm_seconds":
+            continue
+        group = groups.setdefault((labels.get("priority", "unknown"), labels.get("model", "unknown"),
+                                   labels.get("role", "unspecified")), {
+            "priority": labels.get("priority", "unknown"), "model": labels.get("model", "unknown"),
+            "role": labels.get("role", "unspecified"), "calls": 0, "failures": 0,
+        })
+        group["duration_seconds"] = _histogram({"histograms": {"sample": histogram}}, "sample")
+
+    configured = {
+        role: str(getattr(api, "model", ""))
+        for role, api in (getattr(settings, "agent_apis", {}) or {}).items()
+    }
+    priority_roles = {
+        "0": ["writer", "evolver"],
+        "1": ["writer", "salvage"],
+        "2": ["writer", "review", "chair", "verifier"],
+        "4": ["writer", "knowledge"],
+    }
+    observed = []
+    for (priority, model, role), group in sorted(groups.items()):
+        candidates = ([role] if role != "unspecified" else
+                      [candidate for candidate in priority_roles.get(priority, [])
+                       if candidate not in configured or configured[candidate] == model])
+        observed.append({**group, "role_candidates": candidates})
+    return {
+        "attribution": (
+            "Calls with a role label are attributed to that Agent; legacy calls without one list possible roles."
+        ),
+        "request_groups": observed,
+        "configured_role_models": configured,
+        "priority_roles": priority_roles,
+    }
+
+
+def stage_activity(path: Path, run_started: float) -> dict[str, Any]:
+    """Recover concurrent generation/review/repair intervals from pipeline logs."""
+    intervals: list[dict[str, Any]] = []
+    open_starts: dict[str, list[datetime]] = {"review": [], "repair": []}
+    if path.exists():
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            stamp = LOG_TIMESTAMP_RE.match(line)
+            if stamp is None:
+                continue
+            try:
+                timestamp = datetime.strptime(stamp.group(), LOG_TIMESTAMP_FORMAT)
+            except ValueError:
+                continue
+            gen = STAGE_LOG_RE["generate"].search(line)
+            if gen:
+                end = (timestamp.timestamp() - run_started)
+                duration = float(gen.group("duration"))
+                intervals.append({"stage": "generation", "start_seconds": end - duration,
+                                  "end_seconds": end, "duration_seconds": duration})
+                continue
+            for stage in ("review", "repair"):
+                if STAGE_LOG_RE[f"{stage}_start"].search(line):
+                    open_starts[stage].append(timestamp)
+                    break
+                done = STAGE_LOG_RE[f"{stage}_done"].search(line)
+                if done and open_starts[stage]:
+                    start = open_starts[stage].pop(0)
+                    duration = max(0.0, (timestamp - start).total_seconds())
+                    start_offset = start.timestamp() - run_started
+                    intervals.append({"stage": stage, "start_seconds": start_offset,
+                                      "end_seconds": start_offset + duration,
+                                      "duration_seconds": duration})
+                    break
+
+    intervals.sort(key=lambda item: (item["start_seconds"], item["stage"]))
+    overlaps: dict[str, dict[str, float | int]] = {}
+    for left, right in combinations(intervals, 2):
+        if left["stage"] == right["stage"]:
+            continue
+        seconds = min(left["end_seconds"], right["end_seconds"]) - max(
+            left["start_seconds"], right["start_seconds"])
+        if seconds <= 0:
+            continue
+        pair = "+".join(sorted((left["stage"], right["stage"])))
+        summary = overlaps.setdefault(pair, {"count": 0, "overlap_seconds": 0.0})
+        summary["count"] = int(summary["count"]) + 1
+        summary["overlap_seconds"] = float(summary["overlap_seconds"]) + seconds
+    return {
+        "intervals": intervals,
+        "overlaps": overlaps,
+        "interval_counts": dict(Counter(item["stage"] for item in intervals)),
+        "unmatched_starts": {stage: len(starts) for stage, starts in open_starts.items() if starts},
+    }
+
+
+def _secure_output_tree(output: Path) -> None:
+    """Restrict gate artifact permissions after all runtime writers have closed."""
+    paths = sorted(output.rglob("*"), key=lambda item: len(item.parts), reverse=True)
+    for path in paths:
+        if path.is_symlink():
+            continue
+        path.chmod(0o700 if path.is_dir() else 0o600)
+    output.chmod(0o700)
 
 
 def scan_log(path: Path) -> dict[str, Any]:
@@ -201,7 +344,7 @@ def write_quality_sample(
     *,
     limit: int = 10,
 ) -> list[dict[str, Any]]:
-    """Write up to ``limit`` accepted stems plus chair answers; pad from rejects.
+    """Write up to ``limit`` accepted stems; pad with rejects and pending items.
 
     Returns:
         The records written to ``path``.
@@ -216,12 +359,10 @@ def write_quality_sample(
             "tests_claim": question.tests_claim,
             "l3_id": question.l3_id,
             "action": details.get("action") or "accept",
-            "reason": question.reject_reason or details.get("reason"),
+            "reason_code": classify_reject_reason(question.reject_reason or details.get("reason")),
             "checks": details.get("checks") or {},
-            "internal_reference_answer": question.internal_reference_answer,
             "language": question.language,
             "question_type": question.question_type,
-            "warnings": list(question.warnings or []),
         })
     if len(records) < limit:
         for question in list(rejected) + list(pending):
@@ -235,12 +376,10 @@ def write_quality_sample(
                 "tests_claim": question.tests_claim,
                 "l3_id": question.l3_id,
                 "action": details.get("action") or question.review_status,
-                "reason": question.reject_reason or details.get("reason"),
+                "reason_code": classify_reject_reason(question.reject_reason or details.get("reason")),
                 "checks": details.get("checks") or {},
-                "internal_reference_answer": question.internal_reference_answer,
                 "language": question.language,
                 "question_type": question.question_type,
-                "warnings": list(question.warnings or []),
             })
     path.write_text(
         "\n".join(json.dumps(item, ensure_ascii=False) for item in records) + ("\n" if records else ""),
@@ -370,6 +509,9 @@ def write_verdict_md(payload: dict[str, Any], path: Path) -> None:
         f"- pending: {report.get('pending')} exhausted: {report.get('exhausted')}",
         f"- knowledge_jobs_done: {report.get('knowledge_jobs_done')} errors: {report.get('knowledge_job_errors')}",
         f"- knowledge_context_chars_p95: {(report.get('knowledge_context_chars') or {}).get('p95')}",
+        f"- llm_request_groups: {len((report.get('agent_activity') or {}).get('request_groups') or [])}",
+        f"- stage_intervals: {len((report.get('stage_activity') or {}).get('intervals') or [])}",
+        f"- stage_overlaps: {len((report.get('stage_activity') or {}).get('overlaps') or {})}",
         "",
         "## Quality",
         f"- accept_rate: {(report.get('quality') or {}).get('accept_rate')}",
@@ -390,7 +532,7 @@ def write_verdict_md(payload: dict[str, Any], path: Path) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def run_gate(
+def _run_gate_impl(
     settings,
     output: Path,
     *,
@@ -460,32 +602,37 @@ def run_gate(
     knowledge_stats: dict[str, Any] = {}
     rt = None
     try:
-        rt = build_runtime(fixed)
-        if ingest_packs:
-            from cuda_sft_qgen.pack import ingest_pack, load_pack
-            for pack_path in ingest_packs:
-                ingest_pack(rt.knowledge, load_pack(pack_path), apply=True, enqueue_jobs=False)
-            rt.refresh_knowledge(force=True)
-        try:
-            result = run_pipeline(fixed, runtime=rt)
-        except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
-            logger.exception("gate pipeline failed")
-        accepted = rt.store.load_accepted()
-        rejected = rt.store.load_rejected()
-        pending = rt.store.load_pending()
-        if rt.knowledge is not None:
-            knowledge_stats = rt.knowledge.stats()
+        from cuda_sft_qgen.graph.app import pipeline_lock
+
+        with pipeline_lock(fixed.data_dir):
+            try:
+                rt = build_runtime(fixed)
+                if ingest_packs:
+                    from cuda_sft_qgen.pack import ingest_pack, load_pack
+                    for pack_path in ingest_packs:
+                        ingest_pack(rt.knowledge, load_pack(pack_path), apply=True, enqueue_jobs=False)
+                    rt.refresh_knowledge(force=True)
+                try:
+                    result = run_pipeline(fixed, runtime=rt, lock_held=True)
+                except Exception as exc:
+                    error = f"{type(exc).__name__}: {exc}"
+                    logger.exception("gate pipeline failed")
+                accepted = rt.store.load_accepted()
+                rejected = rt.store.load_rejected()
+                pending = rt.store.load_pending()
+                if rt.knowledge is not None:
+                    knowledge_stats = rt.knowledge.stats()
+            finally:
+                if rt is not None:
+                    try:
+                        rt.close()
+                    except Exception as exc:
+                        error = error or f"{type(exc).__name__}: {exc}"
     except Exception as exc:
         error = error or f"{type(exc).__name__}: {exc}"
         accepted, rejected, pending = [], [], []
         logger.exception("gate runtime failed")
     finally:
-        if rt is not None:
-            try:
-                rt.close()
-            except Exception as exc:
-                error = error or f"{type(exc).__name__}: {exc}"
         logging.getLogger().removeHandler(handler)
         handler.close()
 
@@ -524,8 +671,10 @@ def run_gate(
         "knowledge_claims": knowledge_stats.get("claims") or {},
         "knowledge_context_chars": _histogram(metrics, "knowledge_context_chars"),
         "node_seconds": node_seconds(metrics),
+        "agent_activity": llm_activity(metrics, fixed),
+        "stage_activity": stage_activity(log_path, started),
         "taxonomy_sha256": hashlib.sha256(snapshot.read_bytes()).hexdigest(),
-        "model": fixed.nvidia_model,
+        "model": fixed.llm_model,
         "review_model": fixed.review_model,
         "writer_concurrency": fixed.writer_concurrency,
         "metrics": metrics,
@@ -543,3 +692,37 @@ def run_gate(
     (output / "gate_report.json").write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
     write_verdict_md({"report": report, "compared": compared}, output / "verdict.md")
     return report
+
+
+def run_gate(
+    settings,
+    output: Path,
+    *,
+    phase: str,
+    target: int = 10,
+    timeout: float = 2700,
+    max_iterations: int = 40,
+    baseline_path: Path | None = None,
+    allow_fake: bool = False,
+    ingest_packs: list[Path] | None = None,
+) -> dict[str, Any]:
+    """Run the gate with owner-only permissions on its output tree."""
+    output = Path(output).resolve()
+    if output.exists() and any(output.iterdir()):
+        raise ValueError("Gate output must be a new or empty directory")
+    output.mkdir(parents=True, exist_ok=True, mode=0o700)
+    output.chmod(0o700)
+    try:
+        return _run_gate_impl(
+            settings,
+            output,
+            phase=phase,
+            target=target,
+            timeout=timeout,
+            max_iterations=max_iterations,
+            baseline_path=baseline_path,
+            allow_fake=allow_fake,
+            ingest_packs=ingest_packs,
+        )
+    finally:
+        _secure_output_tree(output)

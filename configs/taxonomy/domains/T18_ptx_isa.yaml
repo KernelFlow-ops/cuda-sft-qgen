@@ -1,5 +1,6 @@
 id: T18
 name: PTX ISA 深水
+weight: 0.9
 children:
 - id: ldst_cache_hints
   name: ld/st cache 提示
@@ -90,6 +91,7 @@ children:
     - 2
     - 3
     kind: formula
+  target_leaves: 12
 - id: cp_async_isa
   name: cp.async 编码
   leaves:
@@ -181,6 +183,12 @@ children:
     difficulty:
     - 2
     kind: failure
+  arch:
+  - sm_80
+  - sm_86
+  - sm_89
+  - sm_90
+  target_leaves: 12
 - id: mma_encodings
   name: mma/wgmma/umma
   leaves:
@@ -271,6 +279,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: predicates
   name: 谓词与选择
   leaves:
@@ -362,6 +371,7 @@ children:
     - 2
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: mbarrier_ptx
   name: mbarrier 与 bar
   leaves:
@@ -453,6 +463,12 @@ children:
     difficulty:
     - 3
     kind: feature
+  arch:
+  - sm_80
+  - sm_90
+  - sm_90a
+  - sm_100a
+  target_leaves: 12
 - id: bar_sync_ptx
   name: bar.sync
   leaves:
@@ -522,6 +538,7 @@ children:
     - 2
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: elect_sync
   name: elect.sync
   leaves:
@@ -595,6 +612,11 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  arch:
+  - sm_90
+  - sm_90a
+  - sm_100a
+  target_leaves: 12
 - id: atom_red_ptx
   name: atom 与 red
   leaves:
@@ -665,6 +687,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: shfl_vote_ptx
   name: shfl 与 vote
   leaves:
@@ -737,6 +760,7 @@ children:
     difficulty:
     - 2
     kind: mechanism
+  target_leaves: 12
 - id: ptx_addr_spaces
   name: PTX 地址空间
   leaves:
@@ -807,6 +831,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: reconverge_ssy
   name: 分支与汇合
   leaves:
@@ -881,6 +906,7 @@ children:
     - 2
     - 3
     kind: formula
+  target_leaves: 12
 - id: cvt_prmt
   name: cvt 与打包
   leaves:
@@ -951,6 +977,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: wgmma_async_enc
   name: wgmma 异步编码细节
   leaves:
@@ -1024,3 +1051,6 @@ children:
     difficulty:
     - 4
     kind: failure
+  arch:
+  - sm_90a
+  target_leaves: 12

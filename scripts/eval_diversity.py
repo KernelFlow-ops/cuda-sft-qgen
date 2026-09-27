@@ -67,6 +67,7 @@ def main() -> None:
     report = {
         "n": len(rows),
         "entropy_ratio": {k: round(entropy_ratio(Counter(r.get(k) for r in rows)), 3)
+                          if any(r.get(k) not in (None, "") for r in rows) else None
                           for k in ("question_type", "kind", "difficulty", "hardware", "language", "answer_format", "scenario")},
         "l1_entropy_ratio": round(entropy_ratio(Counter(r["topic_path"][0] for r in rows)), 3),
         "leaf_coverage": (len(leaf) / a.taxonomy_leaves) if a.taxonomy_leaves else None,

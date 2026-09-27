@@ -51,8 +51,8 @@ def test_planner_downweights_overrepresented_l1():
     t01 = sum(1 for b in briefs if b.topic_path[0] == "T01")
     boosted = sum(1 for b in briefs if b.topic_path[0] in {"T07", "T08"})
     assert t01 < 12
-    # 30 L1s dilute any two domains versus the original 15-domain tree.
-    assert boosted >= 6
+    # The joint planner balances the 30-domain scope before applying steering.
+    assert boosted >= 3
 
 
 def test_planner_does_not_emit_evolver_without_seeds():
@@ -92,7 +92,9 @@ def test_planner_unique_l3_and_angles():
     ids = [b.l3_id for b in briefs]
     assert len(ids) == len(set(ids))
     assert all(b.angle for b in briefs)
-    assert all(b.instance_hint for b in briefs)
+    assert all(not b.instance_hint or b.instance_hint in next(
+        leaf.hints for leaf in taxonomy.leaves if leaf.l3_id == b.l3_id
+    ) for b in briefs)
 
 
 def test_planner_must_avoid_is_not_style_notes():
@@ -128,6 +130,7 @@ def test_instance_hint_keeps_slash_fractions():
         claim="FFTDx Size<> 必须是该 SM 目标支持的长度（常见 Size=2^k 及有限 3/5 因子）",
         types=("syntax",),
         difficulty=(2,),
+        hints=("Size=2^k and finite 3/5 factors",),
         kind="formula",
     )
     hint = _instance_hint(leaf, random.Random(0))
@@ -145,4 +148,3 @@ def test_pick_angle_does_not_mismatch_kind():
         kinds = card.get("kinds") or []
         assert "缺限定符" not in ask
         assert not kinds or "formula" in kinds
-

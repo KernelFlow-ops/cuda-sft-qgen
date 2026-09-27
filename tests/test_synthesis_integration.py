@@ -46,6 +46,9 @@ def test_curriculum_revalidates_and_keeps_parent_family_in_one_split(tmp_path, s
         sibling = sample_question(id='sibling')
         child = sample_question(id='child', parent_ids=['parent', 'sibling'], mixup_mode='hybrid')
         for q in (parent, sibling, child):
+            q.generation_provenance = {
+                'writer_real_api': True, 'writer_provider': 'openai', 'writer_model': 'test-model',
+            }
             q.review_details = _review(q)
             archive.append_accepted(q)
         bad = sample_question(id='unverified')

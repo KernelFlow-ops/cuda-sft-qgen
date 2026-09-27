@@ -77,6 +77,15 @@ def test_normalize_review_obj():
     assert obj["defect_codes"] == ["leakage"]
 
 
+def test_legacy_assessed_format_normalization():
+    from cuda_sft_qgen.graph.nodes.review_chair import _normalize_review_obj
+    raw = {"assessed_metadata": {**META, "answer_format": "", "arch_target": "sm_unsupported"}}
+    legacy = _normalize_review_obj(raw, legacy_assessment=True)["assessed_metadata"]
+    assert legacy["answer_format"] is None and legacy["arch_target"] is None
+    assert _normalize_review_obj(raw)["assessed_metadata"]["answer_format"] == ""
+    assert _normalize_review_obj(raw)["assessed_metadata"]["arch_target"] == "sm_unsupported"
+
+
 def test_node_wires_rules():
     import inspect
     from cuda_sft_qgen.graph.nodes import review_chair

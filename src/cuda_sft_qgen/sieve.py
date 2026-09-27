@@ -17,15 +17,16 @@ _CUDA_HINTS = re.compile(
     r"nvcc|ptx|sass|tensor core|cutlass|cute|tma|wgmma|umma|tmem|"
     r"nsight|cublas|nccl|hopper|ampere|blackwell|smem|gmem|"
     r"__syncthreads|coalesc|bank conflict|mma|layout|stride|swizzle|"
-    r"cluster|nvlink|cub::|launch_bounds|__fma|fma|ulp|mdspan|extents",
+    r"cluster|nvlink|cub::|launch_bounds|__fma|fma|ulp|mdspan|extents|"
+    r"gpu|fp4|fp8|nvfp4|mxfp4",
     re.IGNORECASE,
 )
 
 _QUESTIONISH = re.compile(
     r"[?？]|为什么|为何|如何|怎样|哪|什么|是否|给出|求|指出|解释|"
-    r"请|补全|下列|选择|选出|填空|计算|判断|"
+    r"请|补全|下列|选择|选出|填空|计算|判断|回答|"
     r"compare|why|how|what|which|identify|select|choose|examine|"
-    r"complete|fill|compute|calculate|determine|provide|indicate",
+    r"complete|fill|compute|calculate|determine|provide|indicate|give",
     re.IGNORECASE,
 )
 
@@ -33,6 +34,11 @@ _BAD_OPEN = re.compile(
     r"请介绍|谈谈你对|what is cuda\??$|介绍一下cuda优化$|任意发挥|畅所欲言",
     re.IGNORECASE,
 )
+
+_LEAK_PHRASES = ("must mention", "your answer must include", "答案要点", "要点包括", "答案是", "answer is")
+_CUDA_WORDS = ("__global__", "__shared__", "<<<", "sm_", "warp", "cuda", "ptx", "nsight", "cute", "cutlass", "nccl", "cublas",
+               "kernel", "gpu", "shared", "共享内存", "sanitizer", "cub::", "thrust", "fp4", "fp8", "tensor", "bank", "nvcc",
+               "dram", "tma", "tcgen05", "wgmma", "mbarrier")
 
 
 def rule_sieve(question: Question, settings: Settings) -> str | None:
@@ -52,6 +58,13 @@ def rule_sieve(question: Question, settings: Settings) -> str | None:
         return "sieve_too_vague"
     if text.endswith("。") and "？" not in text and "?" not in text and len(text) < 40:
         return "sieve_not_a_question"
+    low = text.lower()
+    if any(phrase in low for phrase in _LEAK_PHRASES):
+        return "sieve_leak_must_mention"
+    from cuda_sft_qgen.review.consistency import _strong_tokens
+    blob = f"{text}\n{question.tests_claim or ''}"
+    if not _strong_tokens(blob) and not any(word in blob.lower() for word in _CUDA_WORDS):
+        return "sieve_off_topic_strict"
     # hw/leaf mismatches are warnings on the Writer path, not hard rejects.
     return None
 

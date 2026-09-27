@@ -30,9 +30,10 @@ def _json_print(payload) -> None:
 
 def _require_keys(settings) -> int | None:
     """Return 2 if real generation is requested without API keys."""
-    if not settings.fake_llm and not settings.nvidia_api_keys:
+    missing = settings.missing_api_keys + settings.missing_api_fields
+    if missing:
         print(
-            "No NVIDIA API keys. Set NVIDIA_API_KEY / NVIDIA_API_KEY_2 / NVIDIA_API_KEY_3, or pass --fake.",
+            f"Missing API configuration: {', '.join(missing)}.",
             file=sys.stderr,
         )
         return 2

@@ -20,9 +20,9 @@ LangGraph 多智能体流水线，为 NVIDIA CUDA 知识域生成 **SFT 问题�
 
 ## 多 Agent 协同
 
-默认走 **并发协调器**（`generation.concurrent_pipeline=true`）：主线程审题归档，后台一条 `generation-stage` 线程出题，`KnowledgeWorker` 守护线程做知识扩充与官方文档审计。关掉并发后回退到顺序 LangGraph。
+默认走 **并发协调器**（`generation.concurrent_pipeline=true`）：协调器分别调度 `generation-stage`、`review-stage` 和 `repair-stage`。每道题由真实 Writer API 写完就落入 SQLite pending，第一道可审题立即交给 Chair；JSON 修复和预审重写在独立修题线程执行。Chair 归档保持单消费者，内部仍可并行审核多题。`KnowledgeWorker` 守护线程做知识扩充与官方文档审计。关掉并发后回退到顺序 LangGraph。
 
-LLM 槽位优先级（数字越小越先拿到 key）：**Writer=0 > Salvage=1 > Chair=2 > Sieve=3 > Taxonomy=4**。`--fake` 不启动 KnowledgeWorker。Chair 对 `formula/debug/layout/code_complete` 的 uncertain 结果会再审一次；连续审题失败触发熔断。
+LLM 槽位优先级（数字越小越先拿到 key）：**Writer=0 > Salvage=1 > Chair=2 > Sieve=3 > Taxonomy=4**。正式生题必须使用真实 API；Chair 对 `formula/debug/layout/code_complete` 的 uncertain 结果会再审一次；连续审题失败触发熔断。
 
 ### 总览：并发流水线（默认）
 
@@ -32,33 +32,22 @@ flowchart TB
   LOCK --> BOOT[Bootstrap<br/>从 SQLite 灌入 accepted/pending/steering]
   BOOT --> ARCH{rebuild_taxonomy?}
   ARCH -->|是| ARC[Architect]
-  ARCH -->|否| LOOP
-  ARC --> LOOP
+  ARCH -->|否| COORD
+  ARC --> COORD
 
-  subgraph LOOP["主循环 run_concurrent"]
-    direction TB
-    REF[refresh 知识 + pending]
-    REF --> PROD{generation 空闲<br/>且 pending 未满?}
-    PROD -->|未完成任务| WR[Writer/Evolver 批]
-    PROD -->|retry 到期| DR[Retry Drain]
-    PROD -->|可规划| PL[Planner 抽 brief]
-    PL --> WR
-    WR --> SALV{salvage_items?}
-    SALV -->|是| SA[Salvage]
-    SALV -->|否| REV
-    SA --> REV
-    PROD -->|否| REV
-    REV{到期 pending<br/>达到 chair 触发量?}
-    REV -->|是| RS[Review Score]
-    RS --> RC[Review Chair]
-    RC --> AR[Archivist]
-    AR -->|每 N 轮| KWQ[enqueue_expansion]
-    AR --> REF
-    REV -->|否, 生产者仍在跑| WAIT[sleep 50ms]
-    WAIT --> REF
-  end
-
-  LOOP --> DONE{accepted ≥ target?}
+  BOOT --> COORD[协调器<br/>队列容量与恢复调度]
+  COORD --> PL[Planner / retry]
+  PL --> WR[generation-stage<br/>真实 Writer API 并行出题]
+  WR -->|每题完成| PENDING[(SQLite pending)]
+  WR -->|JSON 或预审缺陷| REPAIRQ[修题队列]
+  REPAIRQ --> REP[repair-stage<br/>Salvage / Rewrite]
+  REP --> PENDING
+  PENDING -->|首题可审即启动| RS[review-stage<br/>Review Score]
+  RS --> RC[Review Chair]
+  RC --> AR[单消费者归档]
+  AR -->|可修 reject，限一次| REPAIRQ
+  AR --> COORD
+  COORD --> DONE{accepted ≥ target?}
   DONE -->|是| ENDN([archived])
   DONE -->|否且仍有 pending| PEND([review_pending])
   DONE -->|否| LIMIT([iteration_limit])
@@ -72,7 +61,7 @@ flowchart TB
     EX --> AUDQ[入队 audit]
     AU -->|contradicted| INV[invalidate 关联题]
   end
-  KWQ -.-> POLL
+  AR -.-> POLL
   INV -.-> AR
 ```
 
@@ -83,6 +72,7 @@ flowchart TB
 | **Planner** | `graph/nodes/planner.py` + `planner.py` | 配额 + steering + 叶子硬件兼容，抽 Writer/Evolver 任务单 |
 | **Writer / Evolver** | `graph/nodes/generate.py` | 并行出题；规则筛只拦空泛题；hw/leaf 记 warning 进 pending |
 | **Salvage** | `generate.salvage_item` / `salvage.py` | 修损坏 JSON，不改题意；修不了进 retry 队列 |
+| **Review Repair** | `review_archive.py` / `salvage.py` | 可修 reject 入持久任务；真实 Writer 重写后重新进入 pending，最多一次 |
 | **Retry Drain** | `graph/nodes/salvage.py` | 到期 429/JSON 任务再跑一轮 Writer |
 | **Review Score** | `graph/nodes/review.py` | embedding 近邻 + 三层指纹；不在此步放行 |
 | **Review Chair** | `graph/nodes/review.py` | 每题独立审查；失败/不确定保留 pending，绝不默认 accept |
@@ -159,8 +149,8 @@ flowchart TB
   IN[accepted / pending / steering / quotas] --> N{还要几道?}
   N -->|target 已满| STOP[target_reached]
   N -->|pending 已满 batch| SKIP[skip_plan]
-  N -->|n>0| PAD[不足 min_generate_batch 则垫满]
-  PAD --> SAMPLE[plan_briefs]
+  N -->|n>0| CAP[按剩余目标与 pending 容量裁剪]
+  CAP --> SAMPLE[plan_briefs]
   SAMPLE --> HW[叶子 × 硬件白名单]
   SAMPLE --> QT[题型 / 难度 / bloom / 粒度配额]
   SAMPLE --> EV{evolver_fraction}
@@ -174,7 +164,8 @@ flowchart TB
 ```
 
 - 自适应采样：`configs/planner.yaml` 的 `adaptive_sampling`（可关）
-- 输出：`batch_briefs`，iteration +1
+- Evolver 优先取同一叶子的已通过题作为 seed；没有时再取相关叶子。
+- 输出：`batch_briefs`；只有实际规划时 iteration +1。`max_iterations` 是单次运行额度，resume 保留累计计数并获得新额度。
 
 ### Writer / Evolver
 
@@ -418,6 +409,7 @@ stateDiagram-v2
 ```
 
 熔断：连续 `review_error` 达到 `circuit_breaker_error_streak`，或 `review_exhausted` 达到 `circuit_breaker_exhausted`，主循环以 `status=review_pending` 停，不空转。
+独立验证的单次运行调用额度用尽时，主循环以 `status=verification_budget_exhausted` 停止新增任务，待审题不消耗重试次数；下一次 `resume` 可继续审题。
 
 ### SQLite 权威存储与导出
 
@@ -445,7 +437,7 @@ durable generation_tasks 与 retry 租约也在 `questions.sqlite3`：进程崩�
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-cp .env.example .env   # 配置 NVIDIA_API_KEY / _2 / _3
+cp .env.example .env   # 按下方说明配置聊天和 embedding 的 API key
 ```
 
 **基础命令**：
@@ -460,9 +452,6 @@ cuda-sft-qgen generate --target 100
 # 使用 prod profile（最高质量）
 export CUDA_SFT_PROFILE=prod
 cuda-sft-qgen generate --target 5000
-
-# 测试模式（无需 API key）
-cuda-sft-qgen generate --fake --target 8 --batch 4
 
 # 恢复中断的生成
 cuda-sft-qgen resume
@@ -496,7 +485,23 @@ cuda-sft-qgen manage-taxonomy --expand --domain memory --facet failure --max-lea
 
 查重：L0 SHA256 → L1 骨架 SimHash/Jaccard → L2 embedding cosine；附近邻全文交给审题模型，批内只与质量通过的存活题比较。向量默认 `nvidia/nemotron-3-embed-1b`。
 
-`THINKING_LEVEL=none|medium|high`；`reasoning_content` 默认不落盘（`LOG_REASONING=1` 才记）。
+聊天使用 OpenAI 兼容中转、embedding 保持 NVIDIA 时，在 `.env` 中配置：
+
+```dotenv
+WRITER_PROVIDER=openai
+WRITER_API_KEY=your-key
+WRITER_BASE_URL=https://www.poke2api.com/v1
+WRITER_MODEL=gpt-6-luna
+REVIEW_MODEL=gpt-6-sol
+THINKING_LEVEL=medium
+WRITER_GATE_MAX_TOKENS=2048
+EMBEDDING_PROVIDER=nvidia
+EMBEDDING_API_KEY=your-nvidia-key
+EMBEDDING_BASE_URL=https://integrate.api.nvidia.com/v1
+EMBEDDING_MODEL=nvidia/nemotron-3-embed-1b
+```
+
+Evolver、Review、Salvage、Knowledge 可分别用 `EVOLVER_*`、`REVIEW_*`、`SALVAGE_*`、`KNOWLEDGE_*` 覆盖 Writer 的供应商、密钥、地址和模型；更换供应商或地址时需同时提供新地址和密钥。`THINKING_LEVEL=none|low|medium|high`。OpenAI 格式发送 `reasoning_effort`，NVIDIA 格式使用 `chat_template_kwargs`；`reasoning_content` 默认不落盘（`LOG_REASONING=1` 才记）。`validate-config` 检查各角色与 embedding 配置。
 
 ## 配置系统
 
@@ -557,11 +562,25 @@ CUDA_SFT_PROFILE=myprofile cuda-sft-qgen generate --target 2000
 
 ### 并发设置
 
+在 `.env` 中将 N 同时用于 Writer 线程数和可用的聊天 API 槽位；一个 key 时如下配置为 4 路。多个 key 时总槽位为 key 数量乘 `LLM_PER_KEY_CONCURRENCY`。超过槽位的 Writer 会排队。
+
+```dotenv
+WRITER_CONCURRENCY=4
+LLM_PER_KEY_CONCURRENCY=4
+WRITER_SUBMIT_STAGGER_SEC=0
+MIN_GENERATE_BATCH=4
+CHAIR_TRIGGER_COUNT=1
+CHAIR_MAX_WORKERS=2
+REPAIR_CONCURRENCY=2
+```
+
+`cuda-sft-qgen probe-concurrency --skip-pipeline` 可查看实际 `peak_llm_inflight`。地址和密钥相同的角色共享 API 池；embedding 可单独配置。Review 与 Writer 共用 API 池时，`chair_slot_reserve` 为待审题保留聊天槽位。并发提高批量吞吐，不缩短单个模型请求的响应时间；`benchmark_report.json` 中的 `candidate_latency_p95_seconds` 和 `candidate_under_30_rate` 用于验收单题 30 秒目标。
+
 ```bash
 # 多 API Key 线性扩展（最多推荐 8 个）
-export NVIDIA_API_KEY=nvapi-xxx
-export NVIDIA_API_KEY_2=nvapi-yyy
-export NVIDIA_API_KEY_3=nvapi-zzz
+export WRITER_API_KEY=nvapi-xxx
+export WRITER_API_KEY_2=nvapi-yyy
+export WRITER_API_KEY_3=nvapi-zzz
 
 # 每个 key 的并发数（2-4 推荐，过高会 429）
 export LLM_PER_KEY_CONCURRENCY=3

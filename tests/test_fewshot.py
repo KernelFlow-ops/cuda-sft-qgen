@@ -103,8 +103,8 @@ def test_positive_slots_cover_dimensions():
     ids = [p.question.id for p in picks]
     assert "a6" not in ids
     slots = {p.slot for p in picks}
-    # Cross-domain seeds are intentionally excluded; same-L3 remains valid.
-    assert "B" in slots
+    # The v2 same-leaf slot is capped at one item.
+    assert "S" in slots
     assert len(ids) == len(set(ids))
     # The T08 domain has only one usable seed; do not backfill from another
     # domain just to satisfy a fixed few-shot count.
@@ -134,7 +134,7 @@ def test_positive_seed_bucket_is_preferred():
     assert picks[0].slot == "S"
 
 
-def test_empty_domain_bucket_does_not_mix_cross_domain_seed():
+def test_same_kind_can_supply_cross_domain_style_seed():
     other = _q(
         id="other-domain",
         topic_path=["T99", "other", "leaf"],
@@ -144,7 +144,7 @@ def test_empty_domain_bucket_does_not_mix_cross_domain_seed():
         hardware="hopper",
     )
     picks = select_positives(_brief(), FewshotCorpus(accepted=[other]), FewshotCfg())
-    assert picks == []
+    assert len(picks) == 1 and picks[0].slot == "K"
 
 
 def test_negatives_prefer_same_l3_and_skip_empty_429():

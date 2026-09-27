@@ -3,14 +3,17 @@ paths:
   quotas: configs/quotas.yaml
   personas: configs/personas.yaml
   data_dir: data
-
-# Canonical Mixup settings. Runtime resolves profile/environment overrides
-# once and passes this block to the planner; no parallel config namespace.
+  scope: configs/scope.yaml
+  compat_matrix: configs/compat_matrix.yaml
+  angles: configs/angles.yaml
+  hardware_facts: configs/hardware_facts.yaml
 mixup:
   enabled: false
-  fraction: 0.30
-  modes: [decomposed, hybrid]
-  pair_similarity_min: 0.80
+  fraction: 0.3
+  modes:
+  - decomposed
+  - hybrid
+  pair_similarity_min: 0.8
   pair_similarity_max: 0.995
   pair_top_k: 8
   max_pairs: 32
@@ -23,7 +26,6 @@ mixup:
   min_difficulty_gap: 1
   same_l2: true
   max_batch_items: 64
-
 generation:
   temperature: 1.0
   top_p: 0.95
@@ -35,54 +37,52 @@ generation:
   embed_chunk_size: 8
   prompt_cache: true
   embedding_cache: true
-  evolver_fraction: 0.30
+  evolver_fraction: 0.3
   fewshot_positives: 5
   fewshot_negatives: 2
   anti_templates_max: 15
   fewshot_snippet_chars: 500
-  fewshot_max_nn_cosine: 0.50
-  fewshot_nn_cosine_fallback: 0.80
+  fewshot_max_nn_cosine: 0.5
+  fewshot_nn_cosine_fallback: 0.8
   fewshot_simhash_hamming_max: 20
-  # Pilot quality gates are not yet qualified. Enable explicitly for evaluation;
-  # private generation artifacts never enter the public question export.
-  prompt_cot: false
+  prompt_cot: true
   request_timeout_seconds: 90
   request_max_attempts: 3
   sieve_min_chars: 24
   max_parse_retries: 1
   priority_queue_size: 200
-  backpressure_threshold: 0.20
+  backpressure_threshold: 0.2
   backpressure_sleep: 0.5
-  # Never emit 1-2 brief batches that idle the writer pool.
   min_generate_batch: null
-  # Stagger writer submits so a full pool does not hit the gateway in the same 200ms.
   submit_stagger_sec: 0.35
-  # Salvage JSON in the salvage node, not on the writer thread.
   salvage_inline: false
   pending_save_every: 1
-  # Inherit THINKING_LEVEL unless set. Prefer low/none for throughput.
   writer_thinking_level: null
-  # Pre-chair consistency gate: local high-precision checks, then a cheap LLM
-  # critic. Certain defects rewrite once; still-broken drafts never reach chair.
   writer_consistency_gate: true
+  writer_gate_llm: false
   writer_gate_rewrite: true
   writer_gate_max_tokens: 512
-
+  repair_concurrency: 2
+  review_repair_enabled: true
+  review_repair_max_attempts: 1
+  fewshot_snippet_chars_code: 1200
 knowledge:
   enabled: true
   audit_interval_seconds: 86400
   audit_batch_size: 20
   worker_poll_seconds: 5
+  worker_max_jobs_per_run: 20
   expansion_cooldown_seconds: 300
   official_sources: []
-  # External inventory is opt-in because it performs network retrieval.  When
-  # enabled, inventory gaps trigger a critic but never directly activate claims.
   external_inventory_enabled: false
   inventory_sources: []
   external_inventory_interval_seconds: 86400
   external_inventory_max_sources: 8
   external_inventory_max_concepts: 500
-
+  docs_dir: data/docs
+  toolkit_version: 12.x
+  legacy_batch_per_l2: 20
+  legacy_due_days: 14
 taxonomy:
   target_leaves_per_l2: 30
   target_leaf_count: 4500
@@ -96,69 +96,72 @@ taxonomy:
     leaf_cosine_dup: 0.92
     leaf_cosine_gray: 0.85
     facets:
-      - formula
-      - derivation
-      - failure
-      - feature
-      - mechanism
-      - api
-      - numeric
-      - layout
-      - profiling
-      - arch_migrate
-      - cross_factor
+    - formula
+    - derivation
+    - failure
+    - feature
+    - mechanism
+    - api
+    - numeric
+    - layout
+    - profiling
+    - arch_migrate
+    - cross_factor
     allow_refine_in_pipeline: false
     allow_merge_in_pipeline: false
     allow_new_domains: false
-    external_coverage_threshold: 0.80
+    external_coverage_threshold: 0.8
     external_hard_trigger: true
-
 review:
   thinking_level: medium
   max_tokens: 2048
   batch_size: 20
   top_k: 8
-  semantic_dup_threshold: 0.94      # Was 0.93 - more strict semantic similarity
-  semantic_gray_threshold: 0.90     # Was 0.88 - narrower gray zone
-  template_jaccard_threshold: 0.91  # Was 0.88 - raise to reduce false positives
-  template_gray_jaccard: 0.82       # Was 0.75 - wider gray zone
+  semantic_dup_threshold: 0.94
+  semantic_gray_threshold: 0.9
+  template_jaccard_threshold: 0.91
+  template_gray_jaccard: 0.82
   simhash_hamming_threshold: 3
   simhash_gray_hamming: 8
   kl_alert: 0.15
   entropy_ratio_alert: 0.85
-  nn_cosine_alert: 0.80
+  nn_cosine_alert: 0.8
   max_cluster_frac_alert: 0.25
   leaf_min_questions: 3
-  leaf_coverage_target: 0.80
+  leaf_coverage_target: 0.8
   overrep_factor: 2.0
   llm_every_k_batches: 1
-  # Parallel chair processing (Agent D)
-  parallel_enabled: true            # Enable parallel LLM chair decisions
-  chair_max_workers: 4              # Max parallel workers for chair decisions
-  chair_batch_size: 10              # Batch size for gray items processing
-  # Concurrent chair wave size. 20 blocked the next generate for minutes.
+  parallel_enabled: true
+  chair_max_workers: 4
+  chair_trigger_count: 1
+  llm_per_key_concurrency: 1
+  chair_batch_size: 10
   chair_flush_max: 8
-  # LLM slots writers may not take while a chair waiter exists (capacity>=2).
   chair_slot_reserve: 1
-  # Writer=0 Salvage=1 Chair=2 Sieve=3 Taxonomy=4. Do not default Chair to Writer.
   priority: 2
-  # Real runs use independent low-temperature solver calls for candidates that
-  # carry a private target. FakeLLM tests intentionally bypass this expensive gate.
-  answer_consistency_enabled: false
+  answer_consistency_enabled: true
   answer_consistency_k: 3
-  answer_consistency_min_agreement: 0.60
+  answer_consistency_min_agreement: 0.6
   answer_consistency_high_risk_k: 5
-  solver_thinking_level: none
-  solver_max_tokens: 1024
+  solver_thinking_level: low
+  solver_max_tokens: 3072
   verification_max_calls: 6
   verification_run_max_calls: 600
+  verification_parallel_enabled: true
+  verification_parallel_workers: 5
   execution_enabled: true
   execution_timeout_seconds: 20
-  # RIP selection compares candidates only within a topic/kind/hardware bucket.
   rip_enabled: true
-  rip_keep_per_bucket: 1
+  rip_keep_per_bucket: 3
   compile_timeout_seconds: 20
-  # Second independent chair call when first pass is uncertain on formula/debug/layout/code.
   second_pass_on_uncertain: true
   circuit_breaker_error_streak: 8
   circuit_breaker_exhausted: 20
+  solver_thinking_level_hard: medium
+  min_value_score: 3
+  rip_min: 0.34
+  mmr_lambda: 0.5
+  gist_dup_threshold: 0.92
+  gist_gray_threshold: 0.86
+planner:
+  joint_sampling: true

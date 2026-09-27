@@ -10,6 +10,7 @@ in ``pipeline.py`` must use the same predicates so the two paths do not drift.
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 from cuda_sft_qgen.graph.state import PipelineState
@@ -39,18 +40,20 @@ def review_flush_min(batch: int) -> int:
 def should_review(state: PipelineState) -> bool:
     """True when pending should flush to chair instead of another generate wave."""
     pending = state.get("pending") or []
+    due = [q for q in pending if not q.get("review_exhausted")
+           and float(q.get("review_next_at") or 0) <= time.time()]
+    if not due:
+        return False
     accepted = int(state.get("accepted_count") or 0)
     target = int(state.get("target") or 0)
-    batch = int(state.get("review_batch_size") or 20)
-    iteration = int(state.get("iteration") or 0)
-    max_iter = int(state.get("max_iterations") or 200)
-    if not pending:
+    if accepted >= target:
         return False
+    batch = int(state.get("review_batch_size") or 20)
     if len(pending) >= batch:
         return True
     if accepted + len(pending) >= target:
         return True
-    if iteration >= max_iter:
+    if iteration_limit_reached(state):
         return True
     remaining = max(target - accepted - len(pending), 0)
     min_batch = 0
@@ -60,14 +63,32 @@ def should_review(state: PipelineState) -> bool:
         min_batch = review_flush_min(batch)
     # Remaining hole is smaller than a concurrent generate wave: flush pending
     # instead of a serial n=1/n=2 writer batch.
-    if pending and min_batch and remaining < min_batch:
+    if min_batch and remaining < min_batch:
         return True
     flush_min = review_flush_min(batch)
-    if flush_min and len(pending) >= flush_min:
-        leftover = batch - len(pending)
+    if flush_min and len(due) >= flush_min:
+        leftover = batch - len(due)
         if leftover < flush_min:
             return True
     return False
+
+
+def iteration_limit_reached(state: PipelineState) -> bool:
+    """Apply the planning limit to this invocation, not the archived lifetime."""
+    limit = state.get("max_iterations")
+    if limit is None:
+        limit = 200
+    start = int(state.get("run_start_iteration") or 0)
+    return int(state.get("iteration") or 0) - start >= int(limit)
+
+
+def cannot_plan_more(state: PipelineState) -> bool:
+    pending = state.get("pending") or []
+    accepted = int(state.get("accepted_count") or 0)
+    target = int(state.get("target") or 0)
+    batch = int(state.get("review_batch_size") or 20)
+    return (iteration_limit_reached(state) or accepted >= target
+            or accepted + len(pending) >= target or len(pending) >= batch)
 
 
 def should_salvage(state: PipelineState) -> bool:
@@ -124,14 +145,13 @@ def should_taxonomy_tick(state: PipelineState) -> bool:
 
 
 def chair_review_trigger(settings: Any) -> int:
-    """Concurrent path: start chair when this many due items are waiting.
+    """Concurrent path: hand off the first due item without a batch barrier.
 
     Sequential LangGraph still uses ``review_batch_size`` via :func:`should_review`.
     """
     batch = max(1, int(getattr(settings, "review_batch_size", 20) or 20))
     review = getattr(settings, "review", {}) or {}
-    workers = max(1, int(review.get("chair_max_workers", 4)))
-    return min(batch, workers)
+    return max(1, min(batch, int(review.get("chair_trigger_count", 1))))
 
 
 def chair_flush_size(settings: Any) -> int:
@@ -162,6 +182,6 @@ def pending_room(
     ``retry_room`` is space under the review-capacity cap for due/retry work.
     ``new_room`` is additional space under the hard pending cap for fresh briefs.
     """
-    retry_room = max(0, capacity - active_n)
-    new_room = min(retry_room, max(0, total_capacity - pending_n))
+    retry_room = min(max(0, capacity - active_n), max(0, total_capacity - pending_n))
+    new_room = retry_room
     return retry_room, max(0, new_room)

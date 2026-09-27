@@ -26,6 +26,15 @@ def test_merge_on_real_taxonomy_copy(tmp_path, repo_root):
     dst = tmp_path / "taxonomy"
     shutil.copytree(src, dst)
     index = dst / "cuda.yaml"
+    for path in (dst / "domains").glob("*.yaml"):
+        domain = yaml.safe_load(path.read_text(encoding="utf-8"))
+        domain.pop("weight", None)
+        domain["children"] = [child for child in domain["children"]
+                              if f"{domain['id']}.{child['id']}" not in NEW_L2]
+        for child in domain["children"]:
+            child.pop("arch", None)
+            child.pop("target_leaves", None)
+        path.write_text(yaml.safe_dump(domain, allow_unicode=True, sort_keys=False), encoding="utf-8")
     before = _leaf_ids(index)
 
     dry = _run(repo_root, index, apply=False)

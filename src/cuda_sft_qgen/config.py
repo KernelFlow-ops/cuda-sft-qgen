@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -12,6 +13,8 @@ import yaml
 from dotenv import load_dotenv
 
 from cuda_sft_qgen.keys import parse_api_keys
+
+logger = logging.getLogger(__name__)
 
 
 def find_project_root() -> Path:
@@ -66,6 +69,37 @@ def _merge_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, A
     return merged
 
 
+@dataclass(frozen=True)
+class AgentAPI:
+    provider: str
+    base_url: str
+    model: str
+    api_keys: list[str] = field(repr=False)
+
+
+AGENT_ROLES = ("writer", "evolver", "review", "salvage", "knowledge")
+
+
+def _agent_api(role: str, writer: AgentAPI | None = None, *, fake_llm: bool = False) -> AgentAPI:
+    prefix = role.upper()
+    provider_value = (os.getenv(f"{prefix}_PROVIDER") or "").strip().lower()
+    provider = provider_value or (writer.provider if writer else "nvidia")
+    if provider not in {"nvidia", "openai"}:
+        raise ValueError(f"{prefix}_PROVIDER must be nvidia|openai")
+    base_value = (os.getenv(f"{prefix}_BASE_URL") or "").strip().rstrip("/")
+    base_url = base_value or (writer.base_url if writer else "")
+    model = (os.getenv(f"{prefix}_MODEL") or "").strip() or (
+        writer.model if writer else "nvidia/nemotron-3-ultra-550b-a55b"
+    )
+    keys = parse_api_keys(prefix=prefix)
+    changed_connection = writer is not None and (
+        provider != writer.provider or (base_value and base_value != writer.base_url)
+    )
+    if changed_connection and not fake_llm and (not base_value or not keys):
+        raise ValueError(f"{prefix}_BASE_URL and {prefix}_API_KEY are required when changing provider or base URL")
+    return AgentAPI(provider, base_url, model, keys or (writer.api_keys if writer else []))
+
+
 @dataclass
 class Settings:
     """Resolved runtime configuration for one pipeline process.
@@ -75,13 +109,12 @@ class Settings:
     """
 
     root: Path
-    nvidia_api_key: str = field(repr=False)
-    nvidia_api_keys: list[str] = field(repr=False)
-    nvidia_base_url: str
-    nvidia_model: str
+    agent_apis: dict[str, AgentAPI] = field(repr=False)
     thinking_level: str
     embedding_provider: str
     embedding_model: str
+    embedding_base_url: str
+    embedding_api_keys: list[str] = field(repr=False)
     review_batch_size: int
     target_question_count: int
     writer_concurrency: int
@@ -119,6 +152,8 @@ class Settings:
     default_yaml: dict[str, Any] = field(default_factory=dict)
     quotas: dict[str, Any] = field(default_factory=dict)
     personas: dict[str, Any] = field(default_factory=dict)
+    scope: dict[str, Any] = field(default_factory=dict)
+    compat: dict[str, Any] = field(default_factory=dict)
     data_dir_override: Path | None = None
     raw_config: dict[str, Any] = field(default_factory=dict)
     profile: str = "default"
@@ -150,6 +185,31 @@ class Settings:
         return (self.root / self.default_yaml.get("paths", {}).get("personas", "configs/personas.yaml")).resolve()
 
     @property
+    def scope_path(self) -> Path:
+        """Resolved path to domain scope and priors."""
+        return (self.root / self.default_yaml.get("paths", {}).get("scope", "configs/scope.yaml")).resolve()
+
+    @property
+    def compat_matrix_path(self) -> Path:
+        """Resolved path to axis compatibility rules."""
+        return (self.root / self.default_yaml.get("paths", {}).get("compat_matrix", "configs/compat_matrix.yaml")).resolve()
+
+    @property
+    def angles_path(self) -> Path:
+        """Resolved path to angle cards."""
+        return (self.root / self.default_yaml.get("paths", {}).get("angles", "configs/angles.yaml")).resolve()
+
+    @property
+    def hardware_facts_path(self) -> Path:
+        """Resolved path to verified hardware limits."""
+        return (self.root / self.default_yaml.get("paths", {}).get("hardware_facts", "configs/hardware_facts.yaml")).resolve()
+
+    @property
+    def planner_cfg(self) -> dict[str, Any]:
+        """Joint planner switches from merged YAML."""
+        return self.default_yaml.get("planner", {})
+
+    @property
     def generation(self) -> dict[str, Any]:
         """Raw ``generation`` mapping from merged YAML."""
         return self.default_yaml.get("generation", {})
@@ -161,8 +221,48 @@ class Settings:
 
     @property
     def review_model(self) -> str:
-        """Chair model id; defaults to the writer NVIDIA model."""
-        return str(self.review.get("model") or self.nvidia_model)
+        """Chair model id; defaults to the writer model."""
+        return self.agent_apis["review"].model
+
+    @property
+    def llm_provider(self) -> str:
+        return self.agent_apis["writer"].provider
+
+    @property
+    def llm_api_keys(self) -> list[str]:
+        return self.agent_apis["writer"].api_keys
+
+    @property
+    def llm_base_url(self) -> str:
+        return self.agent_apis["writer"].base_url
+
+    @property
+    def llm_model(self) -> str:
+        return self.agent_apis["writer"].model
+
+    @property
+    def missing_api_keys(self) -> list[str]:
+        if self.fake_llm:
+            return []
+        missing = ["WRITER_API_KEY"] if not self.llm_api_keys else []
+        writer = self.agent_apis["writer"]
+        missing.extend(f"{role.upper()}_API_KEY" for role, api in self.agent_apis.items()
+                       if role != "writer" and not api.api_keys
+                       and (api.provider, api.base_url) != (writer.provider, writer.base_url))
+        if self.embedding_provider == "nvidia" and not self.embedding_api_keys:
+            missing.append("EMBEDDING_API_KEY")
+        return missing
+
+    @property
+    def missing_api_fields(self) -> list[str]:
+        if self.fake_llm:
+            return []
+        missing = [f"{role.upper()}_{name}" for role, api in self.agent_apis.items()
+                   for name, value in (("BASE_URL", api.base_url), ("MODEL", api.model)) if not value]
+        if self.embedding_provider == "nvidia":
+            missing.extend(name for name, value in (("EMBEDDING_BASE_URL", self.embedding_base_url),
+                                                    ("EMBEDDING_MODEL", self.embedding_model)) if not value)
+        return missing
 
     @property
     def knowledge_cfg(self) -> dict[str, Any]:
@@ -202,6 +302,12 @@ class Settings:
             return env.strip().lower()
         raw = self.generation.get("writer_thinking_level")
         return str(raw or self.thinking_level).strip().lower()
+
+    @property
+    def evolver_thinking_level(self) -> str:
+        """Evolver thinking level; defaults to the Writer level."""
+        env = os.getenv("EVOLVER_THINKING_LEVEL")
+        return env.strip().lower() if env and env.strip() else self.writer_thinking_level
 
     @property
     def min_generate_batch(self) -> int:
@@ -265,6 +371,8 @@ def load_settings(
     paths = default_yaml.get("paths", {})
     quotas = _load_yaml(root / paths.get("quotas", "configs/quotas.yaml"))
     personas_raw = _load_yaml(root / paths.get("personas", "configs/personas.yaml"))
+    scope = _load_yaml(root / paths.get("scope", "configs/scope.yaml"))
+    compat = _load_yaml(root / paths.get("compat_matrix", "configs/compat_matrix.yaml"))
     planner_yaml = _merge_config(_load_yaml(root / "configs" / "planner.yaml"), {
         "adaptive_sampling": default_yaml.get("adaptive_sampling", {})
     })
@@ -272,15 +380,51 @@ def load_settings(
     review_cfg["thinking_level"] = os.getenv("REVIEW_THINKING_LEVEL", str(review_cfg.get("thinking_level", "medium"))).strip().lower()
     review_cfg["max_tokens"] = _as_int(os.getenv("REVIEW_MAX_TOKENS"), int(review_cfg.get("max_tokens", 8192)))
     gen_cfg = default_yaml.setdefault("generation", {})
+    planner_cfg = default_yaml.setdefault("planner", {})
     for env_name, key in (("TEMPERATURE", "temperature"), ("TOP_P", "top_p")):
         if os.getenv(env_name):
             gen_cfg[key] = float(os.environ[env_name])
+    gen_cfg["writer_gate_max_tokens"] = _as_int(
+        os.getenv("WRITER_GATE_MAX_TOKENS"),
+        int(gen_cfg.get("writer_gate_max_tokens", 512)),
+    )
+    if gen_cfg["writer_gate_max_tokens"] < 1:
+        raise ValueError("writer_gate_max_tokens must be positive")
+    gen_cfg["submit_stagger_sec"] = _as_float(
+        os.getenv("WRITER_SUBMIT_STAGGER_SEC"),
+        float(gen_cfg.get("submit_stagger_sec", 0.35)),
+    )
+    if gen_cfg["submit_stagger_sec"] < 0:
+        raise ValueError("writer_submit_stagger_sec must be nonnegative")
+    gen_cfg["repair_concurrency"] = _as_int(
+        os.getenv("REPAIR_CONCURRENCY"), int(gen_cfg.get("repair_concurrency", 2))
+    )
+    if gen_cfg["repair_concurrency"] < 1:
+        raise ValueError("repair_concurrency must be positive")
+    gen_cfg["review_repair_enabled"] = _as_bool(
+        os.getenv("REVIEW_REPAIR_ENABLED"), bool(gen_cfg.get("review_repair_enabled", True))
+    )
+    gen_cfg["review_repair_max_attempts"] = _as_int(
+        os.getenv("REVIEW_REPAIR_MAX_ATTEMPTS"), int(gen_cfg.get("review_repair_max_attempts", 1))
+    )
+    if gen_cfg["review_repair_max_attempts"] < 0:
+        raise ValueError("review_repair_max_attempts must be nonnegative")
+    for env_name, key, fallback in (
+        ("CHAIR_MAX_WORKERS", "chair_max_workers", 4),
+        ("CHAIR_TRIGGER_COUNT", "chair_trigger_count", 1),
+        ("REVIEW_LLM_PER_KEY_CONCURRENCY", "llm_per_key_concurrency", 1),
+    ):
+        review_cfg[key] = _as_int(os.getenv(env_name), int(review_cfg.get(key, fallback)))
+        if review_cfg[key] < 1:
+            raise ValueError(f"{key} must be positive")
     if os.getenv("REVIEW_MODEL"):
         review_cfg["model"] = os.environ["REVIEW_MODEL"]
     knowledge_cfg = _merge_config({
         "enabled": True, "audit_interval_seconds": 86400,
         "audit_batch_size": 100, "worker_poll_seconds": 5,
         "official_sources": [],
+        "docs_dir": "data/docs", "toolkit_version": "12.x",
+        "legacy_batch_per_l2": 20, "legacy_due_days": 14,
     }, default_yaml.get("knowledge", {}))
     knowledge_cfg["enabled"] = _as_bool(os.getenv("KNOWLEDGE_ENABLED"), knowledge_cfg["enabled"])
     for key in ("audit_interval_seconds", "audit_batch_size", "worker_poll_seconds"):
@@ -294,8 +438,10 @@ def load_settings(
     # consume resolved settings, not re-read environment in worker threads.
     mixup_cfg = default_yaml.setdefault("mixup", {})
     for env, mapping, key, fallback in (
-        ("STRUCTURED_COT", gen_cfg, "prompt_cot", False),
-        ("ANSWER_CONSISTENCY_ENABLED", review_cfg, "answer_consistency_enabled", False),
+        ("STRUCTURED_COT", gen_cfg, "prompt_cot", True),
+        ("WRITER_GATE_LLM", gen_cfg, "writer_gate_llm", False),
+        ("ANSWER_CONSISTENCY_ENABLED", review_cfg, "answer_consistency_enabled", True),
+        ("PLANNER_JOINT_SAMPLING", planner_cfg, "joint_sampling", True),
         ("CUDA_EXECUTION_ENABLED", review_cfg, "execution_enabled", True),
         ("CUDA_MIXUP_ENABLED", mixup_cfg, "enabled", False),
         ("EXTERNAL_INVENTORY_ENABLED", knowledge_cfg, "external_inventory_enabled", False),
@@ -306,7 +452,7 @@ def load_settings(
         ("SOLVER_HIGH_RISK_K", review_cfg, "answer_consistency_high_risk_k", 5),
         ("VERIFIER_MAX_CALLS", review_cfg, "verification_max_calls", 6),
         ("VERIFIER_RUN_MAX_CALLS", review_cfg, "verification_run_max_calls", 600),
-        ("SOLVER_MAX_TOKENS", review_cfg, "solver_max_tokens", 1024),
+        ("SOLVER_MAX_TOKENS", review_cfg, "solver_max_tokens", 3072),
         ("CUDA_VERIFY_TIMEOUT", review_cfg, "execution_timeout_seconds", 20),
         ("LLM_REQUEST_TIMEOUT", gen_cfg, "request_timeout_seconds", 90),
         ("LLM_MAX_RETRIES", gen_cfg, "request_max_attempts", 3),
@@ -314,7 +460,8 @@ def load_settings(
         mapping[key] = _as_int(os.getenv(env), int(mapping.get(key, fallback)))
         if mapping[key] < 1:
             raise ValueError(f"{key} must be positive")
-    review_cfg["solver_thinking_level"] = os.getenv("SOLVER_THINKING_LEVEL", str(review_cfg.get("solver_thinking_level", "none")))
+    review_cfg["solver_thinking_level"] = os.getenv("SOLVER_THINKING_LEVEL", str(review_cfg.get("solver_thinking_level", "low")))
+    review_cfg["solver_thinking_level_hard"] = os.getenv("SOLVER_THINKING_LEVEL_HARD", str(review_cfg.get("solver_thinking_level_hard", "medium")))
     planner_yaml["mixup"] = dict(mixup_cfg)
 
     thinking = os.getenv("THINKING_LEVEL", "medium").strip().lower()
@@ -327,7 +474,14 @@ def load_settings(
     if provider not in {"nvidia", "huggingface", "fake"}:
         raise ValueError("EMBEDDING_PROVIDER must be nvidia|huggingface|fake")
 
-    api_keys = parse_api_keys()
+    is_fake = _as_bool(os.getenv("FAKE_LLM"), False) if fake_llm is None else fake_llm
+    writer_api = _agent_api("writer", fake_llm=is_fake)
+    agent_apis = {"writer": writer_api}
+    for role in AGENT_ROLES[1:]:
+        agent_apis[role] = _agent_api(role, writer_api, fake_llm=is_fake)
+    review_cfg["model"] = agent_apis["review"].model
+    embedding_keys = parse_api_keys(prefix="EMBEDDING")
+    embedding_base_url = (os.getenv("EMBEDDING_BASE_URL") or "").strip().rstrip("/")
     llm_per_key = _as_int(
         os.getenv("LLM_PER_KEY_CONCURRENCY"),
         int(gen_cfg.get("llm_per_key_concurrency", 2)),
@@ -340,25 +494,20 @@ def load_settings(
         os.getenv("EMBED_OVERSUB"),
         int(gen_cfg.get("embed_oversub", 2)),
     )
-    n_keys = max(1, len(api_keys))
+    n_keys = max(1, len(writer_api.api_keys))
     writer_concurrency = max(1, _as_int(os.getenv("WRITER_CONCURRENCY"),
         int(gen_cfg.get("writer_concurrency", n_keys * max(1, llm_per_key)))))
 
     settings = Settings(
         root=root,
-        nvidia_api_key=api_keys[0] if api_keys else "",
-        nvidia_api_keys=api_keys,
-        nvidia_base_url=os.getenv(
-            "NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"
-        ).rstrip("/"),
-        nvidia_model=os.getenv(
-            "NVIDIA_MODEL", "nvidia/nemotron-3-ultra-550b-a55b"
-        ),
+        agent_apis=agent_apis,
         thinking_level=thinking,
         embedding_provider=provider,
         embedding_model=os.getenv(
             "EMBEDDING_MODEL", "nvidia/nemotron-3-embed-1b"
         ),
+        embedding_base_url=embedding_base_url,
+        embedding_api_keys=embedding_keys,
         review_batch_size=review_batch_size
         if review_batch_size is not None
         else _as_int(
@@ -443,8 +592,12 @@ def load_settings(
         default_yaml=default_yaml,
         quotas=quotas,
         personas=personas_raw.get("personas", {}),
+        scope=scope,
+        compat=compat,
         data_dir_override=_resolve_data_dir(data_dir),
         raw_config=planner_yaml,
         profile=profile_name,
     )
+    if not settings.fake_llm and settings.review_model == settings.llm_model:
+        logger.warning("review_model_equals_writer model=%s set REVIEW_MODEL to a different family", settings.llm_model)
     return settings

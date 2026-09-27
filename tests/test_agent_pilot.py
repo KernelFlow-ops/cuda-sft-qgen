@@ -277,7 +277,7 @@ def test_cot_only_group_preserves_model_action_but_cannot_accept(fake_settings, 
 
 
 def test_privacy_audit_detects_private_fields_and_configured_secret(monkeypatch):
-    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test-secret-value")
+    monkeypatch.setenv("WRITER_API_KEY", "nvapi-test-secret-value")
     audit = agent_pilot._privacy_audit({
         "pilot": "agent_ablation_abcd",
         "nested": {"draft_target": "nvapi-test-secret-value"},

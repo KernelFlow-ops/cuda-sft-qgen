@@ -12,7 +12,6 @@ generation:
   evolver_fraction: 0.35
   fewshot_positives: 5
   fewshot_negatives: 2
-  prompt_cot: false
 
 mixup:
   enabled: false
@@ -24,7 +23,7 @@ review:
   template_jaccard_threshold: 0.93
   simhash_hamming_threshold: 2
   llm_every_k_batches: 1
-  answer_consistency_enabled: false
+  rip_keep_per_bucket: 3
 
 taxonomy:
   target_leaves_per_l2: 40

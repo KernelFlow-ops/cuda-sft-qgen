@@ -17,7 +17,7 @@ from cuda_sft_qgen.config import load_settings
 class LLMConfig(BaseModel):
     """LLM provider configuration."""
     provider: str = "nvidia"
-    base_url: str = "https://integrate.api.nvidia.com/v1"
+    base_url: str = ""
     model: str = "nvidia/nemotron-3-ultra-550b-a55b"
     thinking_level: str = "medium"
     temperature: float = 1.0
@@ -39,6 +39,8 @@ class LLMConfig(BaseModel):
 class EmbeddingConfig(BaseModel):
     """Embedding provider configuration."""
     provider: str = "nvidia"
+    base_url: str = ""
+    api_keys: list[str] = Field(default_factory=list, repr=False)
     model: str = "nvidia/nemotron-3-embed-1b"
     per_key_concurrency: int = 2
     oversub: int = 2
@@ -126,13 +128,46 @@ class RetryConfig(BaseModel):
     drain_batch: int = 0
 
 
+class AgentConfig(BaseModel):
+    provider: str
+    base_url: str
+    model: str
+    api_keys: list[str] = Field(default_factory=list, repr=False)
+
+
 class AppConfig(BaseModel):
     """Main application configuration."""
     root: Path
     profile: str = "default"
 
-    # API keys
-    nvidia_api_keys: list[str] = Field(default_factory=list, repr=False)
+    agents: dict[str, AgentConfig] = Field(default_factory=dict)
+
+    @property
+    def missing_api_keys(self) -> list[str]:
+        if self.fake_llm:
+            return []
+        writer = self.agents.get("writer")
+        missing = ["WRITER_API_KEY"] if writer is None or not writer.api_keys else []
+        if writer is not None:
+            missing.extend(f"{role.upper()}_API_KEY" for role, api in self.agents.items()
+                           if role != "writer" and not api.api_keys
+                           and (api.provider, api.base_url) != (writer.provider, writer.base_url))
+        if self.embedding.provider == "nvidia" and not self.embedding.api_keys:
+            missing.append("EMBEDDING_API_KEY")
+        return missing
+
+    @property
+    def missing_api_fields(self) -> list[str]:
+        if self.fake_llm:
+            return []
+        agents = self.agents or {"writer": AgentConfig(provider=self.llm.provider,
+                                                        base_url=self.llm.base_url, model=self.llm.model)}
+        missing = [f"{role.upper()}_{name}" for role, api in agents.items()
+                   for name, value in (("BASE_URL", api.base_url), ("MODEL", api.model)) if not value]
+        if self.embedding.provider == "nvidia":
+            missing.extend(name for name, value in (("EMBEDDING_BASE_URL", self.embedding.base_url),
+                                                    ("EMBEDDING_MODEL", self.embedding.model)) if not value)
+        return missing
 
     # Sub-configurations
     llm: LLMConfig = Field(default_factory=LLMConfig)
@@ -173,21 +208,6 @@ class AppConfig(BaseModel):
         if path.is_absolute():
             return path
         return (self.root / path).resolve()
-
-    @property
-    def nvidia_api_key(self) -> str:
-        """Primary API key for backward compatibility."""
-        return self.nvidia_api_keys[0] if self.nvidia_api_keys else ""
-
-    @property
-    def nvidia_base_url(self) -> str:
-        """LLM base URL for backward compatibility."""
-        return self.llm.base_url
-
-    @property
-    def nvidia_model(self) -> str:
-        """LLM model for backward compatibility."""
-        return self.llm.model
 
     @property
     def thinking_level(self) -> str:
@@ -283,14 +303,18 @@ def load_config_v2(
     retry = {name: getattr(settings, name if name.startswith("salvage_") else f"retry_{name}")
              for name in RetryConfig.model_fields}
     config = AppConfig(
-        root=settings.root, profile=settings.profile, nvidia_api_keys=settings.nvidia_api_keys,
-        llm=LLMConfig(base_url=settings.nvidia_base_url, model=settings.nvidia_model,
+        root=settings.root, profile=settings.profile,
+        agents={role: AgentConfig(provider=api.provider, base_url=api.base_url,
+                                  model=api.model, api_keys=api.api_keys)
+                for role, api in settings.agent_apis.items()},
+        llm=LLMConfig(provider=settings.llm_provider, base_url=settings.llm_base_url, model=settings.llm_model,
                       thinking_level=settings.thinking_level, temperature=settings.temperature,
                       top_p=settings.top_p, max_tokens=settings.max_tokens,
                       per_key_concurrency=settings.llm_per_key_concurrency,
                       rate_limit_retries_per_call=settings.llm_rate_limit_retries_per_call,
                       prompt_cache_enabled=settings.prompt_cache_enabled),
-        embedding=EmbeddingConfig(provider=settings.embedding_provider, model=settings.embedding_model,
+        embedding=EmbeddingConfig(provider=settings.embedding_provider, base_url=settings.embedding_base_url,
+                                  api_keys=settings.embedding_api_keys, model=settings.embedding_model,
                                   per_key_concurrency=settings.embed_per_key_concurrency,
                                   oversub=settings.embed_oversub, chunk_size=settings.embed_chunk_size,
                                   cache_enabled=settings.embedding_cache_enabled),

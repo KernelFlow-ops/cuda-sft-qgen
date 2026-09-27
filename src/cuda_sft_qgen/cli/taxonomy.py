@@ -6,7 +6,7 @@ import json
 import sys
 from pathlib import Path
 
-from cuda_sft_qgen.cli.common import _json_print, load_settings
+from cuda_sft_qgen.cli.common import _json_print, _require_keys, load_settings
 from cuda_sft_qgen.runtime import build_runtime, reset_runtime, set_runtime
 
 def cmd_expand_taxonomy(args: argparse.Namespace) -> int:
@@ -14,18 +14,14 @@ def cmd_expand_taxonomy(args: argparse.Namespace) -> int:
     from cuda_sft_qgen.knowledge_worker import KnowledgeWorker
 
     settings = load_settings(fake_llm=args.fake)
-    if not settings.fake_llm and not settings.nvidia_api_keys:
-        print(
-            "No NVIDIA API keys. Set NVIDIA_API_KEY / NVIDIA_API_KEY_2 / NVIDIA_API_KEY_3.",
-            file=sys.stderr,
-        )
-        return 2
+    if (error := _require_keys(settings)) is not None:
+        return error
     rt = build_runtime(settings)
     token = set_runtime(rt)
     try:
         tax_cfg = settings.default_yaml.get("taxonomy") or {}
         per_l2 = args.per_l2 or int(tax_cfg.get("target_leaves_per_l2", 30))
-        worker = KnowledgeWorker(rt.knowledge, rt.llm, embedder=rt.embedder, settings=settings, taxonomy=rt.taxonomy, archive=rt.store)
+        worker = KnowledgeWorker(rt.knowledge, rt.knowledge_llm or rt.llm, embedder=rt.embedder, settings=settings, taxonomy=rt.taxonomy, archive=rt.store)
         result = worker.expand_once(apply=bool(args.apply), mode="strategic", target_per_l2=per_l2,
                                     max_leaves=int(tax_cfg.get("expand_max_per_call", 40)), domain_ids=args.domain)
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -71,10 +67,11 @@ def cmd_manage_taxonomy(args: argparse.Namespace) -> int:
 
     llm_action = args.expand or args.gap_search or args.refine or args.tick
     reindex_action = args.dedup or args.reindex
-    if not settings.fake_llm and not settings.nvidia_api_keys:
+    missing = settings.missing_api_keys + settings.missing_api_fields
+    if not settings.fake_llm and missing:
         if llm_action or reindex_action:
             print(
-                "No NVIDIA API keys. Set NVIDIA_API_KEY / NVIDIA_API_KEY_2 / NVIDIA_API_KEY_3, or pass --fake.",
+                f"Missing API configuration: {', '.join(missing)}; or pass --fake.",
                 file=sys.stderr,
             )
             return 2
@@ -85,7 +82,7 @@ def cmd_manage_taxonomy(args: argparse.Namespace) -> int:
     token = set_runtime(rt)
     try:
         manager = manager_from_runtime(rt)
-        worker = KnowledgeWorker(rt.knowledge, rt.llm, embedder=rt.embedder, settings=settings, taxonomy=rt.taxonomy, archive=rt.store)
+        worker = KnowledgeWorker(rt.knowledge, rt.knowledge_llm or rt.llm, embedder=rt.embedder, settings=settings, taxonomy=rt.taxonomy, archive=rt.store)
         accepted = rt.store.load_accepted()
         rejected = rt.store.load_rejected()
         max_leaves = 40 if args.max_leaves is None else args.max_leaves
@@ -153,16 +150,12 @@ def cmd_rebuild_taxonomy(args: argparse.Namespace) -> int:
     from cuda_sft_qgen.knowledge_worker import KnowledgeWorker
 
     settings = load_settings(fake_llm=args.fake)
-    if not settings.fake_llm and not settings.nvidia_api_keys:
-        print(
-            "No NVIDIA API keys. Set NVIDIA_API_KEY / NVIDIA_API_KEY_2 / NVIDIA_API_KEY_3.",
-            file=sys.stderr,
-        )
-        return 2
+    if (error := _require_keys(settings)) is not None:
+        return error
     rt = build_runtime(settings)
     token = set_runtime(rt)
     try:
-        worker = KnowledgeWorker(rt.knowledge, rt.llm, embedder=rt.embedder, settings=settings, taxonomy=rt.taxonomy, archive=rt.store)
+        worker = KnowledgeWorker(rt.knowledge, rt.knowledge_llm or rt.llm, embedder=rt.embedder, settings=settings, taxonomy=rt.taxonomy, archive=rt.store)
         out = worker.expand_once(apply=True)
         print(json.dumps(out, ensure_ascii=False, indent=2, default=str))
     finally:
@@ -177,9 +170,9 @@ def cmd_taxonomy_health(args: argparse.Namespace) -> int:
 
     settings = load_settings(fake_llm=True if args.fake else None)
     if not args.fake and args.with_diversity:
-        if not settings.nvidia_api_keys:
+        if not settings.embedding_api_keys:
             print(
-                "No NVIDIA API keys for embeddings. Set keys or pass --fake.",
+                "No EMBEDDING_API_KEY for embeddings. Set keys or pass --fake.",
                 file=sys.stderr,
             )
             return 2
@@ -233,12 +226,8 @@ def cmd_taxonomy_expand(args: argparse.Namespace) -> int:
     from cuda_sft_qgen.knowledge_worker import KnowledgeWorker
 
     settings = load_settings(fake_llm=args.fake)
-    if not settings.fake_llm and not settings.nvidia_api_keys:
-        print(
-            "No NVIDIA API keys. Set NVIDIA_API_KEY / NVIDIA_API_KEY_2 / NVIDIA_API_KEY_3.",
-            file=sys.stderr,
-        )
-        return 2
+    if (error := _require_keys(settings)) is not None:
+        return error
 
     rt = build_runtime(settings)
     token = set_runtime(rt)
@@ -246,8 +235,8 @@ def cmd_taxonomy_expand(args: argparse.Namespace) -> int:
         analyzer = HealthAnalyzer(rt.taxonomy, target_per_l2=args.target_per_l2 or 30)
         report = analyzer.analyze(rt.store)
 
-        expander = LeafExpander(rt.taxonomy, rt.llm, embedder=rt.embedder)
-        worker = KnowledgeWorker(rt.knowledge, rt.llm, embedder=rt.embedder, settings=settings, taxonomy=rt.taxonomy, archive=rt.store)
+        expander = LeafExpander(rt.taxonomy, rt.knowledge_llm or rt.llm, embedder=rt.embedder)
+        worker = KnowledgeWorker(rt.knowledge, rt.knowledge_llm or rt.llm, embedder=rt.embedder, settings=settings, taxonomy=rt.taxonomy, archive=rt.store)
 
         if args.dry_run:
             preview = expander.preview_expansion(report, limit=args.limit or 10)
@@ -278,5 +267,3 @@ def cmd_taxonomy_expand(args: argparse.Namespace) -> int:
         rt.close()
         reset_runtime(token)
     return 0
-
-

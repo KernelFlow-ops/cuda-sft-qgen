@@ -23,8 +23,11 @@ THRESHOLDS = {  # metric: (direction, value); direction 'max' means v2 <= value,
 
 def summarize(data_dir: Path, wall: float | None) -> dict:
     from cuda_sft_qgen.store.archive import Archive
+    from cuda_sft_qgen.store.jsonl import read_jsonl
     store = Archive(data_dir)
     acc, rej, pen = store.load_accepted(), store.load_rejected(), store.load_pending()
+    raw_accepted = read_jsonl(data_dir / "accepted.jsonl")
+    has_v2_labels = any("answer_format" in row for row in raw_accepted)
     allq = acc + rej + pen
     codes = Counter()
     for q in rej:
@@ -35,13 +38,16 @@ def summarize(data_dir: Path, wall: float | None) -> dict:
             codes[r.split(":")[0]] += 1
     div_path = data_dir / "diversity.json"
     div = json.loads(div_path.read_text()) if div_path.exists() else {}
-    cells = Counter((".".join(q.topic_path[:2]), q.kind, q.question_type, q.answer_format, q.arch_target) for q in acc)
+    cells = Counter((".".join(q.topic_path[:2]), q.kind, q.question_type,
+                     getattr(q, "answer_format", ""), getattr(q, "arch_target", "any")) for q in acc)
     return {
         "accepted": len(acc), "rejected": len(rej), "pending": len(pen),
         "accept_rate": len(acc) / max(len(acc) + len(rej), 1),
         "hard_share": sum(q.difficulty >= 3 for q in acc) / max(len(acc), 1),
-        "contract_complete": sum(not q.draft_validation_errors for q in allq) / max(len(allq), 1),
-        "generic_share": sum(q.scenario == "generic" for q in acc) / max(len(acc), 1),
+        "contract_complete": (sum(not q.draft_validation_errors for q in allq) / max(len(allq), 1)
+                              if has_v2_labels else None),
+        "generic_share": (sum(q.scenario == "generic" for q in acc) / max(len(acc), 1)
+                          if acc and has_v2_labels else None),
         "max_cell_share": max(cells.values()) / len(acc) if acc else 0.0,
         "mean_nn_cosine": div.get("mean_nn_cosine"),
         "answer_format_entropy": (div.get("entropy_ratio") or {}).get("answer_format"),

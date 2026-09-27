@@ -18,8 +18,7 @@ logger = logging.getLogger(__name__)
 def planner_node(state: PipelineState) -> dict:
     """Draw up to ``review_batch_size`` briefs, keeping the writer pool busy.
 
-    Near the accepted target, the batch is padded to ``min_generate_batch`` so
-    leftover holes of 1–2 items do not serialize the writer pool. Returns
+    Planning stays within the remaining target and pending capacity. Returns
     ``skip_plan`` when pending already fills the review batch.
     """
     try:
@@ -34,7 +33,7 @@ def planner_node(state: PipelineState) -> dict:
                 "done": True,
                 "batch_briefs": [],
                 "status": "target_reached",
-                "iteration": int(state.get("iteration") or 0) + 1,
+                "iteration": int(state.get("iteration") or 0),
             }
         remaining_target = max(target - accepted_n - len(pending), 0)
         min_batch = max(1, rt.settings.min_generate_batch)
@@ -47,13 +46,11 @@ def planner_node(state: PipelineState) -> dict:
             n = min(pool_n, remaining_target, room)
         else:
             fill = max(batch - len(pending), 0)
-            n = min(batch, remaining_target, fill)
-            # Sequential path: pad leftover holes so the writer pool stays busy.
-            if 0 < n < min_batch:
-                n = min_batch
-        if 0 < n < min_batch and remaining_target > 0 and (
-            generate_room is None or int(generate_room) >= min_batch
-        ):
+            capacity = max(batch, int(rt.settings.review.get("queue_capacity", batch * 2)))
+            total_capacity = max(capacity, int(rt.settings.review.get("max_pending_total", capacity * 2)))
+            room = min(fill, max(0, total_capacity - len(pending)))
+            n = min(batch, remaining_target, room)
+        if 0 < n < min_batch and remaining_target >= min_batch and room >= min_batch:
             n = min_batch
         fill = n
         if n <= 0:
@@ -68,7 +65,7 @@ def planner_node(state: PipelineState) -> dict:
                 "batch_briefs": [],
                 "status": "skip_plan",
                 "done": accepted_n >= target,
-                "iteration": int(state.get("iteration") or 0) + 1,
+                "iteration": int(state.get("iteration") or 0),
             }
 
         steering = SteeringBrief.model_validate(state.get("steering_brief") or {})
@@ -98,6 +95,10 @@ def planner_node(state: PipelineState) -> dict:
                 knowledge=getattr(rt, "knowledge", None),
                 embedder=getattr(rt, "embedder", None),
                 mixup_config=(getattr(rt.settings, "default_yaml", {}) or {}).get("mixup"),
+                compat=rt.settings.compat,
+                scope=rt.settings.scope,
+                coverage=rt.store.coverage_history(),
+                joint=bool(rt.settings.planner_cfg.get("joint_sampling", True)),
             )
         except Exception as exc:
             raise PlannerError(

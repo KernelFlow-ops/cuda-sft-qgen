@@ -1,8 +1,8 @@
 """LangGraph TypedDict state shared by sequential pipeline nodes.
 
 ``log`` uses ``operator.add`` so node updates append rather than replace.
-All other fields overwrite. This is the graph's runtime state; see
-``state_v2.PipelineState`` for the validated Pydantic view.
+All other fields overwrite. This is the graph's runtime state passed between
+pipeline nodes.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ class PipelineState(TypedDict, total=False):
     review_batch_size: int  # Chair batch size; also drives review flush.
     max_iterations: int  # Planner loops before forced stop.
     iteration: int  # Planner loops completed.
+    run_start_iteration: int  # Lifetime iteration count at invocation start.
     review_rounds: int  # Chair batches completed (taxonomy tick cadence).
     accepted_count: int
     rejected_count: int

@@ -19,12 +19,13 @@ FIXTURE = Path(__file__).parent / "fixtures" / "quality_cases.json"
 
 def test_fixture_contains_complete_frozen_defects_and_controls():
     cases = review_benchmark.load_quality_cases(FIXTURE)
-    defects = [case for case in cases if case["expected_action"] == "reject"]
-    controls = [case for case in cases if case["expected_action"] == "accept"]
+    original_cases = cases[:12]
+    defects = [case for case in original_cases if case["expected_action"] == "reject"]
+    controls = [case for case in original_cases if case["expected_action"] == "accept"]
     assert [case["source"]["line"] for case in defects] == [5, 11, 18, 21, 25, 32, 42, 50]
     assert len(controls) == 4
-    assert len({case["question"]["id"] for case in cases}) == 12
-    assert all(case["annotation"] and case["question"]["tests_claim"] for case in cases)
+    assert len({case["question"]["id"] for case in cases}) == len(cases)
+    assert all(case["annotation"] and case["question"]["tests_claim"] for case in original_cases)
     original = FIXTURE.parents[2] / "data" / "run50" / "accepted.jsonl"
     if original.exists():
         rows = [json.loads(line) for line in original.read_text(encoding="utf-8").splitlines()]
@@ -39,7 +40,11 @@ def test_benchmark_rejects_fake_quality_claims(fake_settings, tmp_path):
 
 
 def test_benchmark_blind_review_snapshots_metrics_and_isolation(fake_settings, tmp_path, monkeypatch):
-    cases = review_benchmark.load_quality_cases(FIXTURE)
+    fixture = tmp_path / "quality_cases_original.json"
+    document = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    document["cases"] = document["cases"][:12]
+    fixture.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+    cases = review_benchmark.load_quality_cases(fixture)
     settings = replace(fake_settings, fake_llm=False)
     original = settings.data_dir / "accepted.jsonl"
     original.write_text("original corpus is not read or modified", encoding="utf-8")
@@ -67,7 +72,10 @@ def test_benchmark_blind_review_snapshots_metrics_and_isolation(fake_settings, t
             return {"id": payload["id"], "action": action, "reason": "mock review outcome",
                     "checks": checks, "evidence": ["mock evidence, not a quality assessment"],
                     "internal_reference_answer": "mock answer" if action == "accept" else None,
-                    "assessed_metadata": payload["requested_metadata"] if action == "accept" else None}
+                    "value_scores": {"pedagogical_value": 4, "discriminativeness": 4, "realism": 4},
+                    "assessed_metadata": ({**payload["requested_metadata"],
+                                           "answer_format": "short_answer", "arch_target": "any"}
+                                          if action == "accept" else None)}
 
     def runtime_factory(isolated):
         assert isolated.data_dir != settings.data_dir
@@ -80,7 +88,7 @@ def test_benchmark_blind_review_snapshots_metrics_and_isolation(fake_settings, t
 
     monkeypatch.setattr(review_benchmark, "build_runtime", runtime_factory)
     output = tmp_path / "reports" / "benchmark.json"
-    report = review_benchmark.run_review_benchmark(settings, output, cases_path=FIXTURE)
+    report = review_benchmark.run_review_benchmark(settings, output, cases_path=fixture)
     assert report["summary"]["misses"] == 1
     assert report["summary"]["false_rejections"] == 1
     assert report["summary"]["pending"] == 1

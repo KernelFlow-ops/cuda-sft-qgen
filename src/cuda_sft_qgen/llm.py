@@ -1,4 +1,4 @@
-"""NVIDIA chat-completions client, FakeLLM, and JSON-completion helper.
+"""Chat-completions clients, FakeLLM, and JSON-completion helper.
 
 Streaming records provider usage. Reasoning-only/truncated replies are errors;
 private reasoning is never substituted for the final answer.
@@ -9,14 +9,13 @@ from __future__ import annotations
 import json
 import logging
 import time
-import uuid
 from typing import Any, Iterable
 
-from cuda_sft_qgen.config import Settings
+from cuda_sft_qgen.config import AgentAPI, Settings
 from cuda_sft_qgen.errors import RateLimitError
 from cuda_sft_qgen.jsonutil import parse_json_object, strip_think
 from cuda_sft_qgen.keys import PRI_WRITER, ApiKeyPool
-from cuda_sft_qgen.observability import get_metrics
+from cuda_sft_qgen.observability import current_agent_role, get_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -104,10 +103,11 @@ class LLMClient:
 class NvidiaLLM(LLMClient):
     """Streaming NVIDIA Integrate API client backed by :class:`ApiKeyPool`."""
 
-    def __init__(self, settings: Settings, pool: ApiKeyPool) -> None:
+    def __init__(self, settings: Settings, pool: ApiKeyPool, agent_api: AgentAPI | None = None) -> None:
         """Bind runtime settings and the shared API key pool."""
         self.settings = settings
         self.pool = pool
+        self.agent_api = agent_api or settings.agent_apis["writer"]
 
     def complete(
         self,
@@ -121,22 +121,11 @@ class NvidiaLLM(LLMClient):
     ) -> str:
         """Stream a completion; records duration, tokens, and failures."""
         level = thinking_level or self.settings.thinking_level
-        extra: dict[str, Any] = {"chat_template_kwargs": thinking_kwargs(level)}
-        payload = {
-            "model": self.settings.nvidia_model,
-            "messages": messages,
-            "temperature": (
-                self.settings.temperature if temperature is None else temperature
-            ),
-            "top_p": self.settings.top_p,
-            "max_tokens": self.settings.max_tokens if max_tokens is None else max_tokens,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-            "extra_body": extra,
-        }
+        payload = self._payload(messages, level, temperature, max_tokens)
         t0 = time.monotonic()
         metrics = get_metrics()
-        labels = {"priority": str(priority), "model": self.settings.nvidia_model}
+        labels = {"priority": str(priority), "model": self.agent_api.model,
+                  "role": current_agent_role()}
         metrics.increment("llm_requests", labels=labels)
         try:
             text = self._stream_with_retry(payload, priority=priority)
@@ -150,10 +139,27 @@ class NvidiaLLM(LLMClient):
             time.monotonic() - t0,
             len(text or ""),
             level,
-            payload["max_tokens"],
+            payload.get("max_tokens", payload.get("max_completion_tokens")),
             priority,
         )
         return text
+
+    def _payload(
+        self, messages: list[dict[str, str]], level: str,
+        temperature: float | None, max_tokens: int | None,
+    ) -> dict[str, Any]:
+        return {
+            "model": self.agent_api.model,
+            "messages": messages,
+            "temperature": (
+                self.settings.temperature if temperature is None else temperature
+            ),
+            "top_p": self.settings.top_p,
+            "max_tokens": self.settings.max_tokens if max_tokens is None else max_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "extra_body": {"chat_template_kwargs": thinking_kwargs(level)},
+        }
 
     @staticmethod
     def _is_rate_limit(exc: Exception) -> bool:
@@ -272,6 +278,24 @@ class NvidiaLLM(LLMClient):
         return content
 
 
+class OpenAILLM(NvidiaLLM):
+    """OpenAI-compatible chat client using the shared streaming and retry logic."""
+
+    def _payload(
+        self, messages: list[dict[str, str]], level: str,
+        temperature: float | None, max_tokens: int | None,
+    ) -> dict[str, Any]:
+        effort = "low" if level == "low_effort" else level
+        return {
+            "model": self.agent_api.model,
+            "messages": messages,
+            "reasoning_effort": effort,
+            "max_completion_tokens": self.settings.max_tokens if max_tokens is None else max_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+
+
 class FakeLLM(LLMClient):
     """Deterministic stand-in for tests and --fake runs."""
 
@@ -297,7 +321,7 @@ class FakeLLM(LLMClient):
                 break
         if "WRITER_GATE_V1" in system:
             return json.dumps({"ok": True})
-        if "QUALITY_REVIEW_V1" in system:
+        if "QUALITY_REVIEW_V" in system:
             payload = json.loads(user)
             # Offline fixtures exercise the contract, not CUDA factual correctness.
             return json.dumps({
@@ -310,6 +334,11 @@ class FakeLLM(LLMClient):
                 "evidence": ["Offline fixture response; no factual verification performed."],
                 "internal_reference_answer": "Offline fixture reference answer.",
                 "assessed_metadata": payload["requested_metadata"],
+                "value_scores": {
+                    "pedagogical_value": 4,
+                    "discriminativeness": 4,
+                    "realism": 4,
+                },
             }, ensure_ascii=False)
         if "suggested_claim" in user:
             return json.dumps({"suggestions": []}, ensure_ascii=False)
@@ -356,38 +385,12 @@ class FakeLLM(LLMClient):
             )
         if "garbage" in user.lower() and "meaningful" in user.lower():
             return json.dumps({"label": "meaningful"})
-        nonce = uuid.uuid4().hex[:8]
-        claim = _extract_between(user, "CLAIM:", "\n") or "CUDA occupancy vs register pressure"
-        qtype = _extract_between(user, "TYPE:", "\n") or "conceptual"
-        hw = _extract_between(user, "HARDWARE:", "\n") or "hopper"
-        question = (
-            f"在 {hw} 架构上，针对「{claim}」，从 {qtype} 角度给出一道可验证的问题"
-            f"（实例标记 {nonce}）：如果违反该约束，会出现什么可观察的错误或性能现象？"
-            "请写明判断依据，不要直接给出完整答案。"
-        )
-        return json.dumps(
-            {
-                "question": question,
-                "tests_claim": claim,
-                "language": "zh",
-            },
-            ensure_ascii=False,
-        )
+        raise RuntimeError("FakeLLM cannot generate questions")
 
 
-def _extract_between(text: str, start: str, end: str) -> str:
-    """Slice ``text`` between ``start`` and ``end`` for FakeLLM brief parsing."""
-    i = text.find(start)
-    if i < 0:
-        return ""
-    j = text.find(end, i + len(start))
-    if j < 0:
-        return text[i + len(start) :].strip()
-    return text[i + len(start) : j].strip()
-
-
-def build_llm(settings: Settings, pool: ApiKeyPool | None = None) -> LLMClient:
-    """Return FakeLLM when ``fake_llm`` is set; otherwise NvidiaLLM.
+def build_llm(settings: Settings, pool: ApiKeyPool | None = None,
+              agent_api: AgentAPI | None = None) -> LLMClient:
+    """Return FakeLLM or the configured provider client.
 
     Raises:
         RuntimeError: If a real client is requested without an API key pool.
@@ -395,8 +398,9 @@ def build_llm(settings: Settings, pool: ApiKeyPool | None = None) -> LLMClient:
     if settings.fake_llm:
         return FakeLLM()
     if pool is None:
-        raise RuntimeError("NvidiaLLM requires an ApiKeyPool")
-    return NvidiaLLM(settings, pool)
+        raise RuntimeError("LLM requires an ApiKeyPool")
+    api = agent_api or settings.agent_apis["writer"]
+    return OpenAILLM(settings, pool, api) if api.provider == "openai" else NvidiaLLM(settings, pool, api)
 
 
 def iter_message_dicts(messages: Iterable[dict[str, str]]) -> list[dict[str, str]]:

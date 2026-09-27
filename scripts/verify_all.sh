@@ -31,7 +31,8 @@ case "$LEVEL" in
              run $PYT tests/fix_v2/llm -m "llm and not eval"
              run python "$SCRIPTS/check_planner.py" --n 2000
              TMP="$(mktemp -d)"
-             run python -m cuda_sft_qgen generate --target 10 --data-dir "$TMP/run"
+             run timeout "${QGEN_CLI_TIMEOUT:-2400}" python -m cuda_sft_qgen generate --target 10 --data-dir "$TMP/run"
+             run python -c 'import json,sys; state=json.load(open(sys.argv[1], encoding="utf-8")); assert int(state.get("accepted_count", 0)) >= int(sys.argv[2]), state' "$TMP/run/run_state.json" 10
              run python -m cuda_sft_qgen stats --data-dir "$TMP/run"
              run python -m cuda_sft_qgen knowledge stats --data-dir "$TMP/run" ;;
   eval)      pure; smoke

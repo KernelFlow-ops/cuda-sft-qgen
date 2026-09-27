@@ -33,8 +33,8 @@ def test_writer_markdown_is_the_static_prefix():
     settings = load_settings(fake_llm=True)
     sp = StructuredPrompt(settings, FewshotCorpus())
     bundle = sp.build(_brief(), SteeringBrief())
-    assert "WRITER_PROMPT_V2" in bundle.system
-    assert "specialist CUDA examination author" in bundle.system
+    assert "WRITER_PROMPT_V3" in bundle.system
+    assert "specialist CUDA assessment author" in bundle.system
 
 
 def test_layers_and_json_schema_for_formula():
@@ -54,7 +54,7 @@ def test_layers_and_json_schema_for_formula():
     assert "reason privately" in bundle.system.lower() or "Do NOT write the reasoning" in bundle.system
     assert "Analyze" in bundle.system
     assert "Construct" in bundle.system
-    assert "Self-check" in bundle.system
+    assert "premise_check" in bundle.system
     assert '"draft_plan"' in bundle.system
     assert '"draft_target"' in bundle.system
     assert "SEED_BUCKET:" in bundle.user
@@ -100,7 +100,7 @@ def test_evolver_policy_lists_operators():
     assert "deepen" in text
     assert "inject-bug" in text
     assert "layout-eq" in text
-    assert "just changing stride=16 to stride=32" in bundle.system
+    assert "Operator assigned by the planner" in bundle.system
     assert '"operator"' in bundle.system
 
 
@@ -112,5 +112,5 @@ def test_angle_guide_is_not_duplicated_in_semi_prefix():
         "- 哪条能编译：给 2～3 个片段，指出合法/非法"
     )
     bundle = sp.build(_brief(angle_guide=guide), SteeringBrief())
-    assert bundle.system.count("Other valid angles") == 1
+    assert bundle.system.count("Other angles (contrast only, do not mix in)") == 1
     assert bundle.system.count("哪条能编译") == 1

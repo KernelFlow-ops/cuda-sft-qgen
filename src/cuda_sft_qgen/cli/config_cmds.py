@@ -24,9 +24,10 @@ def cmd_gate(args: argparse.Namespace) -> int:
         data_dir=data_dir,
         profile=args.profile,
     )
-    if not settings.nvidia_api_keys:
+    missing = settings.missing_api_keys + settings.missing_api_fields
+    if missing:
         print(
-            "No NVIDIA API keys. Set NVIDIA_API_KEY / NVIDIA_API_KEY_2 / NVIDIA_API_KEY_3.",
+            f"Missing API configuration: {', '.join(missing)}.",
             file=sys.stderr,
         )
         return 2
@@ -65,8 +66,10 @@ def cmd_validate_config(args: argparse.Namespace) -> int:
         warnings = []
 
         # Check API keys
-        if not config.fake_llm and not config.nvidia_api_keys:
-            issues.append("No NVIDIA API keys configured")
+        if config.missing_api_keys:
+            issues.append(f"Missing API keys: {', '.join(config.missing_api_keys)}")
+        if config.missing_api_fields:
+            issues.append(f"Missing API fields: {', '.join(config.missing_api_fields)}")
 
         # Check file paths
         paths_to_check = [
@@ -233,5 +236,3 @@ def cmd_estimate_cost(args: argparse.Namespace) -> int:
     except Exception as e:
         print(json.dumps({"error": str(e)}, ensure_ascii=False, indent=2), file=sys.stderr)
         return 2
-
-

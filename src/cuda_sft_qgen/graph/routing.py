@@ -12,12 +12,15 @@ from __future__ import annotations
 from langgraph.graph import END
 
 from cuda_sft_qgen.graph.policy import (
+    cannot_plan_more,
+    iteration_limit_reached,
     should_drain,
     should_review,
     should_salvage,
     should_taxonomy_tick,
 )
 from cuda_sft_qgen.graph.state import PipelineState
+from cuda_sft_qgen.runtime import get_runtime
 
 # Re-export for tests that imported these names from routing.
 __all__ = [
@@ -34,14 +37,14 @@ __all__ = [
 
 def route_after_bootstrap(state: PipelineState) -> str:
     """Architect if rebuilding taxonomy; else review leftover pending or plan."""
+    if state.get("done") or int(state.get("accepted_count") or 0) >= int(state.get("target") or 0):
+        return END
     if state.get("rebuild_taxonomy"):
         return "architect"
-    if state.get("done") and not (state.get("pending") or []):
-        return END
-    if state.get("done") and (state.get("pending") or []):
-        return "review_score"
     if should_review(state):
         return "review_score"
+    if cannot_plan_more(state):
+        return END
     return "planner"
 
 
@@ -72,31 +75,40 @@ def route_after_drain(state: PipelineState) -> str:
 
 def _route_continue(state: PipelineState) -> str:
     """Shared continue: review if due, else END on target/iter, else planner."""
-    if should_review(state):
-        return "review_score"
     accepted = int(state.get("accepted_count") or 0)
     target = int(state.get("target") or 0)
-    iteration = int(state.get("iteration") or 0)
-    max_iter = int(state.get("max_iterations") or 200)
     pending = state.get("pending") or []
     if state.get("done") and not pending:
         return END
     if accepted >= target and not pending:
         return END
-    if iteration >= max_iter:
-        return END if not pending else "review_score"
+    if accepted >= target:
+        return END
+    if should_review(state):
+        return "review_score"
+    if cannot_plan_more(state):
+        return END
     return "planner"
+
+
+def _verification_budget_exhausted() -> bool:
+    try:
+        return get_runtime().verification_budget_exhausted is True
+    except RuntimeError:
+        return False
 
 
 def route_after_archive(state: PipelineState) -> str:
     """END on target or max iterations; else taxonomy tick or next planner batch."""
     accepted = int(state.get("accepted_count") or 0)
     target = int(state.get("target") or 0)
-    iteration = int(state.get("iteration") or 0)
-    max_iter = int(state.get("max_iterations") or 200)
     if accepted >= target:
         return END
-    if iteration >= max_iter:
+    if _verification_budget_exhausted():
+        return END
+    if should_review(state):
+        return "review_score"
+    if iteration_limit_reached(state) or cannot_plan_more(state):
         return END
     # Prefer the next generate batch over draining JSON retries. Drain still
     # runs after generate when pending is nearly empty.
@@ -109,11 +121,13 @@ def route_after_taxonomy(state: PipelineState) -> str:
     """END on target/iter; drain retries if idle, otherwise plan the next batch."""
     accepted = int(state.get("accepted_count") or 0)
     target = int(state.get("target") or 0)
-    iteration = int(state.get("iteration") or 0)
-    max_iter = int(state.get("max_iterations") or 200)
     if accepted >= target:
         return END
-    if iteration >= max_iter:
+    if _verification_budget_exhausted():
+        return END
+    if should_review(state):
+        return "review_score"
+    if iteration_limit_reached(state) or cannot_plan_more(state):
         return END
     if should_drain(state):
         return "retry_drain"

@@ -3,8 +3,11 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from copy import deepcopy
+import ast
+from fractions import Fraction
 import hashlib
 import json
+import logging
 from pathlib import Path
 import re
 import sqlite3
@@ -13,6 +16,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 from cuda_sft_qgen.taxonomy import Taxonomy, _leaves_from_domains, dump_taxonomy
+
+logger = logging.getLogger(__name__)
 
 STATUSES = {"legacy_unreviewed", "provisional", "verified", "quarantined", "retired"}
 RELATIONS = {
@@ -38,6 +43,54 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
+def _norm_ws(value: str) -> str:
+    return " ".join((value or "").split())
+
+
+def _ensure_column(db: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    """Add a schema column once, including on legacy SQLite files."""
+    columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
+def _safe_eval(expr: str) -> Fraction:
+    """Evaluate bounded arithmetic into an exact fraction without eval()."""
+    if not re.fullmatch(r"[0-9.+\-*/%() ]+", expr or ""):
+        raise ValueError("unsafe expression")
+
+    def value(node: ast.AST) -> Fraction:
+        if isinstance(node, ast.Constant) and type(node.value) in {int, float}:
+            return Fraction(str(node.value))
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            operand = value(node.operand)
+            return operand if isinstance(node.op, ast.UAdd) else -operand
+        if isinstance(node, ast.BinOp):
+            left, right = value(node.left), value(node.right)
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            if isinstance(node.op, ast.Mult):
+                return left * right
+            if isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod)) and right == 0:
+                raise ValueError("division by zero")
+            if isinstance(node.op, ast.Div):
+                return left / right
+            if isinstance(node.op, ast.FloorDiv):
+                return Fraction(left // right)
+            if isinstance(node.op, ast.Mod):
+                return left % right
+            if isinstance(node.op, ast.Pow) and right.denominator == 1 and abs(right.numerator) <= 16:
+                return left ** right.numerator
+        raise ValueError("unsafe expression")
+
+    try:
+        return value(ast.parse(expr, mode="eval").body)
+    except (SyntaxError, ZeroDivisionError) as exc:
+        raise ValueError("unsafe expression") from exc
+
+
 class KnowledgeStore:
     """SQLite knowledge graph: versioned claims, evidence, relations, and jobs.
 
@@ -45,9 +98,10 @@ class KnowledgeStore:
     or revise a claim; impact events tell the question archive what to requeue.
     """
 
-    def __init__(self, path: Path | str):
+    def __init__(self, path: Path | str, toolkit_version: str = ""):
         """Open or create ``knowledge.sqlite3`` and ensure the schema exists."""
         self.path = Path(path)
+        self.toolkit_version = toolkit_version
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
             db.executescript("""
@@ -93,6 +147,10 @@ class KnowledgeStore:
                     id TEXT PRIMARY KEY, kind TEXT NOT NULL,
                     label TEXT NOT NULL, attrs TEXT NOT NULL);
             """)
+            _ensure_column(db, "claims", "verified_by", "TEXT NOT NULL DEFAULT 'none'")
+            _ensure_column(db, "evidence", "kind", "TEXT NOT NULL DEFAULT 'doc_quote'")
+            _ensure_column(db, "evidence", "toolkit_version", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(db, "claims", "audit_due_at", "REAL NOT NULL DEFAULT 0")
 
     @contextmanager
     def connect(self):
@@ -114,8 +172,21 @@ class KnowledgeStore:
     def import_taxonomy(self, taxonomy: Taxonomy) -> int:
         """Insert missing taxonomy leaves as ``legacy_unreviewed`` claims."""
         added = 0
+        conflicts: list[dict[str, Any]] = []
         with self.connect() as db:
+            existing = {
+                row[0]: (row[1], row[2])
+                for row in db.execute(
+                    "SELECT id,json_extract(payload,'$.domain_id'),json_extract(payload,'$.l2_id') FROM claims"
+                )
+            }
             for leaf in taxonomy.leaves:
+                incoming = (leaf.domain_id, leaf.l2_id)
+                prior = existing.get(leaf.l3_id)
+                if prior is not None:
+                    if prior != incoming:
+                        conflicts.append({"l3_id": leaf.l3_id, "existing": list(prior), "incoming": list(incoming)})
+                    continue
                 payload = dict(vars(leaf))
                 payload["id"] = leaf.l3_id
                 payload["status"] = "retired" if leaf.retired else leaf.status
@@ -127,6 +198,10 @@ class KnowledgeStore:
                 if inserted:
                     db.execute("INSERT INTO revisions VALUES(?,?,?,?,?,?)", (leaf.l3_id, leaf.revision, _json(payload), payload["status"], "taxonomy_import", now))
                     added += 1
+                existing[leaf.l3_id] = incoming
+        if conflicts:
+            logger.error("import_conflicts n=%d first=%s", len(conflicts), conflicts[0])
+        self.set_metadata("import_conflicts", conflicts)
         return added
 
     def add_claim(self, payload: dict[str, Any], *, status: str = "provisional", reason: str = "expansion") -> bool:
@@ -156,7 +231,8 @@ class KnowledgeStore:
         if row is None:
             return None
         result = json.loads(row["payload"])
-        result.update(id=row["id"], revision=row["revision"], status=row["status"], audited_at=row["audited_at"])
+        result.update(id=row["id"], revision=row["revision"], status=row["status"], audited_at=row["audited_at"],
+                      verified_by=row["verified_by"], audit_due_at=row["audit_due_at"])
         return result
 
     def list_claims(self, status: str | None = None, *, limit: int = 10000) -> list[dict]:
@@ -166,7 +242,8 @@ class KnowledgeStore:
         result = []
         for row in rows:
             payload = json.loads(row["payload"])
-            payload.update(id=row["id"], revision=row["revision"], status=row["status"], audited_at=row["audited_at"])
+            payload.update(id=row["id"], revision=row["revision"], status=row["status"], audited_at=row["audited_at"],
+                           verified_by=row["verified_by"], audit_due_at=row["audit_due_at"])
             result.append(payload)
         return result
 
@@ -187,7 +264,7 @@ class KnowledgeStore:
             revision = row["revision"] + 1
             payload.update(revision=revision, status=status)
             now = time.time()
-            db.execute("UPDATE claims SET revision=?,status=?,payload=?,fingerprint=?,updated_at=?,audited_at=0 WHERE id=?", (revision, status, _json(payload), self._fingerprint(payload["claim"]), now, claim_id))
+            db.execute("UPDATE claims SET revision=?,status=?,payload=?,fingerprint=?,updated_at=?,audited_at=0,verified_by='none' WHERE id=?", (revision, status, _json(payload), self._fingerprint(payload["claim"]), now, claim_id))
             db.execute("INSERT INTO revisions VALUES(?,?,?,?,?,?)", (claim_id, revision, _json(payload), status, reason, now))
             db.execute("INSERT INTO impact_events(claim_id,old_revision,new_revision,reason,created_at) VALUES(?,?,?,?,?)", (claim_id, row["revision"], revision, reason, now))
             db.execute("UPDATE relations SET status='stale' WHERE source_id=? OR target_id=?", (claim_id, claim_id))
@@ -197,7 +274,7 @@ class KnowledgeStore:
         """Record an official-source audit; may verify, quarantine, or revise the claim."""
         if verdict not in {"supported", "contradicted", "insufficient"}:
             raise ValueError("invalid audit verdict")
-        grounded = bool(official_url(url) and quote.strip() and quote.strip() in document)
+        grounded = bool(official_url(url) and quote.strip() and _norm_ws(quote) in _norm_ws(document))
         if verdict != "insufficient" and not grounded:
             raise ValueError("audit requires a verbatim quote in retrieved official documentation")
         with self.connect() as db:
@@ -210,7 +287,7 @@ class KnowledgeStore:
             if grounded:
                 digest = hashlib.sha256(document.encode()).hexdigest()
                 db.execute("INSERT OR IGNORE INTO documents VALUES(?,?,?,?)", (digest, url, document, now))
-                db.execute("INSERT OR IGNORE INTO evidence(claim_id,revision,url,quote,content_hash,fetched_at,verdict) VALUES(?,?,?,?,?,?,?)", (claim_id, revision, url, quote.strip(), digest, now, verdict))
+                db.execute("INSERT OR IGNORE INTO evidence(claim_id,revision,url,quote,content_hash,fetched_at,verdict,kind,toolkit_version) VALUES(?,?,?,?,?,?,?,?,?)", (claim_id, revision, url, quote.strip(), digest, now, verdict, "doc_quote", self.toolkit_version))
                 evidence_id = db.execute("SELECT id FROM evidence WHERE claim_id=? AND revision=? AND url=? AND content_hash=? AND quote=?", (claim_id, revision, url, digest, quote.strip())).fetchone()[0]
             status = {"supported": "verified", "contradicted": "quarantined", "insufficient": row["status"]}[verdict]
             payload = json.loads(row["payload"])
@@ -226,13 +303,100 @@ class KnowledgeStore:
                         for value in values:
                             if isinstance(value, (str, int, float)):
                                 db.execute("INSERT OR REPLACE INTO relations(source_id,target_id,kind,status,evidence_id,source_revision,reason) VALUES(?,?,?,?,?,?,?)", (claim_id, f"{key}:{value}", "applies_to", "verified", evidence_id, revision, reason))
-            db.execute("UPDATE claims SET status=?,payload=?,audited_at=?,updated_at=? WHERE id=?", (status, _json(payload), now, now, claim_id))
+            verified_by = "quote" if verdict == "supported" else ("none" if verdict == "contradicted" else row["verified_by"])
+            db.execute("UPDATE claims SET status=?,payload=?,audited_at=?,updated_at=?,verified_by=? WHERE id=?", (status, _json(payload), now, now, verified_by, claim_id))
             db.execute("INSERT INTO audits(claim_id,revision,verdict,reason,evidence_id,audited_at) VALUES(?,?,?,?,?,?)", (claim_id, revision, verdict, reason, evidence_id, now))
             if status != row["status"]:
                 db.execute("INSERT INTO impact_events(claim_id,old_revision,new_revision,reason,created_at) VALUES(?,?,?,?,?)", (claim_id, revision, revision, f"audit:{verdict}:{reason}", now))
                 if status == "quarantined":
                     db.execute("UPDATE relations SET status='stale' WHERE source_id=? OR target_id=?", (claim_id, claim_id))
         return True
+
+    def _apply_local_check(self, claim_id: str, revision: int, *, passed: bool, method: str,
+                           kind: str, url: str, quote: str, digest_source: str, reason: str) -> bool:
+        """Persist a non-URL verification result and its state transition."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM claims WHERE id=?", (claim_id,)).fetchone()
+            if row is None or row["revision"] != revision or row["status"] in {"retired", "quarantined"}:
+                return False
+            now = time.time()
+            evidence_id = None
+            if passed:
+                digest = hashlib.sha256(digest_source.encode()).hexdigest()
+                db.execute(
+                    "INSERT OR IGNORE INTO evidence(claim_id,revision,url,quote,content_hash,fetched_at,verdict,kind,toolkit_version) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (claim_id, revision, url, quote[:500], digest, now, "supported", kind, self.toolkit_version),
+                )
+                evidence_id = db.execute(
+                    "SELECT id FROM evidence WHERE claim_id=? AND revision=? AND url=? AND content_hash=? AND quote=?",
+                    (claim_id, revision, url, digest, quote[:500]),
+                ).fetchone()[0]
+                payload = json.loads(row["payload"])
+                payload["status"] = "verified"
+                db.execute(
+                    "UPDATE claims SET status='verified',payload=?,verified_by=?,audited_at=?,updated_at=?,audit_due_at=0 WHERE id=?",
+                    (_json(payload), method, now, now, claim_id),
+                )
+            db.execute("INSERT INTO audits(claim_id,revision,verdict,reason,evidence_id,audited_at) VALUES(?,?,?,?,?,?)",
+                       (claim_id, revision, "supported" if passed else "insufficient", reason, evidence_id, now))
+            if not passed:
+                db.execute("UPDATE claims SET audited_at=?,updated_at=? WHERE id=?", (now, now, claim_id))
+            if passed and row["status"] != "verified":
+                db.execute("INSERT INTO impact_events(claim_id,old_revision,new_revision,reason,created_at) VALUES(?,?,?,?,?)",
+                           (claim_id, revision, revision, f"audit:supported:{method}", now))
+        return True
+
+    def record_insufficient_audit(self, claim_id: str, revision: int, *, reason: str) -> bool:
+        """Record an inconclusive verification attempt without changing claim status."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT revision,status FROM claims WHERE id=?", (claim_id,)).fetchone()
+            if row is None or row["revision"] != revision or row["status"] in {"retired", "quarantined"}:
+                return False
+            now = time.time()
+            db.execute("UPDATE claims SET audited_at=?,updated_at=? WHERE id=?", (now, now, claim_id))
+            db.execute("INSERT INTO audits(claim_id,revision,verdict,reason,evidence_id,audited_at) VALUES(?,?,?,?,NULL,?)",
+                       (claim_id, revision, "insufficient", str(reason)[:1000], now))
+        return True
+
+    def apply_computation_check(self, claim_id: str, revision: int, *, expression: str,
+                                variables: dict[str, float] | None, expected: str, trace: str) -> bool:
+        """Verify formula and numeric claims by exact arithmetic recomputation."""
+        claim = self.get_claim(claim_id)
+        if claim is None or claim["revision"] != revision or claim["status"] in {"retired", "quarantined"}:
+            return False
+        if claim.get("kind") not in {"formula", "numeric"}:
+            raise ValueError("computation path only for formula/numeric")
+        expr = expression
+        for name, value in (variables or {}).items():
+            if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,31}", name):
+                raise ValueError("unsafe variable name")
+            expr = re.sub(rf"\b{re.escape(name)}\b", repr(value), expr)
+        got, want = _safe_eval(expr), _safe_eval(expected)
+        return self._apply_local_check(
+            claim_id, revision, passed=got == want, method="computation", kind="calc_trace",
+            url="calc://local", quote=trace, digest_source=expr,
+            reason="computation_matches" if got == want else "computation_mismatch",
+        )
+
+    def apply_expert_verification(self, claim_id: str, revision: int, *, reviewer: str, note: str) -> bool:
+        """Record an accountable human review as expert evidence."""
+        if not reviewer.strip():
+            raise ValueError("reviewer is required")
+        return self._apply_local_check(
+            claim_id, revision, passed=True, method="expert", kind="expert_note",
+            url=f"expert://{reviewer.strip()}", quote=note, digest_source=note,
+            reason="expert_verified",
+        )
+
+    def apply_execution_check(self, claim_id: str, revision: int, *, log: str, passed: bool) -> bool:
+        """Record a caller-provided execution result without running code."""
+        return self._apply_local_check(
+            claim_id, revision, passed=passed, method="execution", kind="exec_log",
+            url="exec://local", quote=log, digest_source=log,
+            reason="execution_pass" if passed else "execution_failed",
+        )
 
     def add_evidence(self, claim_id: str, revision: int, *, url: str, quote: str, document: str, verdict: str = "relation") -> int:
         """Store an official-source quote that appears verbatim in ``document``.
@@ -241,7 +405,7 @@ class KnowledgeStore:
             ValueError: If the URL is not official, the quote is missing from
                 the document, or ``revision`` is stale.
         """
-        if not official_url(url) or not quote.strip() or quote.strip() not in document:
+        if not official_url(url) or not quote.strip() or _norm_ws(quote) not in _norm_ws(document):
             raise ValueError("evidence requires a retrieved official verbatim quote")
         digest = hashlib.sha256(document.encode()).hexdigest()
         now = time.time()
@@ -250,7 +414,7 @@ class KnowledgeStore:
             if row is None or row[0] != revision:
                 raise ValueError("stale evidence revision")
             db.execute("INSERT OR IGNORE INTO documents VALUES(?,?,?,?)", (digest, url, document, now))
-            db.execute("INSERT OR IGNORE INTO evidence(claim_id,revision,url,quote,content_hash,fetched_at,verdict) VALUES(?,?,?,?,?,?,?)", (claim_id, revision, url, quote.strip(), digest, now, verdict))
+            db.execute("INSERT OR IGNORE INTO evidence(claim_id,revision,url,quote,content_hash,fetched_at,verdict,kind,toolkit_version) VALUES(?,?,?,?,?,?,?,?,?)", (claim_id, revision, url, quote.strip(), digest, now, verdict, "doc_quote", self.toolkit_version))
             return db.execute("SELECT id FROM evidence WHERE claim_id=? AND revision=? AND url=? AND content_hash=? AND quote=?", (claim_id, revision, url, digest, quote.strip())).fetchone()[0]
 
     def get_metadata(self, key: str, default: Any = None) -> Any:
@@ -514,14 +678,29 @@ class KnowledgeStore:
             lines.append(f'  {ident(edge["source_id"])} -->|{edge["kind"]}| {ident(edge["target_id"])}')
         return "\n".join(lines) + "\n"
 
-    def relation_candidates(self, claim_id: str, *, limit: int = 8) -> list[dict]:
-        """Rank other claims by shared L2 and token overlap for relate jobs."""
+    def relation_candidates(self, claim_id: str, *, limit: int = 8, embedder: Any = None) -> list[dict]:
+        """Rank live claims by embedding similarity or token overlap."""
         root = self.get_claim(claim_id)
-        if root is None:
+        if root is None or limit <= 0:
             return []
-        words = set(root["claim"].lower().split())
         candidates = [claim for claim in self.list_claims() if claim["id"] != claim_id and claim["status"] not in {"quarantined", "retired"}]
-        candidates.sort(key=lambda claim: (claim.get("l2_id") == root.get("l2_id"), len(words & set(claim["claim"].lower().split()))), reverse=True)
+        if embedder is not None and candidates:
+            import numpy as np
+
+            vectors = np.asarray(embedder.embed([root["claim"]] + [c["claim"] for c in candidates]), dtype=float)
+            norms = np.linalg.norm(vectors, axis=1)
+            vectors = vectors / np.maximum(norms[:, None], 1e-12)
+            scores = vectors[1:] @ vectors[0]
+            by_id = {claim["id"]: float(score) for claim, score in zip(candidates, scores)}
+            candidates.sort(key=lambda c: (
+                -(by_id[c["id"]] + (0.1 if c.get("l2_id") == root.get("l2_id") else 0.0)), c["id"]
+            ))
+        else:
+            from cuda_sft_qgen.knowledge.doc_index import tokenize
+
+            words = set(tokenize(root["claim"]))
+            candidates.sort(key=lambda c: (-(int(c.get("l2_id") == root.get("l2_id"))),
+                                           -len(words & set(tokenize(c["claim"]))), c["id"]))
         return candidates[:limit]
 
     def record_question(self, question_id: Any, claims: list[tuple[str, int]] | None = None) -> None:
@@ -554,12 +733,16 @@ class KnowledgeStore:
         """Replace in-memory leaf claims/status with the store's current revisions."""
         domains = deepcopy(taxonomy.domains)
         domain_map = {d["id"]: d for d in domains}
+        children = {(d["id"], c["id"]): c for d in domains for c in d.get("children", [])}
+        index = {(d["id"], c["id"]): {item["id"]: item for item in c.get("leaves", [])}
+                 for d in domains for c in d.get("children", [])}
         with self.connect() as db:
             rows = db.execute("SELECT * FROM claims ORDER BY id").fetchall()
         for row in rows:
             item = json.loads(row["payload"])
             domain_id = item.get("domain_id")
-            if not domain_id:
+            l2_id = item.get("l2_id")
+            if not domain_id or not l2_id:
                 continue
             domain = domain_map.get(domain_id)
             if domain is None:
@@ -570,17 +753,25 @@ class KnowledgeStore:
                 }
                 domains.append(domain)
                 domain_map[domain_id] = domain
-            child = next((c for c in domain.get("children", []) if c["id"] == item["l2_id"]), None)
+            key = (domain_id, l2_id)
+            child = children.get(key)
             if child is None:
                 child = {
-                    "id": item["l2_id"],
-                    "name": item.get("l2_name") or item["l2_id"],
+                    "id": l2_id,
+                    "name": item.get("l2_name") or l2_id,
                     "leaves": [],
                 }
                 domain.setdefault("children", []).append(child)
+                children[key] = child
+                index[key] = {}
             record = {k: item[k] for k in ("claim", "types", "difficulty", "kind", "hints", "sources", "applicability") if k in item}
-            record.update(id=row["id"], revision=row["revision"], status=row["status"], retired=row["status"] in {"quarantined", "retired"})
-            child["leaves"] = [r for r in child.get("leaves", []) if r["id"] != row["id"]] + [record]
+            record.update(id=row["id"], revision=row["revision"], status=row["status"],
+                          retired=row["status"] in {"quarantined", "retired"}, audit_due_at=row["audit_due_at"])
+            index[key][row["id"]] = record
+        for key, child in children.items():
+            old_ids = [record["id"] for record in child.get("leaves", [])]
+            extras = sorted(set(index[key]) - set(old_ids))
+            child["leaves"] = [index[key][leaf_id] for leaf_id in [*old_ids, *extras]]
         return Taxonomy(taxonomy.version, taxonomy.name, _leaves_from_domains(domains), domains, taxonomy.index_path, dict(taxonomy.domain_files))
 
     def export_taxonomy(self, path: Path, taxonomy: Taxonomy) -> None:
@@ -601,8 +792,61 @@ class KnowledgeStore:
         """Queue audits for claims not reviewed within ``interval_seconds``."""
         cutoff = time.time() - interval_seconds
         with self.connect() as db:
-            rows = db.execute("SELECT id,revision FROM claims WHERE audited_at<? AND status NOT IN ('retired','quarantined') AND NOT EXISTS (SELECT 1 FROM jobs WHERE dedupe_key='audit:' || claims.id || ':' || claims.revision AND status IN ('queued','running')) ORDER BY CASE status WHEN 'provisional' THEN 0 WHEN 'verified' THEN 1 ELSE 2 END,audited_at,updated_at LIMIT ?", (cutoff, limit)).fetchall()
-        return sum(self.enqueue("audit", {"claim_id": r["id"], "revision": r["revision"]}, f"audit:{r['id']}:{r['revision']}") is not None for r in rows)
+            rows = db.execute(
+                "SELECT id,revision,payload FROM claims WHERE audited_at<? AND status NOT IN ('retired','quarantined') "
+                "AND (status!='legacy_unreviewed' OR audit_due_at>0) "
+                "AND NOT EXISTS (SELECT 1 FROM jobs WHERE dedupe_key IN "
+                "('audit:' || claims.id || ':' || claims.revision, 'compute:' || claims.id || ':' || claims.revision) "
+                "AND status IN ('queued','running')) "
+                "ORDER BY CASE status WHEN 'provisional' THEN 0 WHEN 'verified' THEN 1 ELSE 2 END,audited_at,updated_at LIMIT ?",
+                (cutoff, limit),
+            ).fetchall()
+        queued = 0
+        for row in rows:
+            kind = "compute_verify" if json.loads(row["payload"]).get("kind") in {"formula", "numeric"} else "audit"
+            prefix = "compute" if kind == "compute_verify" else "audit"
+            queued += self.enqueue(kind, {"claim_id": row["id"], "revision": row["revision"]},
+                                   f"{prefix}:{row['id']}:{row['revision']}") is not None
+        return queued
+
+    def schedule_legacy_backlog(self, *, batch_per_l2: int = 20, due_days: float = 14,
+                                now: float | None = None) -> int:
+        """Queue a bounded batch of unreviewed legacy claims per L2."""
+        if batch_per_l2 <= 0:
+            return 0
+        now = time.time() if now is None else float(now)
+        due_at = now + due_days * 86400
+        queued = 0
+        counts: dict[tuple[str, str], int] = {}
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                "SELECT id,revision,payload FROM claims WHERE status='legacy_unreviewed' AND audit_due_at=0 "
+                "AND NOT EXISTS (SELECT 1 FROM jobs WHERE dedupe_key IN "
+                "('audit:' || claims.id || ':' || claims.revision, 'compute:' || claims.id || ':' || claims.revision) "
+                "AND status IN ('queued','running')) "
+                "ORDER BY json_extract(payload,'$.domain_id'),json_extract(payload,'$.l2_id'),id"
+            ).fetchall()
+            for row in rows:
+                payload = json.loads(row["payload"])
+                key = (str(payload.get("domain_id") or ""), str(payload.get("l2_id") or ""))
+                if counts.get(key, 0) >= batch_per_l2:
+                    continue
+                counts[key] = counts.get(key, 0) + 1
+                kind = "compute_verify" if payload.get("kind") in {"formula", "numeric"} else "audit"
+                prefix = "compute" if kind == "compute_verify" else "audit"
+                job_payload = {"claim_id": row["id"], "revision": row["revision"]}
+                inserted = db.execute(
+                    "INSERT OR IGNORE INTO jobs(kind,payload,dedupe_key,status,available_at,created_at) "
+                    "VALUES(?,?,?,'queued',?,?)",
+                    (kind, _json(job_payload), f"{prefix}:{row['id']}:{row['revision']}", now, now),
+                ).rowcount
+                if inserted:
+                    payload["audit_due_at"] = due_at
+                    db.execute("UPDATE claims SET audit_due_at=?,payload=? WHERE id=?",
+                               (due_at, _json(payload), row["id"]))
+                    queued += 1
+        return queued
 
     def take_job(self, *, lease_seconds: int = 900) -> dict | None:
         """Lease the next due job, or None if the queue is idle."""
@@ -627,13 +871,13 @@ class KnowledgeStore:
                 return
             status = "done" if error is None else ("failed" if row[0] >= 3 else "queued")
             db.execute("UPDATE jobs SET status=?,error=?,available_at=? WHERE id=?", (status, error, time.time() + 60 * 2 ** row[0], job_id))
-            if status == "failed" and row["kind"] == "audit":
+            if status == "failed" and row["kind"] in {"audit", "compute_verify"}:
                 payload = json.loads(row["payload"])
                 db.execute("UPDATE claims SET audited_at=? WHERE id=? AND revision=?", (time.time(), payload.get("claim_id"), payload.get("revision")))
 
     def stats(self) -> dict:
         """Claim-status and job-status histograms for CLI/gate reports."""
         with self.connect() as db:
-            base = {"claims": {r[0]: r[1] for r in db.execute("SELECT status,COUNT(*) FROM claims GROUP BY status")}, "jobs": {r[0]: r[1] for r in db.execute("SELECT status,COUNT(*) FROM jobs GROUP BY status")}, "evidence": db.execute("SELECT COUNT(*) FROM evidence").fetchone()[0], "relations": db.execute("SELECT COUNT(*) FROM relations").fetchone()[0]}
+            base = {"claims": {r[0]: r[1] for r in db.execute("SELECT status,COUNT(*) FROM claims GROUP BY status")}, "jobs": {r[0]: r[1] for r in db.execute("SELECT status,COUNT(*) FROM jobs GROUP BY status")}, "evidence": db.execute("SELECT COUNT(*) FROM evidence").fetchone()[0], "relations": db.execute("SELECT COUNT(*) FROM relations").fetchone()[0], "verified_by": {r[0]: r[1] for r in db.execute("SELECT verified_by,COUNT(*) FROM claims GROUP BY verified_by")}}
         base["graph"] = self.graph_stats()
         return base

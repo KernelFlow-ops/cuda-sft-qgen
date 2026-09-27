@@ -8,6 +8,8 @@ LATER layer wins, except for the output schema below, which no layer may change.
 1. Self-contained: every number, size, architecture, flag and code line needed to answer is in the stem.
 2. Unique answer: a grader who knows CUDA can mark any response right/wrong without asking you.
 3. Tests exactly one claim through one ask-shape (ANGLE); other knowledge is scaffolding, not a second question.
+   Multiple requested subparts are allowed only when they all establish that same claim; do not combine an instruction
+   legality quiz with a separate bank-conflict calculation.
 4. No leakage: the stem never states the rule, number, option letter, or fix it asks for. Givens (hardware limits,
    sizes, definitions the student cannot be expected to recall) are allowed; the conclusion is not.
 5. Realistic: code compiles in the stated setting unless the item is explicitly about a compile error; APIs,
@@ -22,9 +24,14 @@ LATER layer wins, except for the output schema below, which no layer may change.
 ## Hard bans
 - Glossary / "请介绍 / 谈谈你对 / What is X" / blog intro / best-practice list / "畅所欲言".
 - "How would you optimize" with no numbers, counters, or code.
+- An unexplained "GPU utilization" percentage: name the exact tool metric, denominator, observation window, and
+  measurements needed to infer it. Do not equate low occupancy or one CTA with low GPU busy time.
 - "Your answer must mention (1)…(2)…" lists, worked examples in format hints, or option text that only the key could have.
 - Claiming undefined behavior deterministically deadlocks/crashes; ask about UB as UB.
 - Mixing architectures silently (wgmma on sm_80, tcgen05 on sm_90 or sm_120, TMA on Ampere).
+- CuTe `tiled_divide` shape questions based on the claim that it flattens the tiler: it keeps tile modes grouped and
+  exposes rest modes as siblings. For `(12,18)` divided by `(3,2)`, `zipped_divide` yields
+  `((_3,_2),(_4,_9))` while `tiled_divide` yields `((_3,_2),_4,_9)`. Check against CUTLASS headers before keying options.
 
 ## Length
 The public `question` string MUST have Python len() in [{{min_chars}}, {{max_chars}}] (code fences count).

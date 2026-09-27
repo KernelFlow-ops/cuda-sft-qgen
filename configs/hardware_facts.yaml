@@ -1,0 +1,41 @@
+# Verified per-architecture limits injected into writer ({{hardware_facts}}) and chair ({{hardware_fact_sheet}}).
+# Source of truth: CUDA C++ Programming Guide, "Compute Capabilities" technical-specification table, for the
+# toolkit pinned in `toolkit`. Entries with verify_before_use: true MUST be re-checked against that table (and
+# recorded in knowledge.sqlite3 as evidence) before being enabled; the loader skips them until verified.
+toolkit: "CUDA 12.x (pin the exact minor used by the verifier image)"
+common:
+  warp_size: 32
+  max_threads_per_block: 1024
+  max_regs_per_thread: 255
+  regs_per_sm_32bit: 65536
+  reg_alloc_unit_per_warp: 256
+  static_smem_per_block_bytes: 49152        # >48KB requires dynamic smem + cudaFuncAttributeMaxDynamicSharedMemorySize
+  smem_banks: 32
+  smem_bank_width_bytes: 4
+  gmem_sector_bytes: 32
+arch:
+  sm_70: {name: "Volta V100", max_warps_per_sm: 64, max_threads_per_sm: 2048, max_blocks_per_sm: 32,
+          max_smem_per_sm_kb: 96, max_smem_per_block_optin_kb: 96, features: [mma.sync(m8n8k4), independent_thread_scheduling]}
+  sm_75: {name: "Turing T4", max_warps_per_sm: 32, max_threads_per_sm: 1024, max_blocks_per_sm: 16,
+          max_smem_per_sm_kb: 64, max_smem_per_block_optin_kb: 64, features: [mma.sync, ldmatrix]}
+  sm_80: {name: "Ampere A100", max_warps_per_sm: 64, max_threads_per_sm: 2048, max_blocks_per_sm: 32,
+          max_smem_per_sm_kb: 164, max_smem_per_block_optin_kb: 163, l1_plus_smem_kb: 192,
+          features: [cp.async, "mma.sync m16n8k16 bf16/tf32", ldmatrix, async_barrier_arrive_wait, "2:4 sparse mma"]}
+  sm_86: {name: "Ampere GA10x", max_warps_per_sm: 48, max_threads_per_sm: 1536, max_blocks_per_sm: 16,
+          max_smem_per_sm_kb: 100, max_smem_per_block_optin_kb: 99, features: [cp.async, mma.sync]}
+  sm_87: {name: "Ampere Orin", max_warps_per_sm: 48, max_threads_per_sm: 1536, max_blocks_per_sm: 16,
+          max_smem_per_sm_kb: 164, max_smem_per_block_optin_kb: 163, verify_before_use: true}
+  sm_89: {name: "Ada L4/L40/RTX40", max_warps_per_sm: 48, max_threads_per_sm: 1536, max_blocks_per_sm: 24,
+          max_smem_per_sm_kb: 100, max_smem_per_block_optin_kb: 99, features: [cp.async, mma.sync, "fp8 mma.sync"]}
+  sm_90: {name: "Hopper H100/H200", max_warps_per_sm: 64, max_threads_per_sm: 2048, max_blocks_per_sm: 32,
+          max_smem_per_sm_kb: 228, max_smem_per_block_optin_kb: 227, l1_plus_smem_kb: 256,
+          cluster_max_portable: 8, cluster_max_nonportable: 16,
+          features: [TMA cp.async.bulk.tensor, "mbarrier expect_tx", thread_block_cluster, distributed_smem,
+                     programmatic_dependent_launch],
+          arch_specific_sm_90a: [wgmma.mma_async, setmaxnreg]}
+  sm_100: {name: "Blackwell B200/GB200", max_warps_per_sm: 64, max_threads_per_sm: 2048, max_blocks_per_sm: 32,
+           max_smem_per_sm_kb: 228, max_smem_per_block_optin_kb: 227, tmem: "128 lanes x 512 columns x 32-bit per SM",
+           arch_specific_sm_100a: [tcgen05.mma, tcgen05.alloc, "tcgen05.ld/st", "2-CTA UMMA"], verify_before_use: true}
+  sm_120: {name: "Blackwell GeForce RTX 50", max_warps_per_sm: 48, max_threads_per_sm: 1536,
+           max_blocks_per_sm: 32, max_smem_per_sm_kb: 100, max_smem_per_block_optin_kb: 99,
+           notes: "no tcgen05 / TMEM", verify_before_use: true}

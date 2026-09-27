@@ -1,5 +1,6 @@
 id: T14
 name: Runtime、Driver 与 Graphs
+weight: 0.9
 children:
 - id: stream_event
   name: Stream 与 Event
@@ -89,6 +90,7 @@ children:
     - 2
     - 3
     kind: feature
+  target_leaves: 12
 - id: graphs
   name: CUDA Graphs
   leaves:
@@ -172,6 +174,7 @@ children:
     - 1
     - 2
     kind: numeric
+  target_leaves: 12
 - id: memory_api
   name: 内存与驱动 API
   leaves:
@@ -259,6 +262,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: graph_cond
   name: 条件图与子图
   leaves:
@@ -343,6 +347,7 @@ children:
     - 3
     - 4
     kind: numeric
+  target_leaves: 12
 - id: green_ctx
   name: Green context
   leaves:
@@ -431,6 +436,10 @@ children:
     - 3
     - 4
     kind: api
+  arch:
+  - sm_90
+  - sm_100a
+  target_leaves: 12
 - id: capture_ban
   name: Capture 禁令清单
   leaves:
@@ -517,6 +526,7 @@ children:
     - 2
     - 3
     kind: failure
+  target_leaves: 12
 - id: stream_cb
   name: Stream 回调与等待
   leaves:
@@ -588,6 +598,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 12
 - id: graph_inst
   name: Graph 实例化与更新
   leaves:
@@ -658,6 +669,7 @@ children:
     - 2
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: mempool_attr
   name: Mempool 属性
   leaves:
@@ -728,6 +740,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: driver_ctx
   name: Driver 上下文
   leaves:
@@ -801,6 +814,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 12
 - id: graph_node
   name: Graph 节点类型
   leaves:
@@ -870,6 +884,7 @@ children:
     difficulty:
     - 2
     kind: feature
+  target_leaves: 12
 - id: event_ipc
   name: Event IPC 与计时
   leaves:
@@ -941,6 +956,7 @@ children:
     difficulty:
     - 2
     kind: feature
+  target_leaves: 12
 - id: capture_mode
   name: Capture 模式与线程
   leaves:
@@ -1010,3 +1026,4 @@ children:
     - 2
     - 3
     kind: failure
+  target_leaves: 12

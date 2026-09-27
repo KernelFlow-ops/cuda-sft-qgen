@@ -1,5 +1,6 @@
 id: T28
 name: 错误模型与确定性
+weight: 0.7
 children:
 - id: sticky_error
   name: Sticky 错误
@@ -86,6 +87,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 10
 - id: device_assert
   name: 设备断言
   leaves:
@@ -169,6 +171,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 10
 - id: fp_nondet
   name: 浮点非确定性
   leaves:
@@ -255,6 +258,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 10
 - id: graph_update
   name: Graph 更新约束
   leaves:
@@ -335,6 +339,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 10
 - id: async_error
   name: 异步错误传播
   leaves:
@@ -414,6 +419,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 10
 - id: last_error_thread
   name: GetLastError 与 Peek
   leaves:
@@ -488,6 +494,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 10
 - id: illegal_address
   name: cudaErrorIllegalAddress
   leaves:
@@ -570,6 +577,7 @@ children:
     - 2
     - 3
     kind: mechanism
+  target_leaves: 10
 - id: trap_instr
   name: trap 与非法指令
   leaves:
@@ -641,6 +649,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 10
 - id: graph_rebuild
   name: Graph 更新 vs 重建
   leaves:
@@ -713,6 +722,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 10
 - id: fp_env
   name: 编译器浮点环境
   leaves:
@@ -786,6 +796,7 @@ children:
     difficulty:
     - 2
     kind: numeric
+  target_leaves: 10
 - id: lib_math_det
   name: 库数学确定性开关
   leaves:
@@ -856,6 +867,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 10
 - id: error_taxonomy
   name: 错误码分类
   leaves:
@@ -930,3 +942,4 @@ children:
     - 2
     - 3
     kind: failure
+  target_leaves: 10

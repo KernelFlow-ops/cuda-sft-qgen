@@ -13,19 +13,19 @@ from cuda_sft_qgen.store.archive import Archive
 
 def cmd_generate(args) -> int:
     """Run the generate+review pipeline until target or iteration limit."""
+    if getattr(args, "fake", False):
+        raise ValueError("--fake cannot generate questions; configure a real LLM API")
     data_dir = Path(args.data_dir) if getattr(args, "data_dir", None) else None
     settings = load_settings(
-        fake_llm=args.fake,
+        fake_llm=False,
         target=args.target,
         review_batch_size=args.batch,
         data_dir=data_dir,
     )
-    if args.fake:
-        settings.fake_llm = True
-        settings.embedding_provider = "fake"
     if (code := _require_keys(settings)) is not None:
         return code
-    result = run_pipeline(settings, rebuild_taxonomy=args.rebuild_taxonomy)
+    result = run_pipeline(settings, rebuild_taxonomy=args.rebuild_taxonomy,
+                          retry_reviews=bool(getattr(args, "retry_reviews", False)))
     print(
         json.dumps(
             {
@@ -39,18 +39,14 @@ def cmd_generate(args) -> int:
             indent=2,
         )
     )
-    return 0
+    return 0 if result.get("done") else 1
 
 
 def cmd_resume(args) -> int:
     """Continue a previous run from the archive in ``--data-dir``."""
+    if getattr(args, "fake", False):
+        raise ValueError("--fake cannot resume question generation")
     args.rebuild_taxonomy = False
-    if getattr(args, "retry_reviews", False):
-        settings = load_settings(
-            fake_llm=args.fake,
-            data_dir=Path(args.data_dir) if args.data_dir else None,
-        )
-        Archive(settings.data_dir).requeue_reviews(include_exhausted=True)
     return cmd_generate(args)
 
 
@@ -68,9 +64,11 @@ def cmd_export(args) -> int:
 
 def cmd_benchmark(args) -> int:
     """Isolated generation benchmark with taxonomy/knowledge sidecars disabled."""
+    if getattr(args, "fake", False):
+        raise ValueError("--fake cannot benchmark question generation")
     from cuda_sft_qgen.benchmark import run_benchmark
 
-    settings = load_settings(fake_llm=args.fake)
+    settings = load_settings(fake_llm=False)
     report = run_benchmark(
         settings,
         Path(args.output),

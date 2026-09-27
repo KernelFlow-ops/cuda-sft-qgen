@@ -1,5 +1,6 @@
 id: T13
 name: 算法核
+weight: 1.2
 children:
 - id: gemm
   name: GEMM
@@ -68,6 +69,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 12
 - id: reduce_scan
   name: Reduction / Scan
   leaves:
@@ -140,6 +142,7 @@ children:
     - 2
     - 3
     kind: numeric
+  target_leaves: 12
 - id: attn
   name: Softmax / Attention
   leaves:
@@ -210,6 +213,7 @@ children:
     - 2
     - 3
     kind: formula
+  target_leaves: 12
 - id: conv_sparse
   name: Conv 与稀疏
   leaves:
@@ -278,6 +282,7 @@ children:
     difficulty:
     - 3
     kind: feature
+  target_leaves: 12
 - id: gemm_pipe
   name: GEMM 流水公式
   leaves:
@@ -345,6 +350,7 @@ children:
     - 3
     - 4
     kind: numeric
+  target_leaves: 12
 - id: softmax_num
   name: Softmax 数值
   leaves:
@@ -415,6 +421,7 @@ children:
     - 2
     - 3
     kind: failure
+  target_leaves: 12
 - id: attn_arith
   name: Attention tiling 算术
   leaves:
@@ -487,6 +494,7 @@ children:
     difficulty:
     - 3
     kind: numeric
+  target_leaves: 12
 - id: gemm_swizzle
   name: GEMM smem swizzle
   leaves:
@@ -557,6 +565,7 @@ children:
     difficulty:
     - 4
     kind: failure
+  target_leaves: 12
 - id: scan_device
   name: Device-wide scan
   leaves:
@@ -628,6 +637,7 @@ children:
     - 2
     - 3
     kind: failure
+  target_leaves: 12
 - id: flash_bwd
   name: FlashAttention 反向
   leaves:
@@ -701,6 +711,7 @@ children:
     difficulty:
     - 3
     kind: failure
+  target_leaves: 12
 - id: conv_im2col
   name: im2col 与 implicit GEMM
   leaves:
@@ -770,6 +781,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 12
 - id: sparse_meta
   name: 2:4 稀疏元数据
   leaves:
@@ -842,6 +854,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 12
 - id: reduce_warp
   name: Warp 归约
   leaves:
@@ -914,6 +927,7 @@ children:
     - 2
     - 3
     kind: api
+  target_leaves: 12
 - id: gemm_pred
   name: GEMM 边界 predication
   leaves:
@@ -985,6 +999,7 @@ children:
     - 3
     - 4
     kind: feature
+  target_leaves: 12
 - id: flash_decode
   name: FlashDecoding
   leaves:
@@ -1014,7 +1029,7 @@ children:
     difficulty:
     - 3
     kind: formula
-
+  target_leaves: 12
 - id: flash_fa3_hopper
   name: FlashAttention-3 Hopper
   leaves:
@@ -1035,7 +1050,9 @@ children:
     difficulty:
     - 4
     kind: mechanism
-
+  arch:
+  - sm_90a
+  target_leaves: 12
 - id: flash_fwd_fa2
   name: FlashAttention-2 正向
   leaves:
@@ -1065,3 +1082,16 @@ children:
     - 3
     - 4
     kind: failure
+  target_leaves: 12
+- id: paged_kv_cache
+  name: Paged KV cache 与解码注意力
+  arch:
+  - any
+  target_leaves: 10
+  leaves: []
+- id: moe_grouped_gemm
+  name: MoE 路由与 grouped GEMM
+  arch:
+  - any
+  target_leaves: 10
+  leaves: []

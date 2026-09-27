@@ -1,5 +1,6 @@
 id: T16
 name: CUDA 内存模型与一致性
+weight: 1.0
 children:
 - id: memory_scopes
   name: 作用域与可见性
@@ -100,6 +101,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: release_acquire
   name: release/acquire 序
   leaves:
@@ -197,6 +199,7 @@ children:
     hints:
     - flag.store(1, release); data=x;
     - 消费者 while(!flag.load(acquire)); use data
+  target_leaves: 12
 - id: volatile_atomic
   name: volatile 与 atomic
   leaves:
@@ -290,6 +293,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 12
 - id: fences_barriers
   name: fence 与 barrier
   leaves:
@@ -384,6 +388,7 @@ children:
     difficulty:
     - 2
     kind: mechanism
+  target_leaves: 12
 - id: cross_unit_visibility
   name: 跨单元可见性
   leaves:
@@ -478,6 +483,7 @@ children:
     - 2
     - 3
     kind: failure
+  target_leaves: 12
 - id: cuda_std_atomic
   name: cuda::std::atomic
   leaves:
@@ -552,6 +558,7 @@ children:
     - 2
     - 3
     kind: mechanism
+  target_leaves: 12
 - id: mapped_host_vis
   name: mapped host 可见性
   leaves:
@@ -629,6 +636,7 @@ children:
     - 3
     - 4
     kind: mechanism
+  target_leaves: 12
 - id: rmw_cas_orders
   name: RMW 与 CAS 序
   leaves:
@@ -706,6 +714,7 @@ children:
     - 2
     - 3
     kind: formula
+  target_leaves: 12
 - id: litmus_hb
   name: happens-before 与 litmus
   leaves:
@@ -778,6 +787,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 12
 - id: async_proxy_mm
   name: async proxy 内存模型
   leaves:
@@ -852,6 +862,11 @@ children:
     difficulty:
     - 4
     kind: mechanism
+  arch:
+  - sm_90
+  - sm_90a
+  - sm_100a
+  target_leaves: 12
 - id: seq_cst_sc
   name: seq_cst 与 SC fence
   leaves:
@@ -922,6 +937,7 @@ children:
     difficulty:
     - 4
     kind: mechanism
+  target_leaves: 12
 - id: peer_p2p_vis
   name: P2P 与多 GPU 可见性
   leaves:
@@ -994,6 +1010,7 @@ children:
     difficulty:
     - 3
     kind: feature
+  target_leaves: 12
 - id: const_local_mm
   name: constant/local 与别名
   leaves:
@@ -1068,3 +1085,4 @@ children:
     - 2
     - 3
     kind: api
+  target_leaves: 12

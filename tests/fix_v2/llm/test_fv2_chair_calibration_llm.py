@@ -40,7 +40,7 @@ def test_chair_calibration(real_runtime, repo_root, eval_out):
         by.setdefault(r["case"], set()).add(r["action"])
     stability = sum(len(v) == 1 for v in by.values()) / len(by)
     metrics = {"FAR": far, "FRR": frr, "pending": pend, "defect_recall": recall, "stability": stability,
-               "repeats": repeats, "strict": strict, "independent_review": real_runtime.settings.review_model != real_runtime.settings.nvidia_model}
+               "repeats": repeats, "strict": strict, "independent_review": real_runtime.settings.review_model != real_runtime.settings.llm_model}
     (eval_out / "chair_calibration_metrics.json").write_text(json.dumps(metrics, indent=1), encoding="utf-8")
     if strict:
         assert far <= 0.05 and frr <= 0.10 and pend <= 0.15 and recall >= 0.80 and stability >= 0.95, metrics

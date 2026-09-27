@@ -1,112 +1,70 @@
-# Planner 抽一条写入 brief.angle。条目可以是字符串或卡片。
+# Per question_type ask-shapes consumed by planner/sampling.load_angles(). Each card:
+# id, ask, kinds (leaf kinds it suits), formats (answer_formats it suits), must_have, must_not.
 angles:
-  debug:
-    - id: divergent_deadlock
-      ask: 发散死锁：同步或分支只被部分线程走到，问会怎样、为什么
-      must_have: [代码或伪代码里的部分线程路径, 可观察后果（死锁/静默错/UB）]
-      must_not: [笼统的 "这段代码有什么问题"]
-      kinds: [failure, mechanism]
-    - id: ub_mask
-      ask: 未定义行为：错误 mask / 错误 launch / 错误 scope，问是否 UB
-      must_have: [具体 API 或 mask/scope]
-      kinds: [failure, api]
-    - id: silent_wrong
-      ask: 静默错误：结果看起来能跑但数值或访存已错，问根因
-      kinds: [failure]
-    - id: race_async
-      ask: 竞态：async copy 未 wait、缺 barrier，问数据何时可见
-      kinds: [failure, mechanism]
-  syntax:
-    - id: which_compiles
-      ask: 哪条能编译：给 2～3 个片段，指出合法/非法
-      artifacts: [code]
-      kinds: [api]
-    - id: missing_qualifier
-      ask: 缺限定符：少写 __device__/__global__/__restrict__ 的后果
-      kinds: [api, failure]
-    - id: launch_param
-      ask: launch 参数：<<<>>> 或 cluster 维度某个参数的精确含义
-      kinds: [api, feature]
-  code_complete:
-    - id: fill_sync
-      ask: 补一行同步：barrier / mbarrier / __syncwarp
-      artifacts: [code]
-      kinds: [failure, api]
-    - id: fill_tma_wait
-      ask: 补 TMA wait：commit_group 与 wait_group 配对
-      kinds: [feature, failure]
-    - id: fill_partition
-      ask: 补 partition：TiledCopy/TiledMMA 缺的那一次 partition
-      kinds: [mechanism, api]
-  layout:
-    - id: composition_shape
-      ask: 求 composition 后的 Shape/Stride
-      kinds: [formula, mechanism]
-      must_have: [具体 Shape 与 Stride]
-    - id: bank_map
-      ask: 画出或说明 shared memory bank 映射
-      kinds: [formula, mechanism]
-    - id: tma_align
-      ask: 判断给定 stride 是否满足 TMA/向量化对齐
-      kinds: [feature, formula]
-  optimization:
-    - id: ilp_vs_tlp
-      ask: 选 ILP 还是 TLP：给出占用与延迟，问该加独立访存还是加 warp
-      kinds: [numeric, mechanism]
-    - id: txn_count
-      ask: 算合并事务次数：给 warp 访问模式，问 32B/128B 事务数
-      kinds: [formula, numeric]
-    - id: fusion_side
-      ask: 融合副作用：kernel fusion 对寄存器/occupancy 的影响
-      kinds: [numeric, mechanism]
-  profiling:
-    - id: stall_reason
-      ask: 哪个 stall reason 会上升，代码该怎么改
-      kinds: [mechanism, failure]
-    - id: sol_pipe
-      ask: 哪条 SOL 管道（l1tex/dram/tensor）是瓶颈
-      kinds: [mechanism]
-    - id: occ_faster
-      ask: occupancy 升高是否一定更快，用指标说明
-      kinds: [formula, numeric]
-    - id: counter_backsolve
-      ask: 公式回推：由计数器读数反推事务数、AI 或占用
-      kinds: [formula, numeric]
-  compare:
-    - id: api_semantics
-      ask: 两个 API 的语义差（如 syncthreads vs syncwarp）
-      kinds: [api, mechanism]
-    - id: arch_model
-      ask: 两代硬件同一算法的编程模型差
-      kinds: [feature, mechanism]
-    - id: mma_family
-      ask: WMMA / mma.sync / WGMMA / UMMA 谁适用
-      kinds: [feature, api]
-  counterfactual:
-    - id: change_stride
-      ask: 只改 stride，问 coalescing 或 TMA 是否仍合法
-      kinds: [formula, feature]
-    - id: change_dtype
-      ask: 只改 dtype，问 Tensor Core 形状与累加精度
-      kinds: [feature, numeric]
-    - id: drop_coop
-      ask: 去掉 cooperative launch，问 grid sync 是否仍合法
-      kinds: [api, failure]
   conceptual:
-    - id: causal_hw
-      ask: 机制因果：A 导致 B 的硬件/执行模型理由（禁止名词解释）
-      kinds: [mechanism]
-    - id: constraint_origin
-      ask: 约束从哪来：为什么必须 128B / 32-bank / warp-group
-      kinds: [mechanism, feature]
-    - id: visibility
-      ask: 可见性：内存在哪一层、谁能看到这次写
-      kinds: [mechanism, failure]
-    - id: formula_plug
-      ask: 公式代入：给出参数，求出占用/事务数/offset/bank/字节
-      kinds: [formula, numeric]
-      must_have: [可代入数字或符号, 唯一数值或符号答案]
-    - id: feature_bound
-      ask: 特性边界：某代硬件该功能的合法范围与硬约束（禁止宣传腔）
-      kinds: [feature]
-      must_have: [架构或 CUDA 版本门槛, 一条可证伪约束]
+    - {id: con_why_constraint, ask: "给出一个具体现象，问其硬件/执行模型原因", kinds: [mechanism, feature], formats: [short_answer, single_choice],
+       must_have: ["具体现象或代码", "可证伪的原因"], must_not: ["名词解释"]}
+    - {id: con_plug_numbers, ask: "给定参数计算唯一结果", kinds: [formula, numeric], formats: [numeric, multi_numeric],
+       must_have: ["全部输入与单位", "朴素算法会得到不同值"], must_not: ["写出公式本身"]}
+    - {id: con_true_false_set, ask: "多个陈述中选出全部正确项", kinds: [feature, mechanism, api], formats: [multi_choice],
+       must_have: ["每个错误项对应一种误解"], must_not: ["全对或全错"]}
+    - {id: con_reverse, ask: "给出结果反求缺失参数", kinds: [formula, numeric], formats: [numeric, multi_numeric],
+       must_have: ["唯一可反解"], must_not: ["多解"]}
+  syntax:
+    - {id: syn_legal_set, ask: "判断多条调用/PTX 中哪些合法", kinds: [api, feature], formats: [multi_choice, single_choice],
+       must_have: ["2-5 条片段", "合法性差异源于一个具体规则"], must_not: ["编造的 API"]}
+    - {id: syn_param_value, ask: "填写使调用合法的参数/属性值", kinds: [api], formats: [fill_in, short_answer],
+       must_have: ["具体上下文与数值"], must_not: ["格式示例含答案"]}
+    - {id: syn_return_code, ask: "给定调用序列，问返回的错误/状态", kinds: [api, failure], formats: [short_answer, single_choice],
+       must_have: ["完整调用序列"], must_not: ["依赖未写明的环境"]}
+  code_complete:
+    - {id: cc_fill_sync, ask: "补全缺失的同步/等待语句", kinds: [mechanism, failure], formats: [fill_in, code_complete],
+       must_have: ["骨架代码", "空位 ≤3"], must_not: ["注释提示答案"]}
+    - {id: cc_fill_args, ask: "补全调用参数（维度/leading dim/字节数）", kinds: [api, formula], formats: [fill_in],
+       must_have: ["存储布局与尺寸"], must_not: ["多解"]}
+    - {id: cc_fill_index, ask: "补全索引/地址计算表达式", kinds: [formula, numeric], formats: [fill_in, code_complete],
+       must_have: ["layout 或访问约束"], must_not: []}
+  debug:
+    - {id: dbg_observable, ask: "给出缺陷代码，问可观察后果与最小修复", kinds: [failure], formats: [code_fix, short_answer],
+       must_have: ["≤30 行代码", "单一根因"], must_not: ["'有什么问题'无限定", "UB 写成确定结果"]}
+    - {id: dbg_tool_output, ask: "给出工具报告/现象，定位根因", kinds: [failure, api], formats: [short_answer, single_choice],
+       must_have: ["真实工具名与报告类型"], must_not: ["编造报告字段"]}
+    - {id: dbg_ub_classify, ask: "判断代码行为是否被定义并说明", kinds: [failure, mechanism], formats: [single_choice, short_answer],
+       must_have: ["UB/合法的精确界定"], must_not: []}
+  optimization:
+    - {id: opt_given_metrics, ask: "给定剖析数据，判断某优化是否有效并给依据", kinds: [mechanism, numeric], formats: [short_answer],
+       must_have: ["具体指标数值"], must_not: ["无数字的'如何优化'"]}
+    - {id: opt_compare_counts, ask: "比较两种实现的指令/事务/字节数", kinds: [numeric, formula], formats: [multi_numeric],
+       must_have: ["两个具体实现"], must_not: []}
+    - {id: opt_constraint_violation, ask: "某优化引入的约束违规及后果", kinds: [api, failure], formats: [short_answer, code_fix],
+       must_have: ["具体优化手段"], must_not: []}
+  layout:
+    - {id: lay_offset, ask: "计算 Layout 在给定坐标/索引的 offset", kinds: [formula], formats: [multi_numeric],
+       must_have: ["Shape:Stride", "至少一个 1-D 索引"], must_not: []}
+    - {id: lay_bank_swizzle, ask: "计算 bank 冲突路数或 swizzle 后地址", kinds: [mechanism, formula], formats: [multi_numeric],
+       must_have: ["行字节数与访问集合"], must_not: []}
+    - {id: lay_property, ask: "判断 layout 性质（双射、cosize、可合并）", kinds: [formula, mechanism], formats: [short_answer, multi_choice],
+       must_have: ["具体 layout"], must_not: []}
+    - {id: lay_tma_box, ask: "判断 TMA box/stride/swizzle 配置合法性", kinds: [feature, api], formats: [multi_choice],
+       must_have: ["dtype、globalDim、boxDim、swizzle"], must_not: []}
+  compare:
+    - {id: cmp_arch_gate, ask: "同一需求在两个架构上的合法实现与差异", kinds: [feature], formats: [short_answer, multi_choice],
+       must_have: ["两个具名架构"], must_not: ["'新架构更快'"]}
+    - {id: cmp_two_apis, ask: "两个 API/格式在一个可观察量上的差异", kinds: [api, numeric, mechanism], formats: [multi_numeric, short_answer],
+       must_have: ["同一场景下的两种写法"], must_not: []}
+    - {id: cmp_semantics, ask: "三种配置下的执行/同步语义对照", kinds: [mechanism], formats: [short_answer],
+       must_have: ["逐一编号的配置"], must_not: []}
+  counterfactual:
+    - {id: cf_remove_one, ask: "删除/修改一处同步或参数，问新增的冒险或错误", kinds: [failure, mechanism], formats: [short_answer],
+       must_have: ["只改变一个前提并明确写出"], must_not: ["同时改多处"]}
+    - {id: cf_change_arch, ask: "同一代码换到另一架构，问哪一步失效", kinds: [feature], formats: [short_answer, single_choice],
+       must_have: ["两个架构"], must_not: []}
+    - {id: cf_edge_case, ask: "边界输入（尾块、越界 tile）下结果是否变化", kinds: [numeric, failure], formats: [multi_numeric, short_answer],
+       must_have: ["具体边界数值"], must_not: []}
+  profiling:
+    - {id: prof_metric_value, ask: "给定访问模式，计算某具名指标的值或比值", kinds: [numeric, formula], formats: [multi_numeric],
+       must_have: ["真实指标名"], must_not: ["编造指标"]}
+    - {id: prof_metric_direction, ask: "改动后哪个具名指标变化、方向与原因", kinds: [mechanism, failure], formats: [short_answer],
+       must_have: ["改动前后代码"], must_not: []}
+    - {id: prof_timeline, ask: "解读 Nsight Systems 时间线现象的原因", kinds: [failure, mechanism], formats: [short_answer],
+       must_have: ["描述的时间线现象"], must_not: []}

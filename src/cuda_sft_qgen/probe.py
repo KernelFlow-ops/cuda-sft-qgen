@@ -1,4 +1,4 @@
-"""Live concurrency probes against the NVIDIA API key pool.
+"""Live concurrency probes against the configured API key pools.
 
 Used by ``cuda-sft-qgen probe-concurrency`` to confirm that LLM and embedding
 calls overlap across keys before a long generate run.
@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from cuda_sft_qgen.config import load_settings
-from cuda_sft_qgen.graph.app import run_pipeline
+from cuda_sft_qgen.graph.app import pipeline_lock, run_pipeline
 from cuda_sft_qgen.runtime import build_runtime, reset_runtime, set_runtime
 
 logger = logging.getLogger(__name__)
@@ -38,17 +38,25 @@ def probe_concurrency(data_dir: Path | None = None) -> dict:
         RuntimeError: If no real API keys are configured (fake mode is refused).
     """
     settings = load_settings(data_dir=data_dir)
-    if settings.fake_llm or not settings.nvidia_api_keys:
-        raise RuntimeError("Need real NVIDIA_API_KEY / _2 / _3 in .env")
+    missing = settings.missing_api_keys + settings.missing_api_fields
+    if settings.fake_llm or missing:
+        raise RuntimeError(f"Need real API configuration: {', '.join(missing)}")
+    with pipeline_lock(settings.data_dir):
+        return _probe_concurrency_locked(settings)
+
+
+def _probe_concurrency_locked(settings) -> dict:
     rt = build_runtime(settings)
     token = set_runtime(rt)
     try:
         assert rt.pool is not None
+        embed_pool = rt.embed_key_pool or rt.pool
         n_llm = rt.pool.llm_capacity
-        n_emb = rt.pool.embed_capacity
+        n_emb = embed_pool.embed_capacity
         logger.info(
-            "probe keys=%s llm_capacity=%s embed_capacity=%s",
+            "probe llm_keys=%s embed_keys=%s llm_capacity=%s embed_capacity=%s",
             rt.pool.n_keys,
+            embed_pool.n_keys,
             n_llm,
             n_emb,
         )
@@ -56,9 +64,9 @@ def probe_concurrency(data_dir: Path | None = None) -> dict:
         def llm_job(i: int) -> str:
             return rt.llm.complete(
                 [{"role": "user", "content": f"Reply with only the integer {i}."}],
-                thinking_level="none",
+                thinking_level=settings.thinking_level,
                 temperature=0.0,
-                max_tokens=16,
+                max_tokens=256,
             )
 
         def emb_job(i: int) -> int:
@@ -71,8 +79,8 @@ def probe_concurrency(data_dir: Path | None = None) -> dict:
         llm_keys = list(rt.pool.acquire_counts["llm"])
 
         emb_dt, emb_out = _run_parallel(n_emb, emb_job)
-        emb_peak = rt.pool.peak["embed"]
-        emb_keys = list(rt.pool.acquire_counts["embed"])
+        emb_peak = embed_pool.peak["embed"]
+        emb_keys = list(embed_pool.acquire_counts["embed"])
 
         mix_n = min(n_llm, 4) + min(n_emb, 4)
 
@@ -85,8 +93,9 @@ def probe_concurrency(data_dir: Path | None = None) -> dict:
 
         report = {
             "keys": rt.pool.n_keys,
+            "embed_keys": embed_pool.n_keys,
             "llm_per_key": rt.pool.llm_per_key,
-            "embed_per_key": rt.pool.embed_per_key,
+            "embed_per_key": embed_pool.embed_per_key,
             "llm_capacity": n_llm,
             "embed_capacity": n_emb,
             "llm_parallel_sec": round(llm_dt, 2),
@@ -100,8 +109,8 @@ def probe_concurrency(data_dir: Path | None = None) -> dict:
             "llm_overlap": llm_peak >= 2,
             "embed_overlap": emb_peak >= 2,
             "mixed_parallel_sec": round(mix_dt, 2),
-            "overlap_samples": rt.pool.overlap_samples,
-            "llm_embed_overlap": rt.pool.overlap_samples > 0,
+            "overlap_samples": rt.pool.overlap_samples if embed_pool is rt.pool else None,
+            "llm_embed_overlap": rt.pool.overlap_samples > 0 if embed_pool is rt.pool else None,
             "used_multiple_keys_llm": sum(1 for c in llm_keys if c > 0) >= min(2, rt.pool.n_keys),
             "stats_before_llm": llm_s,
             "prompt_cache": None if rt.prompt_cache is None else rt.prompt_cache.stats(),
@@ -118,23 +127,22 @@ def probe_concurrency(data_dir: Path | None = None) -> dict:
 def probe_pipeline(tmp: Path, *, target: int = 6, batch: int = 6) -> dict:
     """Run a tiny generate pipeline and report accepted counts plus pool overlap."""
     settings = load_settings(target=target, review_batch_size=batch, data_dir=tmp)
-    rt = build_runtime(settings)
-    token = set_runtime(rt)
-    try:
-        result = run_pipeline(settings, runtime=rt)
-        stats = None if rt.pool is None else rt.pool.stats()
-        return {
-            "accepted": result.get("accepted_count"),
-            "rejected": result.get("rejected_count"),
-            "pending": len(result.get("pending") or []),
-            "done": result.get("done"),
-            "status": result.get("status"),
-            "pool": stats,
-            "generate_overlap": bool(stats and stats["peak_llm"] >= 2),
-            "review_embed_overlap": bool(stats and stats["peak_embed"] >= 2),
-        }
-    finally:
-        reset_runtime(token)
-        closer = getattr(rt, "close", None)
-        if callable(closer):
-            closer()
+    with pipeline_lock(tmp):
+        rt = build_runtime(settings)
+        try:
+            result = run_pipeline(settings, runtime=rt, lock_held=True)
+            stats = None if rt.pool is None else rt.pool.stats()
+            embed_stats = None if rt.embed_key_pool is None else rt.embed_key_pool.stats()
+            return {
+                "accepted": result.get("accepted_count"),
+                "rejected": result.get("rejected_count"),
+                "pending": len(result.get("pending") or []),
+                "done": result.get("done"),
+                "status": result.get("status"),
+                "pool": stats,
+                "embed_pool": embed_stats,
+                "generate_overlap": bool(stats and stats["peak_llm"] >= 2),
+                "review_embed_overlap": bool(embed_stats and embed_stats["peak_embed"] >= 2),
+            }
+        finally:
+            rt.close()

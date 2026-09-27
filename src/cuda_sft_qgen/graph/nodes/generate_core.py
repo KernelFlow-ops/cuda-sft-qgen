@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -15,9 +16,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from cuda_sft_qgen.errors import JsonSalvageNeeded, RateLimitError
-from cuda_sft_qgen.jsonutil import normalize_language, parse_question_payload
+from cuda_sft_qgen.enums import ANSWER_FORMATS
+from cuda_sft_qgen.jsonutil import extract_complete_json_field, normalize_language, parse_question_payload
 from cuda_sft_qgen.keys import PRI_SALVAGE, PRI_WRITER
-from cuda_sft_qgen.llm import NvidiaLLM
+from cuda_sft_qgen.llm import FakeLLM, NvidiaLLM
 from cuda_sft_qgen.models import (
     PairPlan,
     Question,
@@ -27,7 +29,7 @@ from cuda_sft_qgen.models import (
     VerificationEvidence,
     VerificationSpec,
 )
-from cuda_sft_qgen.observability import get_metrics
+from cuda_sft_qgen.observability import agent_role, get_metrics
 from cuda_sft_qgen.prompts import load_prompt
 from cuda_sft_qgen.prompts.fewshot import FewshotCorpus
 from cuda_sft_qgen.prompts.structured_writer import StructuredPrompt
@@ -50,7 +52,7 @@ def _with_consistency_warning(question: Question) -> Question:
 
 @dataclass
 class GenerateOutcome:
-    """Result of one brief: ok question, salvage payload, retry, or hard fail."""
+    """Result of one brief: ok question, repair work, retry, or hard fail."""
 
     status: str
     question: Question | None = None
@@ -58,6 +60,7 @@ class GenerateOutcome:
     raw: str | None = None
     reason: str | None = None
     attempts: int = 1
+    writer_real_api: bool = False
 
 
 def retry_wait_sec(attempts: int) -> float:
@@ -78,7 +81,18 @@ def question_from_obj(
     question_text = str(obj.get("question") or "").strip()
     tests_claim = str(obj.get("tests_claim") or "").strip()
     language = normalize_language(obj.get("language"), fallback=brief.language)
-    warnings = obj.get("warnings") if isinstance(obj.get("warnings"), list) else []
+    warnings = list(obj.get("warnings")) if isinstance(obj.get("warnings"), list) else []
+    answer_format = str(obj.get("answer_format") or "").strip()
+    if brief.answer_format and answer_format != brief.answer_format:
+        warnings.append("answer_format_mismatch")
+        answer_format = brief.answer_format
+    elif answer_format not in ANSWER_FORMATS:
+        answer_format = brief.answer_format
+    draft_rationale = str(obj.get("draft_rationale") or "").strip() or None
+    raw_premises = obj.get("premise_check")
+    premise_check = [str(item) for item in raw_premises if str(item).strip()][:12] if isinstance(raw_premises, list) else []
+    if re.search(r"[\u4e00-\u9fff]", tests_claim):
+        warnings.append("tests_claim_not_english")
     raw_plan = obj.get("draft_plan")
     if isinstance(raw_plan, dict):
         draft_plan = {str(key): value for key, value in raw_plan.items()}
@@ -108,7 +122,10 @@ def question_from_obj(
             analyzed = SeedAnalysis.model_validate(seed_analysis)
             expected_domain = brief.topic_path[0] if brief.topic_path else ""
             if analyzed.domain_id and expected_domain and analyzed.domain_id != expected_domain:
-                validation_errors.append("seed_domain_mismatch")
+                if analyzed.domain_id == ".".join(brief.topic_path):
+                    draft_plan["seed_analysis"] = {**seed_analysis, "domain_id": expected_domain}
+                else:
+                    validation_errors.append("seed_domain_mismatch")
         except Exception as exc:
             validation_errors.append(f"invalid_seed_analysis:{type(exc).__name__}")
     if not isinstance(pair_plan, dict):
@@ -125,6 +142,10 @@ def question_from_obj(
             validation_errors.append(f"invalid_pair_plan:{type(exc).__name__}")
     if not draft_target:
         validation_errors.append("missing_draft_target")
+    if not draft_rationale:
+        validation_errors.append("missing_draft_rationale")
+    if not premise_check:
+        validation_errors.append("missing_premise_check")
     raw_spec = obj.get("verification_spec")
     verification_spec = dict(raw_spec) if isinstance(raw_spec, dict) else {}
     if not verification_spec:
@@ -141,6 +162,7 @@ def question_from_obj(
     mixup = brief.knowledge_context.get("mixup") if isinstance(brief.knowledge_context, dict) else None
     mixup = mixup if isinstance(mixup, dict) else {}
     provenance = dict(generation_provenance or {})
+    provenance.setdefault("writer_real_api", False)
     if provenance.get("structured_cot") is False:
         # Explicit baseline/legacy Writer mode does not request private fields.
         # Malformed fields that *are* supplied remain visible for review.
@@ -164,6 +186,11 @@ def question_from_obj(
         "hardware": brief.hardware,
         "granularity": brief.granularity,
         "language": brief.language,
+        "answer_format": brief.answer_format,
+        "scenario": brief.scenario,
+        "arch_target": brief.arch_target,
+        "operator": brief.operator,
+        "exploration": brief.exploration,
         "kind": brief.kind,
         "role": brief.role,
         "seed_id": brief.seed_id,
@@ -200,6 +227,12 @@ def question_from_obj(
         hardware=brief.hardware,
         granularity=brief.granularity,
         language=language,
+        answer_format=answer_format,
+        scenario=brief.scenario,
+        arch_target=brief.arch_target,
+        draft_rationale=draft_rationale,
+        premise_check=premise_check,
+        exploration=brief.exploration,
         template_fingerprint=fp.skeleton,
         simhash=fp.simhash,
         exact_hash=fp.exact,
@@ -246,6 +279,8 @@ def generate_from_brief(
 ) -> Question:
     """Call the writer/evolver LLM and parse a question; may raise JsonSalvageNeeded."""
     rt = get_runtime()
+    if isinstance(rt.llm, FakeLLM):
+        raise RuntimeError("Question generation requires a real LLM API client")
     context = brief.knowledge_context or {}
     get_metrics().observe("knowledge_context_chars", len(json.dumps(context, ensure_ascii=False)))
     anti_k = int(rt.settings.generation.get("anti_templates_max", 15))
@@ -256,15 +291,15 @@ def generate_from_brief(
         builder = StructuredPrompt(
             rt.settings, corpus, cache=getattr(rt, "prompt_cache", None)
         )
-    else:
-        builder.corpus = corpus
-    bundle = builder.build(brief, steering)
+    bundle = builder.build(brief, steering, corpus=corpus)
     source = "evolver" if brief.role == "evolver" and brief.seed_question else "writer"
+    generator = (rt.evolver_llm or rt.llm) if source == "evolver" else rt.llm
+    api = rt.settings.agent_apis[source]
     user = bundle.user
     if repair_note:
         user = (
             user
-            + "\n\nThe previous draft was rejected before review for this defect:\n"
+            + "\n\nA previous draft failed a quality check for this defect:\n"
             + str(repair_note).strip()[:400]
             + "\nRewrite ONE new question for the same brief. Keep the leaf claim. "
             "Fix the defect. Return JSON only."
@@ -273,12 +308,16 @@ def generate_from_brief(
         {"role": "system", "content": bundle.system},
         {"role": "user", "content": user},
     ]
-    raw = rt.llm.complete(
-        messages,
-        priority=PRI_WRITER,
-        prompt_cache_key=bundle.cache_key or None,
-        thinking_level=rt.settings.writer_thinking_level,
-    )
+    with agent_role(source):
+        raw = generator.complete(
+            messages,
+            priority=PRI_WRITER,
+            prompt_cache_key=bundle.cache_key or None,
+            thinking_level=(
+                rt.settings.evolver_thinking_level if source == "evolver"
+                else rt.settings.writer_thinking_level
+            ),
+        )
     obj = parse_question_payload(
         raw,
         fallback_claim=brief.l3_claim,
@@ -289,20 +328,15 @@ def generate_from_brief(
         raise JsonSalvageNeeded(raw, brief.model_dump())
     question = question_from_obj(
         brief, obj, source=source,
-        generation_provenance=getattr(bundle, "generation_provenance", None),
+        generation_provenance={
+            **(getattr(bundle, "generation_provenance", None) or {}),
+            "writer_real_api": not rt.settings.fake_llm and isinstance(generator, NvidiaLLM),
+            "writer_provider": api.provider,
+            "writer_model": api.model,
+        },
     )
     if len(question.question) > rt.settings.question_max_chars:
-        raise JsonSalvageNeeded(
-            json.dumps(
-                {
-                    "question": question.question,
-                    "tests_claim": question.tests_claim,
-                    "language": question.language,
-                },
-                ensure_ascii=False,
-            ),
-            brief.model_dump(),
-        )
+        raise JsonSalvageNeeded(json.dumps(obj, ensure_ascii=False), brief.model_dump())
     return question
 
 
@@ -312,6 +346,7 @@ def _safe_generate(
     *,
     attempts: int = 1,
     corpus: FewshotCorpus | None = None,
+    defer_rewrite: bool = False,
 ) -> GenerateOutcome:
     """Generate one question and map exceptions onto retry/salvage/hard-fail."""
     brief = QuestionBrief.model_validate(brief_data)
@@ -333,6 +368,10 @@ def _safe_generate(
             raw=exc.raw,
             reason="json_parse",
             attempts=attempts,
+            writer_real_api=not rt.settings.fake_llm and isinstance(
+                (rt.evolver_llm or rt.llm) if brief.role == "evolver" and brief.seed_question else rt.llm,
+                NvidiaLLM,
+            ),
         )
     except Exception as exc:  # noqa: BLE001
         if NvidiaLLM._is_rate_limit(exc):
@@ -368,7 +407,8 @@ def _safe_generate(
         rt.store.append_rejected(question)
         return GenerateOutcome(status="hard_fail", brief=brief.model_dump(), reason=reason, attempts=attempts)
     return _gate_or_rewrite(
-        question, brief, steering, corpus=corpus, attempts=attempts
+        question, brief, steering, corpus=corpus, attempts=attempts,
+        defer_rewrite=defer_rewrite,
     )
 
 
@@ -398,11 +438,14 @@ def _rewrite_enabled(settings: Any) -> bool:
 
 def _run_writer_gate(question: Question, settings: Any, llm: Any) -> str | None:
     """Local then optional LLM gate. FakeLLM skips the LLM critic."""
-    use_llm = _gate_enabled(settings) and not bool(getattr(settings, "fake_llm", False))
+    use_llm = (_gate_enabled(settings)
+               and bool(settings.generation.get("writer_gate_llm", False))
+               and not bool(getattr(settings, "fake_llm", False)))
     max_tokens = int(settings.generation.get("writer_gate_max_tokens", 512) or 512)
-    return writer_gate_reason(
-        question, llm if use_llm else None, use_llm=use_llm, max_tokens=max_tokens
-    )
+    with agent_role("writer_gate"):
+        return writer_gate_reason(
+            question, llm if use_llm else None, use_llm=use_llm, max_tokens=max_tokens
+        )
 
 
 def _reject_draft(question: Question, brief: QuestionBrief, reason: str, attempts: int) -> GenerateOutcome:
@@ -423,6 +466,7 @@ def _gate_or_rewrite(
     *,
     corpus: FewshotCorpus | None,
     attempts: int,
+    defer_rewrite: bool = False,
 ) -> GenerateOutcome:
     """Pass, rewrite once on a certain defect, or reject without a chair call."""
     rt = get_runtime()
@@ -438,6 +482,25 @@ def _gate_or_rewrite(
     if not _rewrite_enabled(rt.settings):
         return _reject_draft(question, brief, reason, attempts)
     logger.info("writer_gate rewrite l3=%s reason=%s", brief.l3_id, reason[:160])
+    if defer_rewrite:
+        return GenerateOutcome(
+            status="repair", question=question, brief=brief.model_dump(),
+            reason=reason, attempts=attempts,
+        )
+    return _rewrite_draft(question, brief, steering, reason, corpus=corpus, attempts=attempts)
+
+
+def _rewrite_draft(
+    question: Question,
+    brief: QuestionBrief,
+    steering: SteeringBrief,
+    reason: str,
+    *,
+    corpus: FewshotCorpus | None,
+    attempts: int,
+) -> GenerateOutcome:
+    """Use one real Writer call to repair a gated draft, then recheck it."""
+    rt = get_runtime()
     try:
         rewritten = generate_from_brief(
             brief, steering, corpus=corpus, repair_note=reason
@@ -462,6 +525,46 @@ def _gate_or_rewrite(
     )
 
 
+def rewrite_item(item: dict[str, Any]) -> GenerateOutcome:
+    """Run a deferred pre-chair rewrite on the repair worker."""
+    brief = QuestionBrief.model_validate(item["brief"])
+    question = Question.model_validate(item["question"])
+    steering = SteeringBrief.model_validate(item.get("steering") or {})
+    return _rewrite_draft(
+        question, brief, steering, str(item.get("reason") or "writer_gate"),
+        corpus=None, attempts=int(item.get("attempts") or 1),
+    )
+
+
+def review_repair_item(item: dict[str, Any]) -> GenerateOutcome:
+    """Regenerate one rejected item from its original brief and review feedback."""
+    rt = get_runtime()
+    brief = QuestionBrief.model_validate(item["brief"])
+    steering = SteeringBrief.model_validate(item.get("steering") or {})
+    attempts = int(item.get("attempts") or 1)
+    try:
+        question = generate_from_brief(
+            brief, steering, repair_note=str(item.get("reason") or "quality review")
+        )
+    except (RateLimitError, JsonSalvageNeeded):
+        return GenerateOutcome(status="retry", brief=brief.model_dump(),
+                               reason="review_repair_api", attempts=attempts)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("review repair deferred error=%s", type(exc).__name__)
+        return GenerateOutcome(status="retry", brief=brief.model_dump(),
+                               reason=f"review_repair_error:{type(exc).__name__}", attempts=attempts)
+    reason = sieve_question(question, rt.settings, rt.llm)
+    if reason:
+        return _reject_draft(question, brief, reason, attempts)
+    outcome = _gate_or_rewrite(
+        question, brief, steering, corpus=None, attempts=attempts
+    )
+    if outcome.status == "ok" and outcome.question is not None:
+        outcome.question.generation_provenance["review_repair_of"] = str(item["source_id"])
+        outcome.question.generation_provenance["review_repair_attempt"] = attempts
+    return outcome
+
+
 def salvage_item(item: dict[str, Any]) -> GenerateOutcome:
     """Repair one broken JSON payload locally, optionally with a salvage LLM call."""
     rt = get_runtime()
@@ -474,7 +577,15 @@ def salvage_item(item: dict[str, Any]) -> GenerateOutcome:
         keep_truncated=rt.settings.json_keep_truncated,
     )
     if obj and str(obj.get("question") or "").strip():
-        q = question_from_obj(brief, obj, source=brief.role)
+        q = question_from_obj(
+            brief, obj, source=brief.role,
+            generation_provenance={
+                "structured_cot": bool(rt.settings.generation.get("prompt_cot", True)),
+                "salvaged": True, "writer_real_api": item.get("writer_real_api") is True,
+                "writer_provider": rt.settings.agent_apis["evolver" if brief.role == "evolver" else "writer"].provider,
+                "writer_model": rt.settings.agent_apis["evolver" if brief.role == "evolver" else "writer"].model,
+            },
+        )
         reason = sieve_question(q, rt.settings, rt.llm)
         if reason:
             q.reject_reason = reason
@@ -489,6 +600,10 @@ def salvage_item(item: dict[str, Any]) -> GenerateOutcome:
             reason="json_parse",
             attempts=1,
         )
+    original_question = extract_complete_json_field(raw, "question")
+    if not isinstance(original_question, str) or not original_question.strip():
+        return GenerateOutcome(status="retry", brief=brief.model_dump(),
+                               reason="salvage_question_unverifiable", attempts=1)
     # Conceptual stems are cheap to redraw; a salvage LLM call often invents tests_claim.
     if (brief.kind or "") == "conceptual" and len(raw) < max(800, rt.settings.question_min_chars * 8):
         logger.warning("salvage skip conceptual short dump raw_chars=%s", len(raw))
@@ -518,15 +633,16 @@ def salvage_item(item: dict[str, Any]) -> GenerateOutcome:
     last_err: str | None = f"local parse failed raw_chars={len(raw)}"
     for _ in range(max(1, rt.settings.salvage_llm_attempts)):
         try:
-            text = rt.llm.complete(
-                [
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": "Return the repaired JSON object now."},
-                ],
-                thinking_level=rt.settings.salvage_thinking_level,
-                max_tokens=rt.settings.salvage_max_tokens,
-                priority=PRI_SALVAGE,
-            )
+            with agent_role("salvage"):
+                text = (rt.salvage_llm or rt.llm).complete(
+                    [
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": "Return the repaired JSON object now."},
+                    ],
+                    thinking_level=rt.settings.salvage_thinking_level,
+                    max_tokens=rt.settings.salvage_max_tokens,
+                    priority=PRI_SALVAGE,
+                )
         except RateLimitError:
             return GenerateOutcome(
                 status="retry",
@@ -544,7 +660,24 @@ def salvage_item(item: dict[str, Any]) -> GenerateOutcome:
             keep_truncated=rt.settings.json_keep_truncated,
         )
         if obj and str(obj.get("question") or "").strip():
-            q = question_from_obj(brief, obj, source=brief.role)
+            if str(obj["question"]).strip() != original_question.strip():
+                last_err = "salvage_changed_question"
+                continue
+            preserved_keys = ("tests_claim", "language", "answer_format", "draft_target",
+                              "draft_rationale", "premise_check", "verification_spec", "draft_plan")
+            if any(extract_complete_json_field(raw, key) != obj.get(key)
+                   for key in preserved_keys if key in obj):
+                last_err = "salvage_changed_field"
+                continue
+            q = question_from_obj(
+                brief, obj, source=brief.role,
+                generation_provenance={
+                    "structured_cot": bool(rt.settings.generation.get("prompt_cot", True)),
+                    "salvaged": True, "writer_real_api": item.get("writer_real_api") is True,
+                    "writer_provider": rt.settings.agent_apis["evolver" if brief.role == "evolver" else "writer"].provider,
+                    "writer_model": rt.settings.agent_apis["evolver" if brief.role == "evolver" else "writer"].model,
+                },
+            )
             reason = sieve_question(q, rt.settings, rt.llm)
             if reason:
                 q.reject_reason = reason
@@ -567,15 +700,20 @@ def generate_or_salvage(
     *,
     attempts: int = 1,
     corpus: FewshotCorpus | None = None,
+    defer_rewrite: bool = False,
 ) -> GenerateOutcome:
     """Generate, and if salvage_inline is set, immediately repair JSON failures."""
-    outcome = _safe_generate(brief_data, steering, attempts=attempts, corpus=corpus)
+    outcome = _safe_generate(
+        brief_data, steering, attempts=attempts, corpus=corpus,
+        defer_rewrite=defer_rewrite,
+    )
     if (
         outcome.status == "salvage"
         and outcome.brief is not None
         and get_runtime().settings.salvage_inline
     ):
-        return salvage_item({"brief": outcome.brief, "raw": outcome.raw or ""})
+        return salvage_item({"brief": outcome.brief, "raw": outcome.raw or "",
+                             "writer_real_api": outcome.writer_real_api})
     return outcome
 
 
@@ -622,6 +760,8 @@ def apply_outcome(
     pending: list[dict],
     salvage_items: list[dict],
     lock: threading.Lock,
+    repair_items: list[dict] | None = None,
+    steering: SteeringBrief | None = None,
 ) -> str:
     """Fold an outcome into pending/salvage/retry under ``lock``. Returns status."""
     rt = get_runtime()
@@ -641,13 +781,27 @@ def apply_outcome(
         complete_task()
         return "ok"
     if outcome.status == "salvage" and outcome.brief is not None:
-        item = {"brief": outcome.brief, "raw": outcome.raw or ""}
+        item = {"brief": outcome.brief, "raw": outcome.raw or "",
+                "writer_real_api": outcome.writer_real_api}
         with lock:
             salvage_items.append(item)
             rt.store.append_salvage_raw(
                 {"reason": "json_parse", "raw": outcome.raw or "", "brief": outcome.brief}
             )
         return "salvage"
+    if outcome.status == "repair" and outcome.brief is not None and outcome.question is not None:
+        item = {
+            "brief": outcome.brief,
+            "question": outcome.question.model_dump(),
+            "reason": outcome.reason or "writer_gate",
+            "attempts": outcome.attempts,
+            "steering": (steering or SteeringBrief()).model_dump(),
+        }
+        if repair_items is None:
+            raise ValueError("deferred rewrite requires a repair queue")
+        with lock:
+            repair_items.append(item)
+        return "repair"
     if outcome.status == "retry" and outcome.brief is not None:
         enqueue_retry(outcome.brief, reason=outcome.reason or "429", attempts=outcome.attempts)
         complete_task()

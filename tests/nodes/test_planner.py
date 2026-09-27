@@ -28,7 +28,7 @@ def test_planner_node_target_reached(fake_runtime, sample_question):
     assert result["done"] is True
     assert result["batch_briefs"] == []
     assert result["status"] == "target_reached"
-    assert result["iteration"] == 6
+    assert result["iteration"] == 5
 
 
 def test_planner_node_basic_plan(fake_runtime, sample_question, sample_steering_brief):
@@ -149,3 +149,26 @@ def test_planner_node_near_target(fake_runtime, sample_question, sample_steering
     min_batch = fake_runtime.settings.min_generate_batch
     assert 1 <= len(result["batch_briefs"]) <= max(5, min_batch)
     assert result["done"] is False
+
+
+def test_sequential_planner_does_not_pad_past_pending_room(fake_runtime, sample_question):
+    set_runtime(fake_runtime)
+    fake_runtime.settings.generation["min_generate_batch"] = 4
+    fake_runtime.settings.review.update(queue_capacity=5, max_pending_total=5)
+    state = {
+        "accepted_count": 0,
+        "pending": [sample_question(id=f"pending-{i}").model_dump() for i in range(4)],
+        "target": 100,
+        "review_batch_size": 5,
+        "iteration": 0,
+    }
+    result = planner_node(state)
+    assert len(result["batch_briefs"]) == 1
+
+
+def test_sequential_planner_does_not_pad_past_target(fake_runtime):
+    set_runtime(fake_runtime)
+    fake_runtime.settings.generation["min_generate_batch"] = 4
+    result = planner_node({"accepted_count": 4, "pending": [], "target": 5,
+                           "review_batch_size": 5, "iteration": 0})
+    assert len(result["batch_briefs"]) == 1

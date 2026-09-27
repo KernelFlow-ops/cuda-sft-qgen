@@ -88,6 +88,15 @@ def build_diversity_report(
     diffs = _hist(str(q.difficulty) for q in pool)
     hw = _hist(q.hardware for q in pool)
     gran = _hist(q.granularity for q in pool)
+    formats = _hist(q.answer_format or "-" for q in pool)
+    scenarios = _hist(q.scenario or "generic" for q in pool)
+    arches = _hist(q.arch_target or "any" for q in pool)
+    cells = Counter((".".join(q.topic_path[:2]), q.kind or "mechanism", q.question_type,
+                     q.answer_format or "-", q.arch_target or "any") for q in pool)
+    max_cell_share = max(cells.values()) / len(pool) if pool else 0.0
+    assessed = [q for q in accepted if q.requested_metadata.get("difficulty") is not None]
+    agreement = (sum(int(q.requested_metadata["difficulty"]) == int(q.difficulty) for q in assessed)
+                 / len(assessed)) if assessed else None
 
     l2_keys = taxonomy.l2_keys()
     l2_counts = Counter(
@@ -126,6 +135,10 @@ def build_diversity_report(
         target_each = max(total / max(len(l2_keys), 1), leaf_min)
         if count > overrep_factor * target_each:
             over.append(key)
+    if max_cell_share > 0.05:
+        dominant_l2 = cells.most_common(1)[0][0][0]
+        if dominant_l2 not in over:
+            over.append(dominant_l2)
 
     notes: list[str] = []
     if kl_l1 > kl_alert:
@@ -138,6 +151,10 @@ def build_diversity_report(
         notes.append(f"L2 coverage={coverage:.2f}")
     if mean_nn_cosine is not None and mean_nn_cosine > 0.80:
         notes.append(f"mean NN cosine={mean_nn_cosine:.3f} (question phrasing collapsing)")
+    if max_cell_share > 0.05:
+        notes.append(f"max_cell_share={max_cell_share:.3f}")
+    if agreement is not None and agreement < 0.7:
+        notes.append(f"requested_vs_assessed_agreement={agreement:.2f}")
 
     return DiversityReport(
         accepted_count=len(accepted),
@@ -157,6 +174,12 @@ def build_diversity_report(
         underrepresented=under,
         overrepresented=over,
         notes=notes,
+        format_hist=formats,
+        scenario_hist=scenarios,
+        arch_hist=arches,
+        joint_cells=len(cells),
+        max_cell_share=max_cell_share,
+        requested_vs_assessed_agreement=agreement,
     )
 
 
@@ -184,6 +207,13 @@ def steering_from_report(
     elif easy == 0 and hard > (dhist.get("2", 0)):
         nudge = "down"
     notes = "; ".join(report.notes) if report.notes else "keep generating answerable, non-template questions"
+    format_target = quotas.get("answer_format") or {}
+    if format_target:
+        total_formats = sum(report.format_hist.values()) or 1
+        missing = sorted(name for name, target in format_target.items()
+                         if report.format_hist.get(name, 0) / total_formats < float(target) * 0.6)
+        if missing:
+            notes += "; formats_under_target: " + ",".join(missing)
     return SteeringBrief(
         underrepresented=report.underrepresented[:12],
         overrepresented=report.overrepresented[:12],

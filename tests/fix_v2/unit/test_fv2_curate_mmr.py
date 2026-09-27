@@ -19,11 +19,11 @@ def _items(rips, scores=None, same_bucket=True):
     return scored, results
 
 
-def test_keeps_three_prefers_harder_on_ties():
+def test_keeps_three_prefers_stronger_rubric_support_on_ties():
     from cuda_sft_qgen.graph.nodes.review_chair import _curate_select
     scored, results = _items([1.0, 0.9, 0.6, 0.5])
     not_sel, below = _curate_select(scored, results, SETTINGS, None)
-    assert below == set() and not_sel == {"q0"}
+    assert below == set() and not_sel == {"q3"}
 
 
 def test_rip_below_min_is_pending_not_rejected():
@@ -52,4 +52,4 @@ def test_disabled_and_alias():
     scored, results = _items([1.0, 0.9, 0.6, 0.5])
     off = SimpleNamespace(review={**SETTINGS.review, "rip_enabled": False})
     assert _curate_select(scored, results, off, None) == (set(), set())
-    assert _rip_select(scored, results, SETTINGS) == {"q0"}
+    assert _rip_select(scored, results, SETTINGS) == {"q3"}

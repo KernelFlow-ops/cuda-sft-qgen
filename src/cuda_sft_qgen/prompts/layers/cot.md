@@ -1,4 +1,4 @@
-## Construction procedure (reason privately; expose only the concise private fields of the JSON contract)
+## Construction procedure (reason privately; expose only the concise private fields of the output schema)
 1. Analyze: restate CLAIM as a checkable proposition; list what the student must compute/decide to reach it.
    Decide which facts are GIVENS and which one is the ANSWER. KIND={{kind}}: {{cot_scene}}
 2. Plan the scene: pick SCENARIO={{scenario}} and ANSWER_FORMAT={{answer_format}}; choose numbers/code so that

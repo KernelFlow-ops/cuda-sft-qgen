@@ -1,4 +1,4 @@
-"""Multi-key NVIDIA API pool with priority waiters, cooldowns, and backpressure.
+"""Multi-key API pool with priority waiters, cooldowns, and backpressure.
 
 LLM and embedding slots are independent. Writer work outranks salvage, chair,
 sieve, and taxonomy. Repeated 429s shrink effective capacity; successes grow
@@ -29,13 +29,15 @@ PRI_TAXONOMY = 4
 
 def parse_api_keys(
     environ: dict[str, str] | None = None,
+    *,
+    prefix: str = "WRITER",
 ) -> list[str]:
-    """Collect up to several NVIDIA keys from env.
+    """Collect provider keys from env, skipping blanks and duplicates.
 
     Accepted forms (later duplicates are skipped):
-    - NVIDIA_API_KEYS=k1,k2,k3
-    - NVIDIA_API_KEY
-    - NVIDIA_API_KEY_1 / NVIDIA_API_KEY_2 / NVIDIA_API_KEY_3 ...
+    - WRITER_API_KEYS=k1,k2,k3
+    - WRITER_API_KEY
+    - WRITER_API_KEY_1 / WRITER_API_KEY_2 / WRITER_API_KEY_3 ...
     """
     env = environ if environ is not None else os.environ
     keys: list[str] = []
@@ -51,10 +53,10 @@ def parse_api_keys(
             seen.add(item)
             keys.append(item)
 
-    add(env.get("NVIDIA_API_KEYS"))
-    add(env.get("NVIDIA_API_KEY"))
+    add(env.get(f"{prefix}_API_KEYS"))
+    add(env.get(f"{prefix}_API_KEY"))
     for i in range(1, 8):
-        add(env.get(f"NVIDIA_API_KEY_{i}"))
+        add(env.get(f"{prefix}_API_KEY_{i}"))
     return keys
 
 
@@ -429,7 +431,7 @@ def build_key_pool(
     """Construct OpenAI-compatible clients and per-key semaphores.
 
     Args:
-        keys: Unique NVIDIA API keys.
+        keys: Unique provider API keys.
         base_url: Chat/embeddings endpoint.
         llm_per_key: Concurrent LLM streams allowed per key.
         embed_per_key: Base concurrent embedding calls per key.
@@ -441,7 +443,7 @@ def build_key_pool(
     """
     if not keys:
         raise RuntimeError(
-            "No NVIDIA API keys. Set NVIDIA_API_KEY / NVIDIA_API_KEY_2 / NVIDIA_API_KEY_3."
+            "No API keys configured for this provider."
         )
     llm_per_key = max(1, int(llm_per_key))
     embed_per_key = max(1, int(embed_per_key))

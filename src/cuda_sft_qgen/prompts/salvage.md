@@ -13,8 +13,9 @@ Rules
 3. tests_claim: copy if present. If absent, write ONE English sentence describing only what the stem asks, sharing at
    least one CUDA identifier with the stem. Never copy or paraphrase the leaf claim below into tests_claim.
 4. language: copy if present; otherwise "zh" when the stem contains CJK characters, else "en".
-5. Length: if the question exceeds {{max_chars}} characters, shorten comments and redundant prose only; if it is
-   shorter than {{min_chars}}, return it unchanged (a later filter decides).
+5. Keep the question text byte-for-byte after JSON decoding, even when it is too long or too short. The later
+   validation stage decides whether to reject or regenerate it. The configured length window is
+   [{{min_chars}}, {{max_chars}}]; do not edit the question to fit it.
 6. Return exactly one JSON object and nothing else.
 
 Leaf claim (context only, never copy): {{l3_claim}}

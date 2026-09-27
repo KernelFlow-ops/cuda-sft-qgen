@@ -1,5 +1,6 @@
 id: T15
 name: 数值、数学与随机
+weight: 0.8
 children:
 - id: math
   name: 数学函数
@@ -81,6 +82,7 @@ children:
     difficulty:
     - 2
     kind: formula
+  target_leaves: 10
 - id: rng
   name: 随机数
   leaves:
@@ -160,6 +162,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 10
 - id: numeric_tc
   name: Tensor Core 数值
   leaves:
@@ -237,6 +240,7 @@ children:
     difficulty:
     - 3
     kind: numeric
+  target_leaves: 10
 - id: ulp_bound
   name: ULP 与误差界
   leaves:
@@ -315,6 +319,7 @@ children:
     - 2
     - 3
     kind: numeric
+  target_leaves: 10
 - id: philox_split
   name: Philox 计数器拆分
   leaves:
@@ -394,6 +399,7 @@ children:
     - 2
     - 3
     kind: failure
+  target_leaves: 10
 - id: assoc_error
   name: 结合律与非确定
   leaves:
@@ -471,6 +477,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 10
 - id: fp16_acc
   name: FP16 累加溢出
   leaves:
@@ -539,6 +546,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 10
 - id: denorm_ftz
   name: 非规格化与 FTZ
   leaves:
@@ -610,6 +618,7 @@ children:
     difficulty:
     - 3
     kind: formula
+  target_leaves: 10
 - id: fma_round
   name: FMA 舍入与收缩
   leaves:
@@ -681,6 +690,7 @@ children:
     - 2
     - 3
     kind: mechanism
+  target_leaves: 10
 - id: curand_api
   name: cuRAND API
   leaves:
@@ -751,6 +761,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 10
 - id: kahan_comp
   name: 补偿求和
   leaves:
@@ -820,6 +831,7 @@ children:
     - 3
     - 4
     kind: mechanism
+  target_leaves: 10
 - id: tf32_mant
   name: TF32 尾数
   leaves:
@@ -890,6 +902,7 @@ children:
     difficulty:
     - 3
     kind: feature
+  target_leaves: 10
 - id: reduction_tree
   name: 归约树顺序
   leaves:
@@ -961,3 +974,4 @@ children:
     - 1
     - 2
     kind: failure
+  target_leaves: 10

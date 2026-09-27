@@ -1,5 +1,6 @@
 id: T20
 name: CuTe 代数深水
+weight: 0.8
 children:
 - id: product_divide
   name: product 与 divide
@@ -14,8 +15,7 @@ children:
     - 4
     kind: mechanism
   - id: product_divide_zipped
-    claim: cute::zipped_divide(layout, tiler) 与 tiled_divide 都把坐标切成 (tile_coord, rest_coord)；zipped 保持成对模式，tiled
-      把 tiler 拍扁。
+    claim: cute::zipped_divide(layout, tiler) 保留 (tile, rest) 二元层级；tiled_divide 保留 tile 内部层级，但把 rest 各模提升为同级成员。例：zipped shape 为 ((_3,_2),(_4,_9))，tiled shape 为 ((_3,_2),_4,_9)。
     types:
     - layout
     - syntax
@@ -80,8 +80,7 @@ children:
     - 3
     kind: mechanism
   - id: product_divide_tiled_api
-    claim: tiled_divide(A, tiler) 把 tiler 侧拍成单模 tile；要保留多模 tile 应用 zipped_divide，不能对 tiled 结果做 get<0,1>
-      当 zipped。
+    claim: tiled_divide(A, tiler) 保留 tiler 的嵌套 tile 模式，并把 rest 各模作为后续同级成员；要取得成对的 (tile, rest) 结构应使用 zipped_divide，不能把 tiled 结果当作 zipped 路径取值。
     types:
     - syntax
     - layout
@@ -89,6 +88,7 @@ children:
     - 3
     - 4
     kind: api
+  target_leaves: 10
 - id: composition_assoc
   name: composition 结合律
   leaves:
@@ -172,6 +172,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 10
 - id: swizzle_algebra
   name: swizzle 代数
   leaves:
@@ -254,6 +255,7 @@ children:
     difficulty:
     - 4
     kind: mechanism
+  target_leaves: 10
 - id: predication
   name: 越界谓词
   leaves:
@@ -324,6 +326,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 10
 - id: tv_layout
   name: TV layout
   leaves:
@@ -410,6 +413,7 @@ children:
     difficulty:
     - 4
     kind: feature
+  target_leaves: 10
 - id: complement_alg
   name: complement
   leaves:
@@ -483,6 +487,7 @@ children:
     difficulty:
     - 4
     kind: mechanism
+  target_leaves: 10
 - id: hierarchical_shape
   name: 层级 Shape
   leaves:
@@ -556,6 +561,7 @@ children:
     - 2
     - 3
     kind: numeric
+  target_leaves: 10
 - id: cosize_vs_size
   name: cosize 与 size
   leaves:
@@ -624,6 +630,7 @@ children:
     difficulty:
     - 3
     kind: numeric
+  target_leaves: 10
 - id: zipped_layouts
   name: zipped layouts
   leaves:
@@ -646,7 +653,7 @@ children:
     - 4
     kind: api
   - id: zipped_layouts_vs_tiled
-    claim: tiled_divide 把 tiler 侧拍扁成一个 tile 模；zipped 保留多模以便 get<0,i> 取 tiler 第 i 模。
+    claim: zipped_divide 将 tile 与 rest 包成二元层级；tiled_divide 只把 rest 各模提升为同级成员，tile 的内部嵌套保持不变。
     types:
     - layout
     - compare
@@ -679,7 +686,7 @@ children:
     - 3
     kind: formula
   - id: zipped_layouts_mismatch
-    claim: 把 tiled_divide 的扁平 rest 当成 zipped 的成对坐标去做 get<0,1> 会取错模式。
+    claim: 对 tiled 结果 t，get<1>(t) 取第一个 rest 模；对 zipped 结果 z，get<1>(z) 取整个 rest 组，二者索引含义不同。
     types:
     - debug
     - counterfactual
@@ -695,6 +702,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 10
 - id: coalesce_flatten
   name: coalesce / flatten
   leaves:
@@ -766,6 +774,7 @@ children:
     difficulty:
     - 3
     kind: mechanism
+  target_leaves: 10
 - id: int_tuple_crd
   name: IntTuple 与坐标
   leaves:
@@ -836,6 +845,7 @@ children:
     difficulty:
     - 3
     kind: api
+  target_leaves: 10
 - id: cute_tensor_ops
   name: Tensor 操作
   leaves:
@@ -906,3 +916,4 @@ children:
     - 2
     - 3
     kind: mechanism
+  target_leaves: 10

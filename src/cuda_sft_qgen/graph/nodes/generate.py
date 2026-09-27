@@ -27,7 +27,7 @@ from cuda_sft_qgen.graph.nodes.generate_core import (
 from cuda_sft_qgen.graph.state import PipelineState
 from cuda_sft_qgen.keys import PRI_WRITER
 from cuda_sft_qgen.models import Question, SteeringBrief
-from cuda_sft_qgen.observability import trace_node
+from cuda_sft_qgen.observability import get_metrics, trace_node
 from cuda_sft_qgen.prompts.fewshot import FewshotCorpus
 from cuda_sft_qgen.runtime import get_runtime
 
@@ -57,14 +57,16 @@ def generate_batch_node(state: PipelineState) -> dict:
             "generate_batch briefs=%s workers=%s keys=%s llm_per_key=%s queue_size=%s stagger=%.2fs",
             len(briefs),
             workers,
-            len(rt.settings.nvidia_api_keys),
+            len(rt.settings.llm_api_keys),
             rt.settings.llm_per_key_concurrency,
             queue_size,
             stagger_sec,
         )
 
         salvage_items: list[dict] = []
-        counts = {"ok": 0, "salvage": 0, "retry": 0, "hard_fail": 0}
+        repair_items: list[dict] = []
+        repair_queue = state.get("_repair_queue")
+        counts = {"ok": 0, "salvage": 0, "repair": 0, "retry": 0, "hard_fail": 0}
         lock = threading.Lock()
         anti_k = int(rt.settings.generation.get("anti_templates_max", 15))
         corpus = FewshotCorpus.from_store(rt.store, anti_k=anti_k)
@@ -84,20 +86,39 @@ def generate_batch_node(state: PipelineState) -> dict:
         def _one(brief_data: dict) -> None:
             t0 = time.monotonic()
             rt.store.save_generation_task(brief_data)
-            outcome = generate_or_salvage(brief_data, steering, attempts=1, corpus=corpus)
-            kind = apply_outcome(
-                outcome, pending=pending, salvage_items=salvage_items, lock=lock
+            outcome = generate_or_salvage(
+                brief_data, steering, attempts=1, corpus=corpus,
+                defer_rewrite=repair_queue is not None,
             )
+            kind = apply_outcome(
+                outcome, pending=pending, salvage_items=salvage_items, lock=lock,
+                repair_items=repair_items, steering=steering,
+            )
+            if repair_queue is not None and kind == "salvage":
+                repair_queue.put({"kind": "salvage", "payload": {
+                    "brief": outcome.brief, "raw": outcome.raw or "",
+                    "writer_real_api": outcome.writer_real_api,
+                }})
+            elif repair_queue is not None and kind == "repair":
+                repair_queue.put({"kind": "rewrite", "payload": {
+                    "brief": outcome.brief, "question": outcome.question.model_dump(),
+                    "reason": outcome.reason, "attempts": outcome.attempts,
+                    "steering": steering.model_dump(),
+                }})
             if kind == "ok" and outcome.question is not None:
                 prefetch = getattr(rt, "prefetch_embed", None)
                 if callable(prefetch):
                     prefetch(outcome.question.question)
             with lock:
                 counts[kind] = counts.get(kind, 0) + 1
+            duration = time.monotonic() - t0
+            get_metrics().observe("generate_brief_seconds", duration, {"status": kind})
+            if kind == "ok" and duration >= 30:
+                get_metrics().increment("generate_over_30s")
             logger.info(
                 "generate_brief status=%s duration_s=%.2f l3=%s",
                 kind,
-                time.monotonic() - t0,
+                duration,
                 (brief_data or {}).get("l3_id") or "",
             )
             if pbar is not None:
@@ -134,7 +155,6 @@ def generate_batch_node(state: PipelineState) -> dict:
             executor.shutdown(wait=True)
             if pbar is not None:
                 pbar.close()
-            rt.store.save_pending([Question.model_validate(x) for x in pending])
 
         elapsed = time.monotonic() - batch_t0
         rate = (counts["ok"] / elapsed * 60.0) if elapsed > 0 else 0.0
@@ -152,7 +172,8 @@ def generate_batch_node(state: PipelineState) -> dict:
         return {
             "pending": pending,
             "batch_briefs": [],
-            "salvage_items": salvage_items,
+            "salvage_items": [] if repair_queue is not None else salvage_items,
+            "repair_items": [] if repair_queue is not None else repair_items,
             "rejected_count": int(state.get("rejected_count") or 0) + counts["hard_fail"],
             "status": f"generated_{counts['ok']}",
             "log": [
