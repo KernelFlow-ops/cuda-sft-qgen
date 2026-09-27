@@ -18,6 +18,8 @@ def _load(base, name):
 @pytest.fixture(params=["assets", "installed"])
 def cfg(request, repo_root, fix_dir):
     base = fix_dir / "assets" / "configs" if request.param == "assets" else repo_root / "configs"
+    if not base.is_dir():
+        pytest.skip("cuda_qgen_fix/assets is not checked out")
     return {n: _load(base, n) for n in FILES}
 
 
@@ -65,6 +67,8 @@ def test_configs_agree_with_enums(cfg):
 
 def test_hardware_facts_keys(repo_root, fix_dir):
     for base in (fix_dir / "assets" / "configs", repo_root / "configs"):
+        if not base.is_dir():
+            continue
         facts = yaml.safe_load((base / "hardware_facts.yaml").read_text(encoding="utf-8"))
         assert "common" in facts and "arch" in facts
 
@@ -75,7 +79,10 @@ def test_scope_matches_real_taxonomy(repo_root, fix_dir):
     from cuda_sft_qgen.config import load_settings
     tax = load_taxonomy(load_settings().taxonomy_path)
     real = {d["id"]: {c["id"] for c in d.get("children", [])} for d in tax.domains}
-    scope = yaml.safe_load((fix_dir / "assets" / "configs" / "scope.yaml").read_text(encoding="utf-8"))
+    scope_path = fix_dir / "assets" / "configs" / "scope.yaml"
+    if not scope_path.is_file():
+        scope_path = repo_root / "configs" / "scope.yaml"
+    scope = yaml.safe_load(scope_path.read_text(encoding="utf-8"))
     assert {d["id"] for d in scope["domains"]} == set(real)
     for d in scope["domains"]:
         assert set(d.get("l2_overrides") or {}) <= real[d["id"]], d["id"]

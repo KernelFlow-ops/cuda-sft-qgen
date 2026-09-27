@@ -11,7 +11,10 @@ FILES = ["writer.md", "evolver.md", "chair.md", "salvage.md", "quality_cards.yam
 
 @pytest.mark.parametrize("rel", FILES)
 def test_installed_equals_asset(rel, repo_root, fix_dir):
-    a = (fix_dir / "assets" / "prompts" / rel).read_bytes()
+    asset = fix_dir / "assets" / "prompts" / rel
+    if not asset.is_file():
+        pytest.skip("cuda_qgen_fix/assets is not checked out")
+    a = asset.read_bytes()
     b = (repo_root / "src" / "cuda_sft_qgen" / "prompts" / rel).read_bytes()
     assert hashlib.sha256(a).hexdigest() == hashlib.sha256(b).hexdigest(), rel
 

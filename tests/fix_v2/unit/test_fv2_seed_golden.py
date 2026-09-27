@@ -12,14 +12,16 @@ import pytest
 REPO = Path(__file__).resolve().parents[3]
 ASSETS = REPO / "cuda_qgen_fix" / "assets" / "seeds"
 INSTALLED = REPO / "src" / "cuda_sft_qgen" / "prompts"
+# cuda_qgen_fix/ is gitignored; without it, validate the installed copies instead.
+HAS_ASSETS = (ASSETS / "fewshot_seed_v2.jsonl").is_file() and (ASSETS / "fewshot_negative_v1.jsonl").is_file()
 
 
 def _read(path):
     return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
 
 
-GOLD = _read(ASSETS / "fewshot_seed_v2.jsonl")
-NEG = _read(ASSETS / "fewshot_negative_v1.jsonl")
+GOLD = _read(ASSETS / "fewshot_seed_v2.jsonl" if HAS_ASSETS else INSTALLED / "fewshot_seed.jsonl")
+NEG = _read(ASSETS / "fewshot_negative_v1.jsonl" if HAS_ASSETS else INSTALLED / "fewshot_negative.jsonl")
 BY_ID = {g["id"]: g for g in GOLD}
 
 QT = {"conceptual", "syntax", "code_complete", "debug", "optimization", "layout", "compare", "counterfactual", "profiling"}
@@ -159,6 +161,7 @@ def test_assets_golden_math():
         fn()
 
 
+@pytest.mark.skipif(not HAS_ASSETS, reason="cuda_qgen_fix/assets is not checked out")
 def test_installed_equals_assets():
     assert _read(INSTALLED / "fewshot_seed.jsonl") == GOLD
     assert _read(INSTALLED / "fewshot_negative.jsonl") == NEG
