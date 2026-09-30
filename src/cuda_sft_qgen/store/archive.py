@@ -222,12 +222,13 @@ class Archive:
             rows = self._db.execute("SELECT payload FROM corrections ORDER BY rowid").fetchall()
         return [json.loads(row[0]) for row in rows]
 
-    def _exportable_questions(self) -> tuple[list[Question], int]:
+    def _exportable_questions(self, *, require_independent_reviewer: bool = False) -> tuple[list[Question], int, int]:
         """Revalidate every accepted row through the same gate for all exports."""
         from cuda_sft_qgen.models import QualityReview
 
         rows: list[Question] = []
         skipped = 0
+        non_independent = 0
         for q in self.load_accepted():
             details = dict(getattr(q, "review_details", {}) or {})
             if not self.has_real_writer_origin(q):
@@ -245,7 +246,8 @@ class Archive:
                 })
                 if review.id != q.id or review.action != "accept":
                     raise ValueError("review identity/action mismatch")
-                if not details.get("reviewer_independent", True):
+                independent = details.get("reviewer_independent") is True
+                if require_independent_reviewer and not independent:
                     raise ValueError("review is not independently produced")
                 evidence = q.verification_evidence or details.get("verification_evidence") or {}
                 if q.draft_validation_errors:
@@ -255,40 +257,49 @@ class Archive:
                 if evidence and evidence.get("status") not in {"pass", "disabled"}:
                     raise ValueError("verification not passed")
                 rows.append(q)
+                non_independent += int(not independent)
             except Exception:
                 skipped += 1
-        return rows, skipped
+        return rows, skipped, non_independent
 
-    def export_training(self, path: Path) -> dict[str, Any]:
+    def export_training(self, path: Path, *, require_independent_reviewer: bool = False) -> dict[str, Any]:
         """Write accepted, independently reviewed questions for SFT (no private answers)."""
         from cuda_sft_qgen.models import QualityReview
 
         path = Path(path)
         if path.resolve() in {self.accepted_path.resolve(), self.rejected_path.resolve(), self.pending_path.resolve(), self.database_path.resolve()}:
             raise ValueError("Training export must not replace the archive's compatibility files")
-        rows, skipped = self._exportable_questions()
+        rows, skipped, non_independent = self._exportable_questions(
+            require_independent_reviewer=require_independent_reviewer)
         export_id = uuid.uuid4().hex
         write_jsonl(path, [q.to_jsonl() for q in rows])
         with self._lock, self._db:
             self._db.executemany("INSERT INTO export_members VALUES (?,?)", [(export_id, q.id) for q in rows])
         manifest = {"export_id": export_id, "questions": len(rows), "skipped_unverified": skipped,
+                    "non_independent_reviewer": non_independent,
+                    "independent_reviewer_required": require_independent_reviewer,
                     "path": str(path),
                     "created_at": time.time(), "corrections": self.corrections()}
         path.with_suffix(path.suffix + ".manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-        self.export_curriculum_manifest(path.with_suffix(path.suffix + ".curriculum.json"), member_ids={q.id for q in rows})
+        self.export_curriculum_manifest(
+            path.with_suffix(path.suffix + ".curriculum.json"), member_ids={q.id for q in rows},
+            require_independent_reviewer=require_independent_reviewer)
         return manifest
 
-    def export_curriculum_manifest(self, path: Path, *, member_ids: set[str] | None = None) -> dict[str, Any]:
+    def export_curriculum_manifest(self, path: Path, *, member_ids: set[str] | None = None,
+                                   require_independent_reviewer: bool = False) -> dict[str, Any]:
         """Write a mode/difficulty curriculum index beside an SFT export.
 
         ``mixup_mode`` is intentionally orthogonal to assessed difficulty.  A
         training consumer can therefore follow decomposed → original → hybrid
         while still balancing CUDA difficulty, hardware, and taxonomy coverage.
         """
-        rows, skipped = self._exportable_questions()
+        rows, skipped, _ = self._exportable_questions(
+            require_independent_reviewer=require_independent_reviewer)
         if member_ids is not None:
             rows = [q for q in rows if q.id in member_ids]
+        non_independent = sum((q.review_details or {}).get("reviewer_independent") is not True for q in rows)
         stages = {"decomposed": 0, "original": 0, "hybrid": 0, "unmarked": 0}
         buckets: dict[str, int] = {}
         members: list[dict[str, Any]] = []
@@ -333,6 +344,8 @@ class Archive:
             "questions": len(rows),
             "stage_order": ["decomposed", "original", "hybrid"],
             "skipped_unverified": skipped,
+            "non_independent_reviewer": non_independent,
+            "independent_reviewer_required": require_independent_reviewer,
             "split_policy": "parent-family hash 80/10/10; split before further synthesis; never use held-out seeds",
             "large_family_warning": max(Counter(m["family_id"] for m in members).values(), default=0) > max(1, len(rows) // 2),
             "stages": stages,

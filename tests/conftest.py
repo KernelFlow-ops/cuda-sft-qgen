@@ -8,18 +8,38 @@ from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock
 
 import pytest
+from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
 src = ROOT / "src"
 if str(src) not in sys.path:
     sys.path.insert(0, str(src))
 
+from cuda_sft_qgen import config as qgen_config
 from cuda_sft_qgen.config import Settings, load_settings
 from cuda_sft_qgen.llm import FakeLLM
 from cuda_sft_qgen.models import Question, QuestionBrief, SteeringBrief
 from cuda_sft_qgen.runtime import Runtime, build_runtime
 from cuda_sft_qgen.store.archive import Archive
 from cuda_sft_qgen.taxonomy import Taxonomy, Leaf
+
+
+def _skip_dotenv(*args, **kwargs) -> bool:
+    """Stand-in for ``load_dotenv`` in sessions without real-LLM tests."""
+    return False
+
+
+def pytest_collection_finish(session):
+    """Read the developer's .env only when the session selected ``llm`` tests.
+
+    Offline tests must behave the same in every checkout (worktrees have no
+    .env), so load_settings() is kept from reading it; real-LLM sessions load
+    it once here, before any test or setup hook runs, exactly as before.
+    """
+    if any(item.get_closest_marker("llm") for item in session.items):
+        load_dotenv(ROOT / ".env", override=False)
+    else:
+        qgen_config.load_dotenv = _skip_dotenv
 
 
 @pytest.fixture

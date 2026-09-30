@@ -14,6 +14,7 @@ import uuid
 import numpy as np
 
 from cuda_sft_qgen.errors import ReviewError
+from cuda_sft_qgen.enums import BRIEF_LEVEL_DEFECTS
 from cuda_sft_qgen.graph.state import PipelineState
 from cuda_sft_qgen.models import Question, SteeringBrief
 from cuda_sft_qgen.observability import trace_node
@@ -22,7 +23,7 @@ from cuda_sft_qgen.runtime import get_runtime
 logger = logging.getLogger(__name__)
 _REPAIRABLE_DEFECTS = frozenset({
     "correctness", "answerability", "multiple_correct", "insufficient_premises",
-    "claim_alignment", "hardware", "leakage", "metadata", "ub_misstated", "invented_api",
+    "leakage", "ub_misstated", "invented_api", "writer_contract",
 })
 
 
@@ -38,7 +39,7 @@ def enqueue_review_repairs(rt, decisions: list[dict], steering: SteeringBrief) -
             continue
         q = Question.model_validate(item["question"])
         codes = set(q.defect_codes)
-        if (not codes or not codes.issubset(_REPAIRABLE_DEFECTS)
+        if (not codes or codes & BRIEF_LEVEL_DEFECTS or not codes.issubset(_REPAIRABLE_DEFECTS)
                 or not rt.store.has_real_writer_origin(q)):
             continue
         attempts = int(q.generation_provenance.get("review_repair_attempt") or 0)

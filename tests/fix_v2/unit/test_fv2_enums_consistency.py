@@ -26,7 +26,7 @@ def cfg(request, repo_root, fix_dir):
 def test_enum_module_shape():
     from cuda_sft_qgen import enums
     assert set(enums.ARCH_TO_HARDWARE) == set(enums.ARCH_TARGETS)
-    assert set(enums.ARCH_TO_HARDWARE.values()) <= {"agnostic", "ampere", "hopper", "blackwell"}
+    assert set(enums.ARCH_TO_HARDWARE.values()) == set(enums.HARDWARE_BUCKETS)
     assert set(enums.CHECK_TO_DEFECT.values()) <= set(enums.DEFECT_CODES)
     assert len(enums.ANSWER_FORMATS) == 9 and len(enums.OPERATORS) == 11
 

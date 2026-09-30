@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from cuda_sft_qgen.cli.common import _json_print, load_settings
@@ -13,6 +14,7 @@ def cmd_gate(args: argparse.Namespace) -> int:
     """Throughput/quality gate: compare a short real run against a baseline."""
     from cuda_sft_qgen.gate import run_gate
 
+    started_at = time.time()
     data_dir = Path(args.data_dir)
     if args.fake:
         print("gate refuses --fake; use a real model so knowledge-on throughput is measured.", file=sys.stderr)
@@ -40,6 +42,7 @@ def cmd_gate(args: argparse.Namespace) -> int:
         max_iterations=args.max_iterations,
         baseline_path=Path(args.baseline) if args.baseline else None,
         ingest_packs=[Path(p) for p in (args.pack or [])],
+        started_at=started_at,
     )
     _json_print(report)
     return 1 if report.get("verdict") == "red" else 0

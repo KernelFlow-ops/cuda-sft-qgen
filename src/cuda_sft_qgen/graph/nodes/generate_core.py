@@ -16,10 +16,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from cuda_sft_qgen.errors import JsonSalvageNeeded, RateLimitError
-from cuda_sft_qgen.enums import ANSWER_FORMATS
+from cuda_sft_qgen.enums import ANSWER_FORMATS, hardware_bucket
 from cuda_sft_qgen.jsonutil import extract_complete_json_field, normalize_language, parse_question_payload
 from cuda_sft_qgen.keys import PRI_SALVAGE, PRI_WRITER
-from cuda_sft_qgen.llm import FakeLLM, NvidiaLLM
+from cuda_sft_qgen.llm import FakeLLM, NvidiaLLM, ReasoningBudgetExceeded
 from cuda_sft_qgen.models import (
     PairPlan,
     Question,
@@ -40,6 +40,11 @@ from cuda_sft_qgen.runtime import get_runtime
 from cuda_sft_qgen.sieve import sieve_question
 
 logger = logging.getLogger(__name__)
+
+# One retry after a reasoning-only reply: twice the budget (capped) and one
+# thinking level less when the role thinks above ``low``.
+_REASONING_RETRY_MAX_TOKENS = 32768
+_THINKING_STEP_DOWN = {"high": "medium", "medium": "low"}
 
 
 def _with_consistency_warning(question: Question) -> Question:
@@ -224,7 +229,7 @@ def question_from_obj(
         difficulty=int(brief.difficulty),
         bloom=brief.bloom,
         persona=brief.persona,
-        hardware=brief.hardware,
+        hardware=hardware_bucket(brief.arch_target) if brief.arch_target != "any" else brief.hardware,
         granularity=brief.granularity,
         language=language,
         answer_format=answer_format,
@@ -308,16 +313,29 @@ def generate_from_brief(
         {"role": "system", "content": bundle.system},
         {"role": "user", "content": user},
     ]
+    level = rt.settings.evolver_thinking_level if source == "evolver" else rt.settings.writer_thinking_level
     with agent_role(source):
-        raw = generator.complete(
-            messages,
-            priority=PRI_WRITER,
-            prompt_cache_key=bundle.cache_key or None,
-            thinking_level=(
-                rt.settings.evolver_thinking_level if source == "evolver"
-                else rt.settings.writer_thinking_level
-            ),
-        )
+        try:
+            raw = generator.complete(
+                messages,
+                priority=PRI_WRITER,
+                prompt_cache_key=bundle.cache_key or None,
+                thinking_level=level,
+            )
+        except ReasoningBudgetExceeded:
+            # Reasoning ate the whole budget: retry once with more room. A second
+            # failure propagates and _safe_generate queues the brief for retry.
+            budget = min(2 * int(rt.settings.max_tokens), _REASONING_RETRY_MAX_TOKENS)
+            retry_level = _THINKING_STEP_DOWN.get(level, level)
+            logger.warning("writer_reasoning_budget_exceeded role=%s retry_max_tokens=%s thinking=%s->%s",
+                           source, budget, level, retry_level)
+            raw = generator.complete(
+                messages,
+                priority=PRI_WRITER,
+                prompt_cache_key=bundle.cache_key or None,
+                thinking_level=retry_level,
+                max_tokens=budget,
+            )
     obj = parse_question_payload(
         raw,
         fallback_claim=brief.l3_claim,
@@ -372,6 +390,15 @@ def _safe_generate(
                 (rt.evolver_llm or rt.llm) if brief.role == "evolver" and brief.seed_question else rt.llm,
                 NvidiaLLM,
             ),
+        )
+    except ReasoningBudgetExceeded:
+        # Already retried with a larger budget; like a 429 this is capacity, not quality.
+        logger.warning("generation reasoning budget exhausted twice, will retry later l3=%s", brief.l3_id)
+        return GenerateOutcome(
+            status="retry",
+            brief=brief.model_dump(),
+            reason="reasoning_budget",
+            attempts=attempts,
         )
     except Exception as exc:  # noqa: BLE001
         if NvidiaLLM._is_rate_limit(exc):

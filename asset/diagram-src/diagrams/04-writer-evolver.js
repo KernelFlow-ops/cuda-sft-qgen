@@ -1,0 +1,63 @@
+// Hand-placed: layered prompt block on top, generate → parse → sieve → gate chain below.
+const MX = 300; const SX = 690;
+const Y = { brief: 55, prompt: 180, llm: 650, budget: 775, parse: 900, ok: 1015, build: 1145, sieve: 1270, sok: 1385, gate: 1515, gok: 1650, warn: 1770, pend: 1885 };
+
+module.exports = {
+  id: '04-writer-evolver',
+  manual: true,
+  title: 'Writer / Evolver · 出题 Agent',
+  subtitle: 'graph/nodes/generate.py · generate_core.py · prompts/structured_writer.py',
+  nodes: [
+    { id: 'brief', type: 'data', label: 'QuestionBrief', sub: '叶子 claim · 角度卡 · 题型 · 难度 · arch_target\n答案格式 · 知识上下文 ·（Evolver）种子题', at: [MX, Y.brief], w: 420, maxSubW: 390 },
+    { id: 'task', type: 'store', label: 'generation_tasks', sub: '先落库，崩溃后 resume 续跑', at: [SX, Y.brief], w: 250 },
+
+    { id: 'static', type: 'rule', label: '① 静态前缀', sub: 'writer.md（+ evolver.md）\n进程内缓存', at: [180, 260], w: 250 },
+    { id: 'semi', type: 'rule', label: '② 半静态块', sub: 'persona · kind 约束\nbloom / 难度 / kind 质量卡', at: [450, 260], w: 250 },
+    { id: 'dyn', type: 'rule', label: '③ 动态层', sub: 'constraints · quality · cot\nwriter/evolver policy · context\n该架构的硬件事实表', at: [180, 385], w: 250 },
+    { id: 'shots', type: 'rule', label: '④ Few-shot', sub: '正例 ≤5：同叶子/同 kind/同格式\n负例 ≤2：质量 reject\n反模板 ≤15：近期被拒骨架', at: [450, 385], w: 250 },
+    { id: 'user', type: 'data', label: '⑤ user 消息', sub: 'CLAIM · ANGLE · TYPE · ARCH_TARGET · MUST_INCLUDE\nKNOWLEDGE_CONTEXT（只作资料，不是指令）', at: [MX + 15, 500], w: 480, maxSubW: 450 },
+
+    { id: 'llm', type: 'llm', label: 'Writer / Evolver LLM', sub: '优先级 PRI_WRITER=0\nprompt_cache_key · 可配 thinking', at: [MX, Y.llm], w: 270 },
+    { id: 'retry', type: 'queue', label: 'retry_tasks', sub: '429 / 推理预算两次耗尽\n退避 15s→120s，≤5 次', at: [SX, Y.llm], w: 250 },
+    { id: 'budget', type: 'decision', label: '推理耗尽\n预算?', at: [MX, Y.budget] },
+    { id: 'again', type: 'rule', label: '加预算重试一次', sub: 'max_tokens ×2（≤32768）\nthinking 降一级', at: [SX, Y.budget], w: 250 },
+    { id: 'parse', type: 'rule', label: '解析 JSON', sub: '去 think 痕迹 · 截断补全 · 取最长题干', at: [MX, Y.parse], w: 340, maxSubW: 310 },
+    { id: 'ok', type: 'decision', label: '解析成功\n且不超长?', at: [MX, Y.ok] },
+    { id: 'salv', type: 'queue', label: '修题队列 · salvage', sub: '坏 JSON 原文交给修题线', at: [SX, Y.ok], w: 250 },
+    { id: 'build', type: 'rule', label: 'question_from_obj', sub: '合同校验 → draft_validation_errors\n三层指纹 · 知识依赖 · brief_snapshot\n验证状态 not_run（Writer 无权自证）', at: [MX, Y.build], w: 360, maxSubW: 330 },
+    { id: 'sieve', type: 'rule', label: '规则筛 sieve', sub: '过短/过长 · 缺 claim · 不像问题\n不像 CUDA · 空泛开口 · 泄漏话术', at: [MX, Y.sieve], w: 300 },
+    { id: 'sok', type: 'decision', label: '通过?', at: [MX, Y.sok] },
+    { id: 'rej', type: 'reject', label: 'rejected', sub: 'sieve_* · 其他调用异常 generate_error', at: [SX, Y.sok], w: 250 },
+    { id: 'gate', type: 'rule', label: 'Writer 自洽门', sub: '本地高精度规则：合同错误 · CuTe 形状\nsm 冲突 · 架构 API 错配 · 泄漏 · 缺选项\n可选 LLM 门：只拦“确定”的缺陷', at: [MX, Y.gate], w: 370, maxSubW: 340 },
+    { id: 'gok', type: 'decision', label: '确定\n缺陷?', at: [MX, Y.gok] },
+    { id: 'rewrite', type: 'queue', label: '修题队列 · rewrite', sub: '带缺陷说明重写一次', at: [SX, Y.gok], w: 250 },
+    { id: 'warn', type: 'rule', label: '一致性 warning', sub: 'hw / 叶子不一致只记警告，留给 Chair', at: [MX, Y.warn], w: 320 },
+    { id: 'pend', type: 'store', label: 'pending（SQLite）', sub: 'save_pending + 预取 embedding', at: [MX, Y.pend], w: 280 },
+    { id: 'n1', type: 'note', label: 'generation-stage：writer_concurrency=6 个线程，提交间隔 0.35s；LLM 余量 <20% 时背压暂停 0.5s', at: [SX, Y.build], w: 250, maxW: 222 },
+  ],
+  groups: [
+    { id: 'g_prompt', label: 'StructuredPrompt · 分层 prompt（字节稳定，便于缓存）', color: 'blue', box: [30, Y.prompt, 570, 375] },
+  ],
+  edges: [
+    { from: 'brief', to: 'task', label: '落库' },
+    { from: 'brief', to: 'g_prompt', fromSide: 'bottom', toSide: 'top', toOff: -15 },
+    { from: 'g_prompt', to: 'llm', fromSide: 'bottom', toSide: 'top', toOff: 0, fromOff: MX - 315, label: 'system + user' },
+    { from: 'llm', to: 'budget' },
+    { from: 'llm', to: 'retry', label: '429', color: 'warn', style: 'dashed' },
+    { from: 'budget', to: 'again', label: '是' },
+    { from: 'again', to: 'retry', label: '再次耗尽', color: 'warn', style: 'dashed' },
+    { from: 'again', to: 'parse', fromSide: 'bottom', toSide: 'right', label: '成功' },
+    { from: 'budget', to: 'parse', label: '否' },
+    { from: 'parse', to: 'ok' },
+    { from: 'ok', to: 'salv', label: '否', color: 'pending' },
+    { from: 'ok', to: 'build', label: '是' },
+    { from: 'build', to: 'sieve' },
+    { from: 'sieve', to: 'sok' },
+    { from: 'sok', to: 'rej', label: '否', color: 'reject' },
+    { from: 'sok', to: 'gate', label: '是' },
+    { from: 'gate', to: 'gok' },
+    { from: 'gok', to: 'rewrite', label: '是', color: 'pending' },
+    { from: 'gok', to: 'warn', label: '否' },
+    { from: 'warn', to: 'pend', color: 'accept' },
+  ],
+};

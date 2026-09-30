@@ -67,6 +67,17 @@ def test_baseline_missed_target_is_red():
     assert any("accepted" in item for item in result["failures"])
 
 
+def test_exportable_count_and_deadline_are_hard_gates():
+    unexportable = compare_gate_reports(_report(accepted=50, exportable=49,
+                                                target=50, time_limit_seconds=1500), None)
+    assert unexportable["verdict"] == "red"
+    assert any("exportable 49 < target 50" in item for item in unexportable["failures"])
+    slow = compare_gate_reports(_report(accepted=50, exportable=50, target=50,
+                                        duration_seconds=1500.1, time_limit_seconds=1500), None)
+    assert slow["verdict"] == "red"
+    assert any("duration" in item for item in slow["failures"])
+
+
 def test_wall_and_throughput_thresholds():
     baseline = _report()
     green = compare_gate_reports(_report(duration_seconds=105, accepted_per_hour=350), baseline)
@@ -314,6 +325,13 @@ def test_gate_holds_pipeline_lock_through_runtime_lifecycle(tmp_path: Path, fake
         def load_pending(self):
             return []
 
+        def export_training(self, path, *, require_independent_reviewer=False):
+            assert lock_active
+            assert path.name == "training.jsonl"
+            assert require_independent_reviewer is True
+            events.append("training_export")
+            return {"questions": 0, "path": str(path)}
+
     class Runtime:
         store = Store()
         knowledge = None
@@ -362,7 +380,7 @@ def test_gate_holds_pipeline_lock_through_runtime_lifecycle(tmp_path: Path, fake
 
     assert report["status"] == "archived"
     assert events == ["lock_enter", "runtime_build", "pack_load", "pack_ingest", "knowledge_refresh",
-                      "pipeline", "runtime_close", "lock_exit"]
+                      "pipeline", "knowledge_refresh", "training_export", "runtime_close", "lock_exit"]
 
 
 def test_verdict_markdown_includes_quality(tmp_path: Path):

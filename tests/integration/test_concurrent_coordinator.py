@@ -329,3 +329,100 @@ def test_immediately_due_pending_review_is_bounded_by_attempt_limit(
     assert len(pending) == 1
     assert pending[0].review_attempts == 3
     assert pending[0].review_exhausted is True
+
+
+def test_delayed_review_runs_after_planning_limit(fake_runtime, sample_question, monkeypatch):
+    from cuda_sft_qgen.graph import pipeline
+    from cuda_sft_qgen.graph.app import initial_state
+
+    configure(fake_runtime)
+    fake_runtime.settings.max_iterations = 0
+    fake_runtime.settings.generation["max_runtime_seconds"] = 2
+    next_at = time.time() + 0.15
+    fake_runtime.store.save_pending([sample_question(
+        id="delayed-review", review_next_at=next_at, generation_provenance=REAL_ORIGIN,
+    )])
+    monkeypatch.setattr(pipeline, "planner_node", lambda _: pytest.fail("planner exceeded iteration limit"))
+    monkeypatch.setattr(pipeline, "_review_stage", lambda _: (_ for _ in ()).throw(
+        RuntimeError("delayed review ran")
+    ))
+
+    token = set_runtime(fake_runtime)
+    try:
+        with pytest.raises(RuntimeError, match="delayed review ran"):
+            pipeline.run_concurrent(fake_runtime, initial_state())
+    finally:
+        reset_runtime(token)
+
+
+def test_delayed_retry_runs_after_planning_limit(fake_runtime, sample_brief, monkeypatch):
+    from cuda_sft_qgen.graph import pipeline
+    from cuda_sft_qgen.graph.app import initial_state
+
+    configure(fake_runtime)
+    fake_runtime.settings.max_iterations = 0
+    fake_runtime.settings.generation["max_runtime_seconds"] = 2
+    fake_runtime.store.enqueue_retry({
+        "brief": sample_brief().model_dump(), "attempts": 1,
+        "next_ok_at": time.time() + 0.15,
+    })
+    drained = threading.Event()
+
+    def drain(_state):
+        items = fake_runtime.store.due_retry_items(limit=1)
+        assert len(items) == 1
+        fake_runtime.store.complete_retry(items[0]["task_id"])
+        drained.set()
+        return {"salvage_items": []}
+
+    monkeypatch.setattr(pipeline, "retry_drain_node", drain)
+    monkeypatch.setattr(pipeline, "planner_node", lambda _: pytest.fail("planner exceeded iteration limit"))
+    token = set_runtime(fake_runtime)
+    try:
+        result = pipeline.run_concurrent(fake_runtime, initial_state())
+    finally:
+        reset_runtime(token)
+    assert drained.is_set()
+    assert result["iteration"] == 0
+
+
+def test_delayed_review_stops_at_deadline(fake_runtime, sample_question, monkeypatch):
+    from cuda_sft_qgen.graph import pipeline
+    from cuda_sft_qgen.graph.app import initial_state
+
+    configure(fake_runtime)
+    fake_runtime.settings.max_iterations = 0
+    fake_runtime.settings.generation["max_runtime_seconds"] = 0.05
+    fake_runtime.store.save_pending([sample_question(
+        id="after-deadline", review_next_at=time.time() + 1,
+        generation_provenance=REAL_ORIGIN,
+    )])
+    monkeypatch.setattr(pipeline, "_review_stage", lambda _: pytest.fail("review ran after deadline"))
+    token = set_runtime(fake_runtime)
+    try:
+        result = pipeline.run_concurrent(fake_runtime, initial_state())
+    finally:
+        reset_runtime(token)
+    assert result["status"] == "review_pending"
+    assert result["iteration"] == 0
+
+
+def test_delayed_review_stops_when_budget_is_exhausted(fake_runtime, sample_question, monkeypatch):
+    from cuda_sft_qgen.graph import pipeline
+    from cuda_sft_qgen.graph.app import initial_state
+
+    configure(fake_runtime)
+    fake_runtime.settings.max_iterations = 0
+    fake_runtime._verification_exhausted = True
+    fake_runtime.store.save_pending([sample_question(
+        id="budget-exhausted", review_next_at=time.time() + 1,
+        generation_provenance=REAL_ORIGIN,
+    )])
+    monkeypatch.setattr(pipeline, "_review_stage", lambda _: pytest.fail("review exceeded budget"))
+    token = set_runtime(fake_runtime)
+    try:
+        result = pipeline.run_concurrent(fake_runtime, initial_state())
+    finally:
+        reset_runtime(token)
+    assert result["status"] == "verification_budget_exhausted"
+    assert result["iteration"] == 0

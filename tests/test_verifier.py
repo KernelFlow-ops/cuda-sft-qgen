@@ -302,7 +302,7 @@ def test_open_mode_uses_three_answers_and_one_rubric_call():
     assert reviewer.params[-1]["max_tokens"] <= 2048
 
 
-def test_open_low_score_is_valid_rip_evidence_not_global_reject():
+def test_open_low_score_is_pending_with_rip_evidence():
     outputs = [{"response": "weak"}] * 3 + [{"scores": [
         {"score": .1, "evidence": "weak"}, {"score": .2, "evidence": "partial"},
         {"score": .3, "evidence": "some detail"},
@@ -311,7 +311,7 @@ def test_open_low_score_is_valid_rip_evidence_not_global_reject():
                   verification_spec={"mode": "open", "answer_type": "text",
                                      "expected_behavior": "explanation", "rubric": ["correct", "specific"]})
     result = evaluate_candidate(q, ScriptedReviewer(outputs), {"answer_consistency_enabled": True})
-    assert result["status"] == "pass"
+    assert (result["status"], result["reason"]) == ("pending", "open_rubric_below_min")
     assert result["evidence"]["rip_score"] == .1
 
 

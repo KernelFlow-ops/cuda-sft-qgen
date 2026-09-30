@@ -22,7 +22,7 @@ import numpy as np
 from pydantic import ValidationError
 
 from cuda_sft_qgen.errors import ReviewError
-from cuda_sft_qgen.enums import ANSWER_FORMATS, ARCH_TARGETS, CHECK_TO_DEFECT, DEFECT_CODES
+from cuda_sft_qgen.enums import ANSWER_FORMATS, ARCH_TARGETS, CHECK_TO_DEFECT, DEFECT_CODES, hardware_bucket
 from cuda_sft_qgen.graph.nodes.review_score import _question_fingerprint
 from cuda_sft_qgen.graph.state import PipelineState
 from cuda_sft_qgen.graph.handoff import brief_snapshot_from_question
@@ -90,6 +90,7 @@ class ChairOutcome:
     action: str
     reason: str
     defect_codes: list[str]
+    relabeled: bool = False
 
 
 def apply_decision_rules(review: QualityReview, *, verification_status: str, verification_reason: str,
@@ -109,10 +110,18 @@ def apply_decision_rules(review: QualityReview, *, verification_status: str, ver
         and isinstance(cute_shape_result, dict)
         and cute_shape_result.get("status") == "contradiction"
     )
+    relabeled = False
     if cute_shape_contradiction:
         action = "reject"
         reason = "cute_shape_guard:" + str(cute_shape_result.get("reason") or "contradiction")
         codes = ["correctness"]
+    elif (action == "reject" and set(codes) == {"metadata"}
+          and review.assessed_metadata is not None
+          and bool((review.internal_reference_answer or "").strip())
+          and review.value_scores is not None
+          and all(value == "pass" for key, value in review.checks.model_dump().items() if key != "metadata")):
+        action, reason, codes = "accept", "relabeled:" + reason, []
+        relabeled = True
     if action == "accept" and review.value_scores is not None and min(review.value_scores.values()) < min_value_score:
         action, reason, codes = "reject", f"low_value:{min(review.value_scores.values())}", ["low_value"]
     if action == "accept":
@@ -125,7 +134,7 @@ def apply_decision_rules(review: QualityReview, *, verification_status: str, ver
         action, reason = "pending", "exploration_requires_verification"
     if action == "reject":
         reason = "chair:" + ",".join(codes or ["correctness"]) + ":" + reason[:300]
-    return ChairOutcome(action, reason, codes)
+    return ChairOutcome(action, reason, codes, relabeled)
 
 
 def _chair_priority(settings: Any) -> int:
@@ -140,7 +149,7 @@ def _needs_second_pass(question: Question, result: dict[str, Any], settings: Any
     if result.get("action") != "pending":
         return False
     qtype = (question.requested_metadata or {}).get("question_type") or question.question_type
-    if qtype not in _SECOND_PASS_TYPES:
+    if qtype not in _SECOND_PASS_TYPES and question.kind not in _SECOND_PASS_TYPES | {"numeric"}:
         return False
     checks = (result.get("review") or {}).get("checks") or {}
     if not isinstance(checks, dict) or not checks:
@@ -238,18 +247,20 @@ def _parallel_chair_decision(item: dict, prompt_system: str, verified_evidence: 
     rt = get_runtime()
     q = Question.model_validate(item["question"])
     try:
+        corpus = item.get("decision") or {}
+        if corpus.get("verdict") == "dup":
+            return {"id": q.id, "action": "reject", "reason": corpus.get("reason") or "corpus_duplicate",
+                    "review": {"action": "reject", "defect_codes": ["duplicate"]}}
         if not rt.settings.fake_llm and not allow_fixture_origin and not rt.store.has_real_writer_origin(q):
             return {"id": q.id, "action": "pending", "reason": "unverified_writer_origin"}
-        if q.draft_validation_errors and not isinstance(getattr(rt, "review_llm", None) or rt.llm, FakeLLM):
-            # A Writer candidate without a complete private target and
-            # verification contract has no auditable answer path.  Preserve it
-            # for retry instead of allowing a reviewer to accept an underspecified
-            # draft merely because the public stem looks plausible.
+        if q.draft_validation_errors:
+            errors = ",".join(q.draft_validation_errors[:4])
             return {
                 "id": q.id,
-                "action": "pending",
-                "reason": "draft_validation:" + ",".join(q.draft_validation_errors[:4]),
-                "review": {"action": "pending", "reason": "draft_validation", "draft_validation_errors": q.draft_validation_errors},
+                "action": "reject",
+                "reason": "writer_contract:" + errors,
+                "review": {"action": "reject", "reason": "writer_contract:" + errors,
+                           "defect_codes": ["writer_contract"], "draft_validation_errors": q.draft_validation_errors},
             }
         knowledge = getattr(rt, "knowledge", None)
         context = item.get("knowledge_context")
@@ -306,7 +317,7 @@ def _parallel_chair_decision(item: dict, prompt_system: str, verified_evidence: 
                  {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
                 retries=1, priority=_chair_priority(rt.settings), temperature=0.0,
                 thinking_level=str(rt.settings.review.get("thinking_level", "medium")),
-                max_tokens=int(rt.settings.review.get("max_tokens", 2048)),
+                max_tokens=int(rt.settings.review.get("max_tokens", 8192)),
             )
         legacy_assessment = not bool(
             q.answer_format or q.verification_spec or q.draft_plan or q.generation_provenance.get("structured_cot")
@@ -320,9 +331,14 @@ def _parallel_chair_decision(item: dict, prompt_system: str, verified_evidence: 
         details["reviewer_model"] = "fake" if isinstance(reviewer, FakeLLM) else str(
             rt.settings.review.get("model") or getattr(rt.settings, "review_model", None) or rt.settings.llm_model
         )
-        # Independent means a separate reviewer call with a complete audit
-        # contract; it does not require a different model deployment.
-        details["reviewer_independent"] = True
+        apis = getattr(rt.settings, "agent_apis", {})
+        writer_api = apis.get("writer") if isinstance(apis, dict) else None
+        review_api = apis.get("review") if isinstance(apis, dict) else None
+        details["reviewer_independent"] = bool(
+            writer_api is not None and review_api is not None
+            and any(getattr(writer_api, key, None) != getattr(review_api, key, None)
+                    for key in ("provider", "model", "base_url"))
+        )
         structured = bool(q.verification_spec or q.draft_plan or q.generation_provenance.get("structured_cot"))
         outcome = apply_decision_rules(
             review,
@@ -337,15 +353,16 @@ def _parallel_chair_decision(item: dict, prompt_system: str, verified_evidence: 
         )
         action, reason = outcome.action, outcome.reason
         details["defect_codes"] = outcome.defect_codes
+        if outcome.relabeled:
+            details["relabeled"] = True
+            details["checks"]["metadata"] = "pass"
         details["value_scores"] = review.value_scores
         details["verification_evidence"] = verification
         if action != review.action:
             details["model_action"] = review.action
             details["action"], details["reason"] = action, reason
-            # Preserve the strict persisted review contract: a deferred accept
-            # must not masquerade as a passed review during resume/export.
             if action == "pending":
-                details["checks"]["answerability"] = "uncertain"
+                details["deferred_reason"] = reason
         return {"id": q.id, "action": action, "reason": reason, "review": details}
     except Exception as exc:
         # Pydantic validation messages can embed private reference answers or
@@ -406,6 +423,12 @@ def _parallel_chair_decisions(items: list[dict], max_workers: int = 4) -> dict[s
                 details["second_pass"] = True
                 second_result = {**second_result, "review": details}
                 results[qid] = second_result
+            elif second_result.get("action") == "reject" and any(
+                value == "fail" for value in ((second_result.get("review") or {}).get("checks") or {}).values()
+            ):
+                details = dict(second_result.get("review") or {})
+                details["second_pass"] = True
+                results[qid] = {**second_result, "review": details}
             else:
                 results[qid] = {
                     "id": qid,
@@ -556,7 +579,16 @@ def review_chair_node(state: PipelineState) -> dict:
                 if not q.requested_metadata:
                     q.requested_metadata = {k: getattr(q, k) for k in _METADATA_KEYS}
                 for key in _METADATA_KEYS:
-                    setattr(q, key, getattr(q.assessed_metadata, key))
+                    if key == "hardware":
+                        arch = q.assessed_metadata.arch_target or q.arch_target
+                        q.hardware = hardware_bucket(arch) if arch != "any" else (
+                            q.assessed_metadata.hardware or q.hardware)
+                    else:
+                        setattr(q, key, getattr(q.assessed_metadata, key))
+                if q.assessed_metadata.arch_target:
+                    q.arch_target = q.assessed_metadata.arch_target
+                if q.assessed_metadata.answer_format:
+                    q.answer_format = q.assessed_metadata.answer_format
                 corpus_decision = item.get("decision") or {}
                 if corpus_decision.get("verdict") == "dup":
                     action, reason = "reject", corpus_decision.get("reason") or "corpus_duplicate"

@@ -20,6 +20,10 @@ from cuda_sft_qgen.observability import current_agent_role, get_metrics
 logger = logging.getLogger(__name__)
 
 
+class ReasoningBudgetExceeded(ValueError):
+    """The model spent its whole completion budget on reasoning and returned no answer."""
+
+
 def thinking_kwargs(level: str) -> dict[str, Any]:
     """Map ``none|low|medium|high`` onto Nemotron ``chat_template_kwargs``."""
     level = (level or "medium").lower()
@@ -194,6 +198,10 @@ class NvidiaLLM(LLMClient):
                 text = self._stream_once(slot.client, payload)
                 self.pool.note_success("llm")
                 return text
+            except ReasoningBudgetExceeded:
+                # Re-sending the identical budget rarely helps; callers decide
+                # whether to retry with more tokens (see generate_core).
+                raise
             except Exception as exc:  # noqa: BLE001
                 last = exc
                 if self._is_rate_limit(exc):
@@ -272,7 +280,7 @@ class NvidiaLLM(LLMClient):
         if not content and reasoning:
             # Private reasoning is not a final JSON answer. Reinterpreting it
             # as content both leaks internals and hides max-token truncation.
-            raise ValueError("model returned reasoning without final content; increase token budget")
+            raise ReasoningBudgetExceeded("model returned reasoning without final content; increase token budget")
         elif finish_reason and finish_reason not in {"stop", "None", None}:
             logger.info("llm_finish reason=%s content_chars=%s", finish_reason, len(content))
         return content
@@ -286,7 +294,7 @@ class OpenAILLM(NvidiaLLM):
         temperature: float | None, max_tokens: int | None,
     ) -> dict[str, Any]:
         effort = "low" if level == "low_effort" else level
-        return {
+        payload = {
             "model": self.agent_api.model,
             "messages": messages,
             "reasoning_effort": effort,
@@ -294,6 +302,11 @@ class OpenAILLM(NvidiaLLM):
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        if self.agent_api.sampling_params:
+            # Opt-in only (<ROLE>_SAMPLING_PARAMS): many reasoning models reject these.
+            payload["temperature"] = self.settings.temperature if temperature is None else temperature
+            payload["top_p"] = self.settings.top_p
+        return payload
 
 
 class FakeLLM(LLMClient):

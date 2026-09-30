@@ -1,775 +1,364 @@
 # cuda-sft-qgen
 
-LangGraph 多智能体流水线，为 NVIDIA CUDA 知识域生成 **SFT 问题集**（本阶段只出题、不出答案）。
-
-出题由版本化知识图谱驱动，保留原有三层分类导航。**每道候选题都经过独立模型完整审查**；无法确认、解析失败或调用失败的题保留待审，不会默认放行。生成与审题并行推进，知识扩充与资料审计在后台运行。
-
-迁移、知识审计、导出和基准说明：[knowledge-and-review.md](docs/implementation/knowledge-and-review.md)。现有 JSONL 首次使用时备份为 `.legacy`，SQLite 成为权威存储；原始题库不会在安装或测试时自动迁移。
-
-## 特性亮点
-
-- **31 个 L1 领域**的三层分层 Taxonomy（Domain → L2 Category → L3 Leaf）
-- **多 API Key 优先级调度**：LLM 与 Embedding 独立槽位，支持并行 & 背压控制
-- **三层查重**：SHA256 → SimHash/Jaccard → Embedding Cosine（阈值可配置）
-- **Prompt Cache + Embedding Cache**：预取优化，节省 60-80% API 成本
-- **Retry Queue + Salvage**：容错机制处理 JSON 损坏和 API 429 错误
-- **Steering 反馈循环**：Review Chair → Planner 动态纠偏分布失衡
-- **知识图谱**：SQLite 断言修订、官方来源证据、依赖关系、后台扩充与每日到期审计
-- **事务归档**：审核结果原子提交、可恢复任务、知识纠错影响追踪和问题集导出
-- **配置 Profile 支持**：dev/test/prod 预设，环境变量优先级覆盖
-
-## 多 Agent 协同
-
-默认走 **并发协调器**（`generation.concurrent_pipeline=true`）：协调器分别调度 `generation-stage`、`review-stage` 和 `repair-stage`。每道题由真实 Writer API 写完就落入 SQLite pending，第一道可审题立即交给 Chair；JSON 修复和预审重写在独立修题线程执行。Chair 归档保持单消费者，内部仍可并行审核多题。`KnowledgeWorker` 守护线程做知识扩充与官方文档审计。关掉并发后回退到顺序 LangGraph。
-
-LLM 槽位优先级（数字越小越先拿到 key）：**Writer=0 > Salvage=1 > Chair=2 > Sieve=3 > Taxonomy=4**。正式生题必须使用真实 API；Chair 对 `formula/debug/layout/code_complete` 的 uncertain 结果会再审一次；连续审题失败触发熔断。
-
-### 总览：并发流水线（默认）
-
-```mermaid
-flowchart TB
-  START([run_pipeline]) --> LOCK[data_dir/pipeline.lock]
-  LOCK --> BOOT[Bootstrap<br/>从 SQLite 灌入 accepted/pending/steering]
-  BOOT --> ARCH{rebuild_taxonomy?}
-  ARCH -->|是| ARC[Architect]
-  ARCH -->|否| COORD
-  ARC --> COORD
-
-  BOOT --> COORD[协调器<br/>队列容量与恢复调度]
-  COORD --> PL[Planner / retry]
-  PL --> WR[generation-stage<br/>真实 Writer API 并行出题]
-  WR -->|每题完成| PENDING[(SQLite pending)]
-  WR -->|JSON 或预审缺陷| REPAIRQ[修题队列]
-  REPAIRQ --> REP[repair-stage<br/>Salvage / Rewrite]
-  REP --> PENDING
-  PENDING -->|首题可审即启动| RS[review-stage<br/>Review Score]
-  RS --> RC[Review Chair]
-  RC --> AR[单消费者归档]
-  AR -->|可修 reject，限一次| REPAIRQ
-  AR --> COORD
-  COORD --> DONE{accepted ≥ target?}
-  DONE -->|是| ENDN([archived])
-  DONE -->|否且仍有 pending| PEND([review_pending])
-  DONE -->|否| LIMIT([iteration_limit])
-
-  subgraph KW["KnowledgeWorker 守护线程"]
-    direction LR
-    POLL[每 5s 取 job] --> J{kind}
-    J -->|expand / expand_pack| EX[扩 provisional 叶子]
-    J -->|audit| AU[官方文档审计]
-    J -->|relate| REL[写依赖边]
-    EX --> AUDQ[入队 audit]
-    AU -->|contradicted| INV[invalidate 关联题]
-  end
-  AR -.-> POLL
-  INV -.-> AR
-```
-
-| Agent | 模块 | 作用 |
-|---|---|---|
-| **Bootstrap** | `graph/nodes/bootstrap.py` | 从 archive 恢复计数、pending、steering、run_state |
-| **Architect** | `graph/nodes/architect.py` | 可选首轮：把 Taxonomy 扩充任务丢给后台 worker |
-| **Planner** | `graph/nodes/planner.py` + `planner.py` | 配额 + steering + 叶子硬件兼容，抽 Writer/Evolver 任务单 |
-| **Writer / Evolver** | `graph/nodes/generate.py` | 并行出题；规则筛只拦空泛题；hw/leaf 记 warning 进 pending |
-| **Salvage** | `generate.salvage_item` / `salvage.py` | 修损坏 JSON，不改题意；修不了进 retry 队列 |
-| **Review Repair** | `review_archive.py` / `salvage.py` | 可修 reject 入持久任务；真实 Writer 重写后重新进入 pending，最多一次 |
-| **Retry Drain** | `graph/nodes/salvage.py` | 到期 429/JSON 任务再跑一轮 Writer |
-| **Review Score** | `graph/nodes/review.py` | embedding 近邻 + 三层指纹；不在此步放行 |
-| **Review Chair** | `graph/nodes/review.py` | 每题独立审查；失败/不确定保留 pending，绝不默认 accept |
-| **Archivist** | `graph/nodes/review.py` `archive_node` | SQLite 事务提交；登记知识依赖；投影 JSONL |
-| **Taxonomy / Knowledge** | `knowledge_worker.py` | 后台扩叶子、官方证据审计、修订失效关联题 |
-
-### 顺序图（`concurrent_pipeline=false`）
-
-```mermaid
-flowchart LR
-  B[Bootstrap] --> A{重建知识树?}
-  A -->|是| Arch[Architect]
-  A -->|否| P
-  Arch --> P[Planner]
-  P --> W[Writer/Evolver]
-  W --> S{JSON 坏了?}
-  S -->|是| Salv[Salvage]
-  S -->|否| D
-  Salv --> D{idle 且 retry 到期?}
-  D -->|是| Drain[Retry Drain]
-  D -->|否| R
-  Drain --> R
-  R[Review Score] --> C[Review Chair]
-  C --> Z[Archivist]
-  Z --> T{每 N 轮?}
-  T -->|是| M[Taxonomy Manager]
-  T -->|否| P
-  M --> P
-  C -.->|steering| P
-  M -.->|provisional 叶子| P
-```
-
----
-
-### Bootstrap
-
-从磁盘把一次可恢复运行灌进图状态。不调 LLM。
-
-```mermaid
-flowchart TB
-  IN[Archive] --> L1[load_accepted / pending / rejected]
-  IN --> L2[load_steering]
-  IN --> L3[load_run_state]
-  L1 --> OUT[PipelineState<br/>accepted_count, pending, target, done]
-  L2 --> OUT
-  L3 --> OUT
-```
-
-- 输入：`questions.sqlite3`（及 JSONL 投影）
-- 输出：`pending`、`steering_brief`、`iteration` / `review_rounds`
-- `accepted ≥ target` 且无 pending 时直接结束
-
-### Architect
-
-仅 `--rebuild-taxonomy` 时走一次。本身不阻塞出题，只把扩叶子任务排队。
-
-```mermaid
-flowchart LR
-  S[state.rebuild_taxonomy] --> E{taxonomy 空?}
-  E -->|是| SKIP[taxonomy_ready]
-  E -->|否| H[taxonomy_health_node]
-  H --> W{KnowledgeWorker?}
-  W -->|有| Q[enqueue_expansion]
-  W -->|无| LOG[记 unavailable]
-  Q --> READY[taxonomy_ready]
-```
-
-### Planner
-
-按配额缺口、Chair steering、叶子健康度抽 **QuestionBrief**。硬件标签必须与叶子 claim 兼容（`leaf_hardware_allowed`），避免 Writer 写出立刻被 hw 筛掉的题。
-
-```mermaid
-flowchart TB
-  IN[accepted / pending / steering / quotas] --> N{还要几道?}
-  N -->|target 已满| STOP[target_reached]
-  N -->|pending 已满 batch| SKIP[skip_plan]
-  N -->|n>0| CAP[按剩余目标与 pending 容量裁剪]
-  CAP --> SAMPLE[plan_briefs]
-  SAMPLE --> HW[叶子 × 硬件白名单]
-  SAMPLE --> QT[题型 / 难度 / bloom / 粒度配额]
-  SAMPLE --> EV{evolver_fraction}
-  EV -->|是| SEED[从 accepted 抽 seed]
-  EV -->|否| WRB[Writer brief]
-  HW --> BRIEF[QuestionBrief 列表]
-  QT --> BRIEF
-  SEED --> BRIEF
-  WRB --> BRIEF
-  BRIEF --> KG[挂 knowledge_context / claim_revision]
-```
-
-- 自适应采样：`configs/planner.yaml` 的 `adaptive_sampling`（可关）
-- Evolver 优先取同一叶子的已通过题作为 seed；没有时再取相关叶子。
-- 输出：`batch_briefs`；只有实际规划时 iteration +1。`max_iterations` 是单次运行额度，resume 保留累计计数并获得新额度。
-
-### Writer / Evolver
-
-一条 brief 一次 LLM。Evolver 改训练结构，不是同义改写。并发由 `PriorityExecutor` + API key 池背压控制。
-
-```mermaid
-flowchart TB
-  B[QuestionBrief] --> P[StructuredPrompt]
-  P --> L1[static: 角色 + JSON schema]
-  P --> L2[semi: persona / kind / quality card]
-  P --> L3[dynamic: constraints + CoT + fewshot + steering]
-  L1 --> MSG[system + user]
-  L2 --> MSG
-  L3 --> MSG
-  MSG --> LLM[llm.complete  PRI_WRITER]
-  LLM --> PARSE{parse_question_payload}
-  PARSE -->|失败| JS[JsonSalvageNeeded]
-  PARSE -->|过长| JS
-  PARSE -->|OK| Q[Question]
-  Q --> SV[rule_sieve]
-  SV -->|空泛/非题/过短| REJ[rejected]
-  SV -->|过| WARN[hw/leaf mismatch → warning]
-  WARN --> OK[pending + 预取 embedding]
-  JS --> INLINE{salvage_inline?}
-  INLINE -->|是| SA[Salvage]
-  INLINE -->|否| SALVITEM[salvage_items]
-```
-
-Prompt 分层：`writer.md` / `evolver.md` + `layers/{constraints,quality,context,cot,writer_policy,evolver_policy}.md`。
-
-规则筛（`sieve.py`）只拦：过短过长、缺 claim、不像问题、不像 CUDA、开口太空。`sieve_hw_mismatch` / `sieve_off_leaf` 在 Writer 路径上是 warning，交给 Chair。
-
-### Salvage
-
-只修 JSON 外壳，不改考点。本地解析优先，再可选 Salvage LLM。
-
-```mermaid
-flowchart LR
-  RAW[损坏 raw] --> LOC[本地 parse + 截断补全]
-  LOC -->|成功| SIEVE[sieve]
-  LOC -->|无 question 字段| RETRY[retry 队列]
-  LOC -->|仍坏且 salvage_use_llm| LLM[Salvage LLM  PRI_SALVAGE]
-  LLM -->|可解析| SIEVE
-  LLM -->|429 / 仍坏| RETRY
-  SIEVE -->|过| PEND[pending]
-  SIEVE -->|空泛| REJ[rejected]
-```
-
-Retry 队列：指数退避；超过 `RETRY_MAX_ATTEMPTS` 记 `retry_exhausted`。
-
-### Retry Drain
-
-pending 为空（或并发协调器里还有审题空位）且队列到期时，把 brief 再送进 Writer。新鲜出题优先于 JSON 重试，避免 drain 堵满审题。
-
-```mermaid
-flowchart LR
-  Q[retry_queue 到期项] --> LIM[min 空位, drain_batch]
-  LIM --> GEN[generate_or_salvage]
-  GEN --> OUT{ok / salvage / retry / fail}
-```
-
-### Review Score
-
-检索邻居、打多样性报告。**不在这一步 accept**。到期未审的题才进本批；backoff / exhausted 的题延后。
-
-```mermaid
-flowchart TB
-  PEND[到期 pending] --> EMB[embed + 预取 drain]
-  EMB --> NN[向量索引 top_k 近邻]
-  NN --> DUP[Deduper.decide]
-  DUP --> L0[L0 SHA256 精确]
-  DUP --> L1[L1 SimHash / Jaccard 模板]
-  DUP --> L2[L2 cosine 语义]
-  L0 --> VERD[dup / gray / unique]
-  L1 --> VERD
-  L2 --> VERD
-  PEND --> DIV[DiversityReport<br/>KL / 熵 / 叶子覆盖]
-  VERD --> SCORED[scored + neighbors]
-  DIV --> SCORED
-```
-
-### Review Chair
-
-每道候选（含 unique）各打一次独立审查。解析失败、ID 对不上、证据不足、调用失败 → **pending**，带指数退避，用尽后 `review_exhausted` 留待人工，永不默认放行。
-
-```mermaid
-flowchart TB
-  ITEM[scored item] --> CTX[knowledge.context_for_claim]
-  CTX --> PAY[完整 payload:<br/>题干 / claim / 近邻 / 规则诊断]
-  PAY --> LLM[review_llm.complete_json<br/>temperature=0]
-  LLM --> QR[QualityReview]
-  QR --> CHK[七项检查]
-  CHK --> C1[正确性]
-  CHK --> C2[可答性]
-  CHK --> C3[claim 对齐]
-  CHK --> C4[硬件兼容]
-  CHK --> C5[答案泄漏]
-  CHK --> C6[元数据]
-  CHK --> C7[重复]
-  C1 --> ACT{action}
-  C2 --> ACT
-  C3 --> ACT
-  C4 --> ACT
-  C5 --> ACT
-  C6 --> ACT
-  C7 --> ACT
-  ACT -->|accept| META[写入 assessed_metadata<br/>+ 内部参考答案]
-  META --> BDUP{批内 / 语料 dup?}
-  BDUP -->|dup| REJ[reject]
-  BDUP -->|gray| HOLD[pending 再审]
-  BDUP -->|unique| ACC[accept 代表]
-  ACT -->|reject| REJ
-  ACT -->|pending / 异常| DEF[defer: backoff / exhausted]
-  ACC --> STEER[steering_brief → Planner]
-  REJ --> STEER
-```
-
-Chair 并发：`chair_max_workers`。审查模型可用独立 `review.model`，缺省与出题模型相同。
-
-### Archivist
-
-审查结果与计数一次事务提交。向量索引是派生数据，失败不影响权威库。
-
-```mermaid
-flowchart TB
-  DEC[final_decisions] --> DEP[knowledge.record_question]
-  DEP --> INV{claim 已 quarantine / 修订?}
-  INV -->|是| BACK[改回 pending]
-  INV -->|否| TX[commit_review 事务]
-  BACK --> TX
-  TX --> ACC[(accepted)]
-  TX --> REJ[(rejected)]
-  TX --> PEN[(pending)]
-  TX --> ST[steering + run_state]
-  ACC --> IDX[更新 embedding 索引 / cache]
-  TX --> STAT[stats.json]
-```
-
-导出训练数据用 `cuda-sft-qgen export`：只要独立审查通过、非 fake、未失效的题；内部参考答案不导出。
-
-### Taxonomy Manager / KnowledgeWorker
-
-不插入出题/审题主线。主循环每 `every_k_reviews` 轮 `enqueue_expansion`；worker 自己租约执行。
-
-```mermaid
-flowchart TB
-  JOB[take_job] --> K{kind}
-  K -->|expand_pack / expand| TM[TaxonomyManager]
-  TM --> FAC[facet 轮转 + 语义去重]
-  FAC --> NEW[provisional claim]
-  NEW --> AQ[enqueue audit]
-  K -->|audit| DOC[拉取 allowlist 官方 HTML]
-  DOC --> QUOTE[LLM 只依据文中原句]
-  QUOTE --> V{verdict}
-  V -->|supported| EV[存 evidence + relations]
-  V -->|insufficient| KEEP[保持未核实]
-  V -->|contradicted| QUAR[quarantine]
-  QUAR --> REV[revise 新修订]
-  REV --> AQ
-  QUAR --> IMP[impact_events]
-  IMP --> WD[archive.invalidate_claim]
-  K -->|relate| REL[requires / equivalent_to / contradicts / supersedes]
-```
-
-新叶子立即可被 Planner 抽到；官方审计通过前状态为 `provisional`。导入的旧叶子是 `legacy_unreviewed`。
-
-### API Key 池（跨 Agent）
-
-```mermaid
-flowchart LR
-  W[Writer] --> POOL[ApiKeyPool]
-  SA[Salvage] --> POOL
-  CH[Chair] --> POOL
-  SI[Sieve LLM] --> POOL
-  TX[Taxonomy / Audit] --> POOL
-  POOL --> K1[key#1 LLM sem + Embed sem]
-  POOL --> K2[key#2]
-  POOL --> K3[key#n]
-  POOL -->|连续 429| CAP[effective_cap 下降]
-  POOL -->|连续成功| UP[cap 回升]
-```
-
-LLM 与 Embedding 信号量独立。优先级数字：**Writer=0 > Salvage=1 > Chair=2 > Sieve=3 > Taxonomy=4**。Chair 默认 `review.priority=2`，不再与 Writer 抢同一档。
-
-注释约定见 [comment-standard.md](docs/implementation/comment-standard.md)。
-
-### 系统上下文（启动到落盘）
-
-```mermaid
-flowchart TB
-  CLI["cuda-sft-qgen generate / resume / gate"] --> CFG["load_settings<br/>CLI > env > profile YAML > default.yaml"]
-  CFG --> RT["build_runtime<br/>LLM / Embed / Archive / Knowledge / Index"]
-  RT --> LOCK["data_dir/pipeline.lock 独占"]
-  LOCK --> KW{knowledge 开启且非 fake?}
-  KW -->|是| DAEMON[KnowledgeWorker 守护线程]
-  KW --> MODE{concurrent_pipeline?}
-  MODE -->|true 默认| CONC[run_concurrent]
-  MODE -->|false 调试| SEQ[LangGraph StateGraph.invoke]
-  DAEMON -.-> CONC
-  CONC --> STOP{accepted≥target / pending-only / 熔断 / 迭代上限}
-  SEQ --> STOP
-  STOP --> STATS["stats.json + metrics.json"]
-  STOP --> EXPORT["export: 独立审查 + 非 fake + 未失效<br/>内部参考答案不导出"]
-```
-
-### 交接契约（MAST：避免智能体错位）
-
-```mermaid
-flowchart LR
-  P[Planner QuestionBrief] --> W[Writer/Evolver Question]
-  W --> SC[ScoredCandidate<br/>question + neighbors + brief_snapshot]
-  SC --> CH[Chair QualityReview]
-  CH -->|uncertain 且 formula/debug/layout/code| CH2[第二次独立 Chair]
-  CH2 --> DEC[ChairDecisionRecord]
-  CH --> DEC
-  DEC --> AR[ArchiveBatch 事务提交]
-  AR --> ST[SteeringBrief + 最近 reject 原因]
-  ST --> P
-```
-
-### 错误状态机
-
-```mermaid
-stateDiagram-v2
-  [*] --> Generate
-  Generate --> Pending: JSON 合法且过规则筛
-  Generate --> Salvage: JSON 损坏
-  Generate --> Retry: 429 / 不可修 JSON
-  Generate --> Rejected: sieve 空泛/过短/非题
-  Salvage --> Pending: 本地或 Salvage LLM 修好
-  Salvage --> Retry: 仍坏
-  Retry --> Generate: 到期 drain
-  Retry --> Rejected: retry_exhausted
-  Pending --> Chair: review_next_at 到期
-  Chair --> Accepted: 七维全 pass + 参考答案
-  Chair --> Rejected: 任一 check fail
-  Chair --> Pending: uncertain / 解析失败 / 二次审未确认
-  Pending --> ReviewExhausted: 超过 max_attempts
-  Accepted --> Pending: knowledge invalidate / 修订
-  ReviewExhausted --> [*]: 需 resume --retry-reviews
-```
-
-熔断：连续 `review_error` 达到 `circuit_breaker_error_streak`，或 `review_exhausted` 达到 `circuit_breaker_exhausted`，主循环以 `status=review_pending` 停，不空转。
-独立验证的单次运行调用额度用尽时，主循环以 `status=verification_budget_exhausted` 停止新增任务，待审题不消耗重试次数；下一次 `resume` 可继续审题。
-
-### SQLite 权威存储与导出
-
-```mermaid
-flowchart TB
-  CHAIR[ChairDecisionRecord 列表] --> REC[knowledge.record_question]
-  REC --> CHK{claim 已 quarantine / revision 变?}
-  CHK -->|是| BACK[改回 pending]
-  CHK -->|否| TX["commit_review 单事务"]
-  BACK --> TX
-  TX --> Q[(questions.sqlite3)]
-  TX --> JSONL[accepted/rejected/pending.jsonl 投影]
-  TX --> STEER[steering.json]
-  Q --> IDX[embeddings.npz 派生索引]
-  Q --> EXP["export_training"]
-  EXP --> KEEP{独立审查通过<br/>且非 fake<br/>且未 invalidate?}
-  KEEP -->|是| TRAIN[training.jsonl 无 internal_reference_answer]
-  KEEP -->|否| DROP[跳过]
-```
-
-durable generation_tasks 与 retry 租约也在 `questions.sqlite3`：进程崩溃后 `resume` 先跑未完成 task，再抽新 brief。
+用 LangGraph 多 Agent 流水线，为 NVIDIA CUDA 知识域批量生成 **SFT 问题集**。本阶段只出题，不出答案。
+
+出题由版本化知识图谱驱动。**每道候选题都经过独立模型完整审查**：解析失败、调用失败或结论不确定的题只会留在 pending 等待重审，不会被默认放行。生成、审题、修题三条工作线并行推进，知识扩充和官方文档审计在后台线程运行。
+
+![cuda-sft-qgen 多 Agent 系统总览](asset/00-system-overview.png)
+
+> 全部结构图都在 [`asset/`](asset/) 下，是手绘风格的 PNG，源码在 [`asset/diagram-src/`](asset/diagram-src/)。10 页演示文稿见 [`asset/cuda-sft-qgen-agents.pptx`](asset/cuda-sft-qgen-agents.pptx)。
+
+## 目录
+
+- [核心特性](#核心特性)
+- [快速开始](#快速开始)
+- [架构总览](#架构总览)
+- [Agent 详解](#agent-详解)
+- [题目生命周期](#题目生命周期)
+- [数据与存储](#数据与存储)
+- [配置](#配置)
+- [性能调优](#性能调优)
+- [验证与已知局限](#验证与已知局限)
+- [CLI 速查](#cli-速查)
+- [仓库结构](#仓库结构)
+
+## 核心特性
+
+- **知识图谱驱动**：31 个 L1 领域 → 404 个 L2 分类 → 3311 个 L3 claim 叶子。claim 带版本号、官方原文证据和依赖关系，全部存在 SQLite。
+- **每题独立审查**：Review Chair 用可单独配置的模型逐题审查，unique 题也要审。数值题交给盲解投票，代码题在沙箱里编译或运行。解析失败、调用异常、证据不足一律 pending。
+- **三线并发**：协调器按队列余量调度生成、审题、修题三条工作线。第一道题到期就开审，生成和审题互不阻塞。
+- **三层查重**：L0 归一化文本 SHA256 → L1 模板骨架 SimHash / Jaccard → L2 embedding 余弦，另有跨语言 claim 查重。批内再做 MMR 多样性精选。
+- **分层 Prompt**：静态、半静态、动态三层字节稳定，便于缓存。few-shot 按叶子、kind、答案格式挑选正例，并加入质量负例和反模板。
+- **Steering 闭环**：Chair 按存活题的分布（KL、熵、欠配 / 超配）给 Planner 纠偏。
+- **可恢复**：生成任务、重试队列、审题返修都持久化在 SQLite。429 会退避换 key，坏 JSON 先在本地修复，连续失败触发熔断，`resume` 可断点续跑。
+- **知识纠错可追溯**：claim 被官方文档驳斥后会被隔离，相关的已通过题自动退回 pending。
+- **多 Key 优先级调度**：Writer 0 > Salvage 1 > Chair 2 > Sieve 3 > Taxonomy 4。LLM 与 Embedding 槽位互相独立，连续 429 时自动降低并发。
 
 ## 快速开始
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-cp .env.example .env   # 按下方说明配置聊天和 embedding 的 API key
-```
-
-**基础命令**：
-```bash
-# 生成 1000 题（使用默认配置）
-cuda-sft-qgen generate --target 1000
-
-# 使用 dev profile（快速迭代）
-export CUDA_SFT_PROFILE=dev
-cuda-sft-qgen generate --target 100
-
-# 使用 prod profile（最高质量）
-export CUDA_SFT_PROFILE=prod
-cuda-sft-qgen generate --target 5000
-
-# 恢复中断的生成
-cuda-sft-qgen resume
-
-# 查看统计数据
-cuda-sft-qgen stats
-
-# 验证配置
+pip install -e ".[dev]"          # 符号答案归一化另需 .[verify]，本地 embedding 另需 .[hf]
+cp .env.example .env             # 填写聊天模型与 embedding 的 API key
 cuda-sft-qgen validate-config --verbose
-
-# 估算成本
-cuda-sft-qgen estimate-cost --target 1000 --profile prod
+cuda-sft-qgen generate --target 100
+cuda-sft-qgen export --output data/training.jsonl
 ```
 
-**Taxonomy 管理**：
-```bash
-# 重建知识树
-cuda-sft-qgen rebuild-taxonomy
-
-# 健康分析
-cuda-sft-qgen manage-taxonomy --analyze
-
-# 完整管理周期（分析 + 扩展）
-cuda-sft-qgen manage-taxonomy --tick --max-leaves 12 --apply
-
-# 手动扩展指定领域
-cuda-sft-qgen manage-taxonomy --expand --domain memory --facet failure --max-leaves 10 --apply
-```
-
-产物：`data/questions.sqlite3`、`data/knowledge.sqlite3`，以及 accepted/rejected/pending JSONL 和统计快照。正式训练导出使用 `cuda-sft-qgen export --output data/training.jsonl`，排除未独立审查、fake 和失效题；内部参考答案不导出。
-
-查重：L0 SHA256 → L1 骨架 SimHash/Jaccard → L2 embedding cosine；附近邻全文交给审题模型，批内只与质量通过的存活题比较。向量默认 `nvidia/nemotron-3-embed-1b`。
-
-聊天使用 OpenAI 兼容中转、embedding 保持 NVIDIA 时，在 `.env` 中配置：
+`.env` 按角色配置模型。Writer 是基准，其他角色留空时继承 Writer 的配置，完整字段见 [`.env.example`](.env.example)：
 
 ```dotenv
-WRITER_PROVIDER=openai
-WRITER_API_KEY=your-key
-WRITER_BASE_URL=https://www.poke2api.com/v1
-WRITER_MODEL=gpt-6-luna
-REVIEW_MODEL=gpt-6-sol
-THINKING_LEVEL=medium
-WRITER_GATE_MAX_TOKENS=2048
+WRITER_PROVIDER=nvidia                        # nvidia 或 openai（OpenAI 兼容接口）
+WRITER_API_KEY=your-key                       # 多 key：WRITER_API_KEY_2…_7，或逗号分隔的 WRITER_API_KEYS
+WRITER_BASE_URL=https://integrate.api.nvidia.com/v1
+WRITER_MODEL=nvidia/nemotron-3-ultra-550b-a55b
+
+REVIEW_PROVIDER=openai                        # 审题模型建议与出题模型不同家族
+REVIEW_API_KEY=your-key
+REVIEW_BASE_URL=https://your-openai-compatible-endpoint/v1
+REVIEW_MODEL=your-review-model
+
 EMBEDDING_PROVIDER=nvidia
 EMBEDDING_API_KEY=your-nvidia-key
 EMBEDDING_BASE_URL=https://integrate.api.nvidia.com/v1
 EMBEDDING_MODEL=nvidia/nemotron-3-embed-1b
 ```
 
-Evolver、Review、Salvage、Knowledge 可分别用 `EVOLVER_*`、`REVIEW_*`、`SALVAGE_*`、`KNOWLEDGE_*` 覆盖 Writer 的供应商、密钥、地址和模型；更换供应商或地址时需同时提供新地址和密钥。`THINKING_LEVEL=none|low|medium|high`。OpenAI 格式发送 `reasoning_effort`，NVIDIA 格式使用 `chat_template_kwargs`；`reasoning_content` 默认不落盘（`LOG_REASONING=1` 才记）。`validate-config` 检查各角色与 embedding 配置。
+- `EVOLVER_*`、`REVIEW_*`、`SALVAGE_*`、`KNOWLEDGE_*` 可以分别覆盖供应商、密钥、地址和模型。更换供应商或地址时，必须同时提供新地址和密钥。
+- `THINKING_LEVEL=none|low|medium|high`：OpenAI 格式发送 `reasoning_effort`，NVIDIA 格式使用 `chat_template_kwargs`。`WRITER_THINKING_LEVEL` 等变量可以按角色覆盖。
+- OpenAI 格式默认不发送 temperature / top_p，设置 `<ROLE>_SAMPLING_PARAMS=1` 才会发送。`reasoning_content` 默认不落盘，`LOG_REASONING=1` 时才记录。
+- `REVIEW_MODEL` 与出题模型相同时，启动会打印警告。
 
-## 配置系统
+## 架构总览
 
-### Profile 支持
+默认运行并发协调器（`generation.concurrent_pipeline=true`）。generation-stage、review-stage、repair-stage 各有 1 个 worker 线程，线程内部再用线程池并行处理；KnowledgeWorker 是独立的守护线程。所有 LLM 调用共享 ApiKeyPool。
 
-三种内置 profile（`configs/profiles/`）：
+### 并发协调器
 
-- **dev.yaml**: 快速迭代，较小 batch，温度 0.9
-- **test.yaml**: 最小资源，单线程，禁用 Taxonomy Manager
-- **prod.yaml**: 严格质量，最大吞吐，温度 1.0
+![并发协调器主循环](asset/01-coordinator.png)
 
-**使用方式**：
+- 每 0.25 秒一轮：刷新知识覆盖和计数 → 回收完成的 future → 检查熔断 → 计算余量 → 派发。
+- 队列容量 `review.queue_capacity` 默认是 2×batch（40），总上限 `max_pending_total` 默认再翻倍。在途生成和修题也占名额，形成背压。
+- 生成来源的优先级：未完成的 `generation_tasks`（崩溃恢复）> 到期的 `retry_tasks` > Planner 新题单。`max_iterations` 是单次运行的规划额度，resume 会接续累计计数，并获得一份新额度。
+- 有 ≥ `chair_trigger_count`（默认 1）道题到期、或生成线空闲时，派发一波审题，每波最多 `chair_flush_max`（默认 8）题。
+- 修题一次最多派发 `repair_concurrency`（默认 2）项，包含持久化的审题返修任务。
+- 熔断：连续 review_error 达到 `circuit_breaker_error_streak`（8），或 exhausted 题达到 `circuit_breaker_exhausted`（20），就停止派发新工作。达到 `max_runtime_seconds` 或验证预算耗尽时同理。
+- 结束状态：`archived`（达标）、`review_pending`（仍有待审、返修或重试）、`verification_budget_exhausted`、`iteration_limit`。
+- 调试用的顺序模式（`concurrent_pipeline=false`）走 LangGraph `StateGraph`：bootstrap → [architect] → planner → generate_batch → salvage / retry_drain → review_score → review_chair → archive → [taxonomy_manager]，循环往复。两种模式共用 `graph/policy.py` 里的路由判断。
+
+### 启动链路
+
+![启动链路](asset/02-startup.png)
+
+- 正式出题强制使用真实 API，检测到 FakeLLM 会直接报错。
+- `data_dir/pipeline.lock` 保证一个数据目录同一时间只有一个进程。
+- `build_runtime` 组装 Archive、KnowledgeStore（首次导入 taxonomy，并用最新 claim 版本覆盖）、各角色的 LLM 客户端与 Key 池、Embedder、向量 / gist 索引、Deduper 和缓存。
+- Bootstrap 不调 LLM，只统计真实 Writer 出身的 accepted 题。`resume --retry-reviews` 会把延后和 exhausted 的题重新排进审题。
+- Architect 只在 `--rebuild-taxonomy` 时运行一次，把扩充任务入队给 KnowledgeWorker，不阻塞出题。
+
+## Agent 详解
+
+| Agent | 模块 | 职责 | LLM 优先级 |
+|---|---|---|---|
+| Bootstrap | `graph/nodes/bootstrap.py` | 从 SQLite 恢复计数、pending、steering、run_state | — |
+| Architect | `graph/nodes/architect.py` | `--rebuild-taxonomy` 时入队知识树扩充 | — |
+| Planner | `graph/nodes/planner.py`、`planner/` | 按配额、steering、叶子覆盖和知识上下文生成 QuestionBrief | — |
+| Writer / Evolver | `graph/nodes/generate.py`、`generate_core.py`、`prompts/` | 分层 prompt 出题，规则筛 + 自洽门 | 0 |
+| Salvage / Rewrite / Review Repair | `graph/nodes/salvage.py` | 修 JSON 外壳、带缺陷说明重写、按审题意见返修 | 1 / 0 |
+| Retry Drain | `graph/nodes/salvage.py` | 到期的 429、坏 JSON 任务重新出题 | 0 |
+| Review Score | `graph/nodes/review_score.py`、`review/` | 近邻检索、三层查重、多样性报告 | Embedding |
+| Verifier | `review/verifier.py` | 盲解投票、rubric 评分、沙箱编译与运行 | 2 |
+| Review Chair | `graph/nodes/review_chair.py`、`prompts/chair.md` | 逐题独立审查、确定性规则、二审、MMR、批内去重、steering | 2 |
+| Archivist | `graph/nodes/review_archive.py`、`store/archive.py` | 单事务归档、登记知识依赖、派生索引、审题返修入队 | — |
+| KnowledgeWorker | `knowledge_worker.py`、`store/knowledge.py` | 后台 job：扩叶子、官方文档审计、关系、计算校验 | 4 |
+| TaxonomyManager | `taxonomy_manager.py`、`taxonomy_health/` | 知识树体检、按 facet 扩叶子、语义去重 | 4 |
+
+### Planner
+
+![Planner](asset/03-planner.png)
+
+- 本批条数 n = min(max(`min_generate_batch`, `writer_concurrency`), 剩余目标, 队列余量)。
+- Steering 把欠配 L1 的权重乘 3，超配 L1 乘 0.05，并封禁超配的 L2；偏好题型乘 2.5；难度可整体上调或下调。
+- 联合采样（`planner.joint_sampling`，默认开启）：L1 按 scope 先验减去当前占比加权；叶子按已有题量加权（<2 题 2.0、<8 题 1.0、<12 题 0.3、≥12 题 0）。各轴受 `configs/compat_matrix.yaml` 约束（kind → 题型、题型 → 答案格式、难度 → bloom、L2 / claim → arch_target），命中禁用组合时先拒绝采样 5 次，再精确枚举违规最少的组合。
+- provisional 新叶子只通过 10% 的探索份额（`provisional_exploration_share`）进入题单。
+- 30% 题单（`evolver_fraction`）交给 Evolver：优先用同叶子的已通过题做种子，没有时再取知识图谱中相关 claim 的题。
+- 每条题单挂上 `context_for_generation`：沿 requires / derives 两跳取 ≤6 个 claim，外加 ≤3 条证据。
+- 可选功能：`configs/planner.yaml` 中的 `adaptive_sampling`（默认关，按叶子健康分 ε-greedy 调权）；Mixup 配对（默认关，见[配置](#配置)）。
+
+### Writer / Evolver
+
+![Writer / Evolver](asset/04-writer-evolver.png)
+
+- Prompt 分三层：`writer.md` / `evolver.md` 静态前缀；persona、kind 约束和 bloom / 难度 / kind 质量卡组成的半静态块；`layers/` 下的 constraints / quality / cot / policy / context 加上目标架构的硬件事实组成的动态层。静态和半静态部分在进程内缓存，同时通过 `prompt_cache_key` 提高供应商侧的缓存命中率。
+- Few-shot：正例最多 5 个（同叶子 1、同 kind 2、同答案格式 1，剩余用同领域补齐），负例 2 个（质量原因被拒的题），反模板最多 15 个（题单反模板 + 近期被拒骨架 + 静态反模式）。
+- Evolver 在种子题基础上改变训练结构（deepen、re-arch、inject-bug、layout-eq 等算子），不是同义改写。
+- 结构化 CoT（`STRUCTURED_COT`，默认开）让 Writer 额外返回 `draft_plan`、`draft_target`、`verification_spec` 等私有字段。这些字段只用于后续验证，不进入训练导出；缺失或非法时记为 `draft_validation_errors`，Chair 直接判 `writer_contract`。
+- 推理耗尽预算时，把 max_tokens 翻倍（≤32768）并降一级 thinking 重试一次。429 或两次耗尽的题单进入 `retry_tasks`。
+- 规则筛（`sieve.py`）只拦过短 / 过长、缺 claim、不像问题、不像 CUDA、开口空泛和泄漏话术；硬件或叶子不一致只记 warning，交给 Chair 判断。
+- 自洽门（`review/writer_gate.py`）只拦确定的缺陷。并发模式下，命中缺陷的题交给修题线重写一次。
+
+### 修题线：Salvage / Rewrite / Review Repair / Retry
+
+![修题线](asset/05-repair-stage.png)
+
+- 三类任务：salvage（坏 JSON）、rewrite（自洽门缺陷）、review_repair（Chair 判为可修的 reject）。
+- Salvage 只修 JSON 外壳：先在本地做截断补全；本地修不好且 `SALVAGE_USE_LLM=1`（默认关）时，才调用 Salvage LLM，而且题干和关键字段必须与原文一致，否则转入重试。
+- 审题返修只针对真实 Writer 出身、且缺陷全部可修的 reject（correctness、answerability、multiple_correct、insufficient_premises、leakage、ub_misstated、invented_api、writer_contract），每题最多 1 次。claim_alignment、hardware、metadata 属于题单层面的问题，不返修。
+- `retry_tasks` 按 15s·2ⁿ⁻¹ 退避（上限 120s），租约 900s，累计 5 次失败后记为 `retry_exhausted`。
+
+### Review Score
+
+![Review Score](asset/06-review-score.png)
+
+- 只处理 `review_next_at` 已到期、未 exhausted 的题。题干向量优先使用出题时的预取结果，EmbeddingCache 命中时不再调用 API。
+- 默认阈值（`configs/default.yaml`，可被 profile 和环境变量覆盖）：L2 余弦 ≥0.94 判 dup、≥0.90 判 gray；L1 汉明距离 ≤3 或 Jaccard ≥0.91 判 dup，汉明 ≤8 且 Jaccard ≥0.82 判 gray。
+- 跨语言查重：用 `tests_claim` 的 gist 向量与异语言的已通过题比较，≥0.92 判 dup、≥0.86 判 gray。
+- 这一步只打分、不放行：dup 由 Chair 直接判 reject，gray 和 unique 都要完整审查。
+
+### Verifier
+
+![Verifier](asset/07-verifier.png)
+
+- 验证方式由 `verification_spec.mode` 决定，不按题型猜测。旧版没有结构化合同的题不会额外调用 LLM。
+- scalar / symbolic：K 个盲解 solver（高风险默认 5 个，普通 3 个，`SOLVER_HIGH_RISK_K` / `SOLVER_K`）只看题干。答案经过安全 AST + Fraction 或 SymPy 归一化；多数 ≥60%、没有平票、并且等于 Writer 的私有答案才算 pass。
+- open：生成 3 份独立作答，按 rubric 评分，最低分（RIP）≥0.6 才算 pass。
+- compile：要求完整的编译单元，在 bubblewrap 沙箱（无网络，prlimit 限制 CPU / 文件 / fd）中调用 nvcc，并与 `expected_compile` 和预期诊断比对。
+- runtime：要求本机 GPU 架构一致，沙箱只暴露 GPU 设备节点（包括 WSL 的 `/dev/dxg`），可选 compute-sanitizer memcheck / racecheck。负向合同必须由工具实际报告预期诊断才算 pass。
+- 缺工具、架构不符、超时、非零退出一律 pending：超时不能证明死锁，一次干净运行也不能证明没有竞态。
+- 每题调用上限 `VERIFIER_MAX_CALLS`（6），单次运行上限 `VERIFIER_RUN_MAX_CALLS`（600）。预算耗尽后协调器以 `verification_budget_exhausted` 停止，待审题不消耗审题次数。二审复用本轮已经得到的验证证据。
+
+### Review Chair
+
+![Review Chair](asset/08-review-chair.png)
+
+- 预检查：语料 dup → reject；不是真实 Writer 出身 → pending；Writer 合同错误 → reject。
+- `prompts/chair.md`（QUALITY_REVIEW_V2）规定了十步流程：盲解 → 前提 → 数值 → 选项 → 因果 → 泄漏 → 对齐 → 事实（对照硬件事实表）→ 对键 → 重复 → 价值评分。调用时 temperature 为 0，默认 thinking=medium、max_tokens 8192。
+- 七项检查（正确性、可答性、claim 对齐、硬件兼容、答案泄漏、元数据、重复）加三项价值分（教学价值、区分度、真实性）。accept 必须七项全部 pass，并给出内部参考答案和评估后的元数据。
+- `apply_decision_rules`：CuTe 形状矛盾强制 reject；只错在 metadata 时按评估值重标后 accept；最低价值分 <3 拒绝；结构化题验证未 pass 或构造检查未确认时保持 pending。
+- 二审：formula、code_complete、debug、layout 题型（以及 numeric kind）出现 uncertain 且没有 fail 时，再独立审一次。
+- 整波收尾：按（L2、kind、硬件、语言）分桶做 MMR 精选，每桶最多 3 题、λ=0.5；然后做批内去重，并采纳 assessed_metadata。
+- pending 按 30s·2ⁿ 退避（上限 30 分钟），审满 `max_attempts`（3）次后标记为 review_exhausted，需要人工处理或 `resume --retry-reviews`。
+- Steering 按存活题统计 KL、熵、欠配 / 超配、偏好题型和难度方向，并附上最近的 reject 原因。
+
+### Archivist
+
+![Archivist](asset/09-archivist.png)
+
+- 先登记题目与 claim 版本的依赖，再检查依赖的 claim 是否已被隔离、退役或改版；如果是，把 accept 降级为 pending（`knowledge_revision_invalidated`）。
+- `commit_review` 在单个事务里写入审查结论、run_state 和 steering。JSONL 文件只是 SQLite 的投影。
+- 派生索引（Deduper、向量 / gist 索引、embedding 缓存）在事务之后更新，写失败不会回滚权威数据。
+- 尚未达标时，把可修的 reject 入队为持久化的审题返修任务。
+
+### KnowledgeWorker
+
+![KnowledgeWorker](asset/10-knowledge-worker.png)
+
+- 守护线程每 5 秒领取一个 job，单次运行最多 20 个；发现 Writer 或 Chair 在排队时主动让出本轮。
+- 定时排程：24 小时未审的 claim 进入审计（provisional 优先）；遗留 claim 每个 L2 每轮最多 20 条，14 天内到期；外部 inventory 默认关闭。
+- audit 只接受官方 HTTPS 文档（docs.nvidia.com、developer.nvidia.com、nvidia.github.io），优先使用本地 BM25 镜像（`data/docs`）。审计结论要通过三道证据关：引文逐字出现在文档中、引文覆盖 claim 的全部关键标识与数字、独立 LLM 仅凭引文复核通过。
+- supported → verified；contradicted → quarantined，并按官方原文改写新版本重新审计；insufficient 保持原状态。
+- impact_events → `archive.invalidate_claim`：相关的已通过题退回 pending，并标记 `knowledge_reaudit_required`。
+- compute_verify 从 formula / numeric claim 中抽取表达式，常量必须来自硬件事实表或已验证的 claim。relate 用 embedding 召回候选，写入 provisional 关系边。
+
+### TaxonomyManager
+
+![TaxonomyManager](asset/11-taxonomy-manager.png)
+
+- 协调器每 `every_k_reviews`（默认 5）轮审题入队一次扩充。存在课程包（`configs/knowledge/packs/*.yaml`）时，按优先级轮转补齐 L2 缺口。
+- 先体检，再从 11 个 facet 中轮转选一个，最后决定任务：外部覆盖不足做 external_critic，高拒绝率或欠配做 gap_search，L2 未达标（目标 30 叶子 / L2）做扩充；健康分 ≥70 且没有外部缺口时跳过。
+- 每个 tick 最多新增 12 片叶子、调用 2 次 LLM。新叶子经过 `validate_leaf` 和语义去重（余弦 ≥0.92 丢弃、≥0.85 标灰）；默认不新建 L1，结构调整建议只存入 metadata，不自动改树。
+- 新叶子以 provisional 状态入库并自动审计，Planner 只给它们 10% 的探索份额。导入的旧叶子状态为 `legacy_unreviewed`。
+
+### ApiKeyPool
+
+![ApiKeyPool](asset/12-api-key-pool.png)
+
+- 优先级：Writer / 自洽门 0 > Salvage 1 > Chair / Verifier 2 > Sieve 3 > Knowledge / Taxonomy 4，同级先来先得。
+- 地址与 key 都相同的角色共用一个池。Writer 与 Review 共池时，为 Chair 预留 `chair_slot_reserve`（1）个槽位，保证生成与审题同时推进。
+- 每个 key 有独立的 LLM 信号量和 Embedding 信号量；Embedding 可以用 `EMBEDDING_*` 单独配置。
+- 遇到 429：该 key 冷却 15s·2ⁿ（上限 120s）后换 key，每个 key 每次调用最多重试 `LLM_RATE_LIMIT_RETRIES_PER_CALL`（2）次。连续 3 次 429 会把并发上限降到 key 的数量，之后每成功一次回升 1。所有 key 的配额都用完时抛出 RateLimitError，题单进入 `retry_tasks`。
+- 调用走流式输出并记录 usage。模型只输出推理、没有正文时报 ReasoningBudgetExceeded，不会把推理内容当作答案。
+
+## 题目生命周期
+
+![题目生命周期](asset/13-question-lifecycle.png)
+
+题单先落库再出题。任何失败都有明确去向：修题、重试、退避重审或 rejected。没有任何一条边通向"默认通过"。已通过的题依赖的 claim 被驳斥或改版时，题目会退回 pending 重新审查。
+
+## 数据与存储
+
+![数据与存储](asset/14-storage.png)
+
+- `questions.sqlite3` 是题目的权威存储：审查结论、生成任务、重试队列、run_state、steering 和知识失效记录都在这里。已有的 JSONL 题库首次使用时会备份为 `.legacy` 并迁移进 SQLite，安装和测试不会自动迁移原始题库。
+- `knowledge.sqlite3` 保存 claim 的各个版本、官方证据与文档快照、关系边、审计记录、题目依赖、impact 事件和后台 job。
+- JSONL 投影、`embeddings.npz` 等索引、`stats.json` 都是派生文件，可以删除后从 SQLite 重建。
+- `cuda-sft-qgen export` 逐题复核：真实 Writer 出身、审查模型不是 fake、QualityReview 可以重建且结论为 accept、结构化题验证 pass、没有合同错误、没有失效。导出结果不含内部参考答案，同时生成 `.manifest.json` 和 `.curriculum.json`。curriculum manifest 把整个父题 family 分到同一个 train / validation / test 集合，并输出分层 10% 的人工抽检队列（未执行人工审核，也不会标记为已审）。
+- 迁移、知识审计、导出和基准的细节见 [knowledge-and-review.md](docs/implementation/knowledge-and-review.md)。
+
+## 配置
+
+优先级：**CLI 参数 > 环境变量 > profile YAML > `configs/default.yaml`**。
+
+| Profile | 数据目录 | 特点 |
+|---|---|---|
+| `dev` | `data/dev` | 4 个写手、审题批次 10、每 10 轮审题扩充一次知识树，适合快速迭代 |
+| `test` | `data/test` | 最小资源：2 个写手、批次 5、关闭缓存和 TaxonomyManager |
+| `prod` | `data/prod` | 8 个写手、批次 30、每 3 轮审题扩充一次、每个 L2 目标 40 片叶子 |
+
 ```bash
-# 环境变量
-export CUDA_SFT_PROFILE=prod
-cuda-sft-qgen generate --target 2000
-
-# 或在代码中
-from cuda_sft_qgen.config_v2 import load_config_v2
-config = load_config_v2(profile="dev", target=500)
+CUDA_SFT_PROFILE=dev cuda-sft-qgen generate --target 100
 ```
 
-### 配置优先级
+在 `configs/profiles/` 下新建 `myprofile.yaml` 即可自定义 profile，只写需要覆盖的字段：
 
-CLI 参数 > 环境变量 > Profile YAML > default.yaml
-
-**示例**：
-```bash
-# 使用 prod profile 但覆盖温度
-export CUDA_SFT_PROFILE=prod
-export TEMPERATURE=0.85
-cuda-sft-qgen generate --target 1000
-```
-
-### 自定义 Profile
-
-创建 `configs/profiles/myprofile.yaml`：
 ```yaml
 generation:
-  temperature: 0.95
   writer_concurrency: 10
   evolver_fraction: 0.25
-
 review:
   batch_size: 25
   semantic_dup_threshold: 0.93
-
 paths:
   data_dir: data/myprofile
 ```
 
-使用：
-```bash
-CUDA_SFT_PROFILE=myprofile cuda-sft-qgen generate --target 2000
-```
+其他配置文件：`quotas.yaml`（题型、难度、bloom、硬件、语言配额）、`compat_matrix.yaml`（采样约束与叶子上限）、`angles.yaml`（出题角度卡）、`personas.yaml`、`scope.yaml`、`hardware_facts.yaml`（写入 Writer 与 Chair prompt 的已核实硬件参数）、`taxonomy/cuda.yaml`（按 `domains/` 拆分）、`knowledge/packs/`（课程包）。
+
+常用功能开关：
+
+| 环境变量 | 默认 | 作用 |
+|---|---|---|
+| `STRUCTURED_COT` | 1 | Writer 返回设计摘要和私有验证合同 |
+| `ANSWER_CONSISTENCY_ENABLED` | 1 | 开启独立验证（盲解、rubric、编译、运行） |
+| `CUDA_EXECUTION_ENABLED` | 1 | 设为 0 暂停 CUDA runner，需要执行的候选保持 pending |
+| `SOLVER_K` / `SOLVER_HIGH_RISK_K` | 3 / 5 | 盲解 solver 数量 |
+| `SOLVER_THINKING_LEVEL` / `SOLVER_MAX_TOKENS` | low / 3072 | solver 思考等级与输出上限（难题用 `SOLVER_THINKING_LEVEL_HARD`，默认 medium） |
+| `VERIFIER_MAX_CALLS` / `VERIFIER_RUN_MAX_CALLS` | 6 / 600 | 每题 / 每次运行的验证调用上限 |
+| `WRITER_CONSISTENCY_GATE` / `WRITER_GATE_LLM` | 1 / 0 | 自洽门；可选 LLM 预审 |
+| `SALVAGE_USE_LLM` / `SIEVE_USE_LLM` | 0 / 0 | 用 LLM 修 JSON；用 LLM 做规则筛 |
+| `PLANNER_JOINT_SAMPLING` | 1 | 联合约束采样，设为 0 回退旧路径 |
+| `CUDA_MIXUP_ENABLED` | 0 | MathMixup 风格配对（decomposed / hybrid） |
+| `EXTERNAL_INVENTORY_ENABLED` | 0 | 从官方文档生成外部概念清单，用于发现知识树缺口 |
+| `LLM_REQUEST_TIMEOUT` / `LLM_MAX_RETRIES` | 90 / 3 | 单次 HTTP 超时与有限重试 |
+
+- **Mixup**：Planner 用 embedding 找相似但难度不同的已通过题，生成 decomposed（去掉一个复杂度因素）或 hybrid（合并父题并增加正交约束）题。来源记录在 `parent_ids`、`parent_difficulties`、`mixup_mode`、`difficulty_target` 中。父题必须先独立通过 Chair；建议先用真实 API pilot 确认父题对齐、难度单调性和接受率后再开启。
+- **外部 inventory**：只用于发现缺口，不直接授权新 claim。流程为：清单 → 覆盖缺口 → critic → 查重 → provisional claim → 官方证据审计。`cuda-sft-qgen knowledge inventory` 默认只预览，加 `--apply` 才发布 provisional claim。
 
 ## 性能调优
 
-### 并发设置
-
-在 `.env` 中将 N 同时用于 Writer 线程数和可用的聊天 API 槽位；一个 key 时如下配置为 4 路。多个 key 时总槽位为 key 数量乘 `LLM_PER_KEY_CONCURRENCY`。超过槽位的 Writer 会排队。
+在 `.env` 中把 N 同时设为写手线程数和可用的聊天槽位。只有一个 key 时可以这样配置 4 路并发；多个 key 时，总槽位 = key 数 × `LLM_PER_KEY_CONCURRENCY`，超出槽位的写手会排队：
 
 ```dotenv
 WRITER_CONCURRENCY=4
 LLM_PER_KEY_CONCURRENCY=4
-WRITER_SUBMIT_STAGGER_SEC=0
 MIN_GENERATE_BATCH=4
 CHAIR_TRIGGER_COUNT=1
 CHAIR_MAX_WORKERS=2
 REPAIR_CONCURRENCY=2
+EMBED_PER_KEY_CONCURRENCY=2
 ```
 
-`cuda-sft-qgen probe-concurrency --skip-pipeline` 可查看实际 `peak_llm_inflight`。地址和密钥相同的角色共享 API 池；embedding 可单独配置。Review 与 Writer 共用 API 池时，`chair_slot_reserve` 为待审题保留聊天槽位。并发提高批量吞吐，不缩短单个模型请求的响应时间；`benchmark_report.json` 中的 `candidate_latency_p95_seconds` 和 `candidate_under_30_rate` 用于验收单题 30 秒目标。
+- `cuda-sft-qgen probe-concurrency --skip-pipeline` 可以查看实际的 `peak_llm_inflight`。
+- Review 与 Writer 共用 API 池时，`chair_slot_reserve` 为待审题保留聊天槽位。
+- 并发提高的是批量吞吐，不会缩短单个请求的响应时间。`benchmark_report.json` 中的 `candidate_latency_p95_seconds` 和 `candidate_under_30_rate` 用来验收"单题 30 秒"目标。
+- `generation.prompt_cache` 和 `embedding_cache` 默认开启。
+- `cuda-sft-qgen estimate-cost --target 1000 --profile prod` 按配置的费率估算成本，不是实测数据。未配置费率时，费用字段为 `null`。
+
+## 验证与已知局限
+
+- FakeLLM 测试只验证协议和错误处理，不能证明生成质量。`generate`、`resume`、`benchmark` 和 `gate` 都强制使用真实 API。
+- 真实 pilot 请使用临时数据目录，至少记录：JSON 成功率、claim 对齐、target 一致性、Chair accept / reject / pending、dup / gray 比例、编译与运行通过率、调用次数与 token 成本、平均延迟。日志中不要写入 API key、完整私有 CoT 或敏感请求头。
 
 ```bash
-# 多 API Key 线性扩展（最多推荐 8 个）
-export WRITER_API_KEY=nvapi-xxx
-export WRITER_API_KEY_2=nvapi-yyy
-export WRITER_API_KEY_3=nvapi-zzz
-
-# 每个 key 的并发数（2-4 推荐，过高会 429）
-export LLM_PER_KEY_CONCURRENCY=3
-export EMBED_PER_KEY_CONCURRENCY=2
-
-# Embedding 超配（可以更高，调用更快）
-export EMBED_OVERSUB=3
-```
-
-### 缓存优化
-
-```yaml
-generation:
-  prompt_cache: true         # 节省 ~60% prompt tokens
-  embedding_cache: true      # 节省 ~80% embedding calls
-```
-
-### 质量控制
-
-```yaml
-review:
-  semantic_dup_threshold: 0.94   # 提高=更少判重
-  semantic_gray_threshold: 0.90  # 灰区范围
-  chair_max_workers: 4          # 每题均审查，此项控制并发
-```
-
-### 成本估算
-
-```bash
-# 预估 1000 题成本
-cuda-sft-qgen estimate-cost --target 1000 --profile prod
-
-# 典型输出（3 keys, prod profile）:
-# {
-#   "cost_usd": {
-#     "llm_total": 22.50,
-#     "embeddings": 0.85,
-#     "total": 23.35
-#   }
-# }
-```
-
-**性能与费用口径**：上面的费用命令使用配置费率估算，不代表本次实测。
-真实延迟、API 调用数和 provider token usage 见 `docs/validation/`。
-未配置费率时报告费用为 `null`；本次没有证实历史的吞吐或成本宣传值。
-
-## 结构化 CoT、Mixup 与真实 Agent 验证
-
-启用 `STRUCTURED_COT=1` 时，Writer 的真实 API 请求按四个内部阶段组织：
-
-```text
-Analyze → Plan → Construct → Self-check
-```
-
-`draft_plan` 和 `draft_target` 只用于后续验证，不会进入 `Question.to_jsonl()` 或训练导出。Seed 会优先从相同 `l3_id + kind + question_type + hardware` 桶中抽取，避免把不相关的 CUDA 机制混入同一个 few-shot prompt。
-
-启用 MathMixup 风格生成时，Planner 使用 claim/topic embedding 配对相似但难度不同的 accepted 题目，并生成：
-
-- `decomposed`：保留核心 claim，减少一个可观测复杂度因素；
-- `original`：原始 accepted 题；
-- `hybrid`：合并相关父题并增加正交约束。
-
-新增质量功能尚未通过生产验收，`prompt_cot`、`answer_consistency_enabled`、Mixup、外部 inventory 默认关闭。可显式启用并用隔离 pilot 验证，不能用 FakeLLM 通过率代替质量验证。
-
-Pair provenance 保存在 `parent_ids`、`parent_difficulties`、`mixup_mode` 和 `difficulty_target` 中。默认关闭 Mixup，确认真实 API pilot 的 parent alignment、难度单调性和 Chair 接受率后再开启：
-
-```yaml
-mixup:
-  enabled: false
-  fraction: 0.30
-  modes: [decomposed, hybrid]
-  pair_similarity_min: 0.80
-  pair_similarity_max: 0.995
-```
-
-也可以用 `CUDA_MIXUP_ENABLED=1` 临时启用。生产 pair mining 使用运行时 embedding 服务；没有 embedding 服务时才使用稳定的 hashed-token fallback，后者只适合离线测试。
-
-### 验证顺序
-
-候选题按以下顺序处理：
-
-```text
-schema/sieve
-→ claim、hardware、版本检查
-→ cheap dedup
-→ Writer self-check
-→ target 一致性
-→ CUDA 编译或 litmus evidence
-→ 独立 Review Chair
-→ archive
-```
-
-可验证标量/符号题默认进行 5 次独立 solver 调用，配置支持 3–5 次；solver 仅看到题干，不接收 tests_claim、Writer target 或父题答案。投票冲突进入 `pending`；不能因为没有工具或 API 超时而默认通过。
-
-验证由 `verification_spec.mode` 决定，不能仅凭题型推断。`compile` 使用完整 translation unit 和正/负编译预期；`runtime` 在 bubblewrap 隔离、无网络、无凭据环境执行，限制 CPU、文件大小和时长，仅暴露 GPU 设备（包含 WSL `/dev/dxg`）。缺少工具、架构不匹配、超时或 runner 被禁用时保持 pending。二次 Chair 复用本轮已生成的 verifier evidence，不重复执行 K 次 Solver；跨题调用由原子运行预算限制。负向 runtime 合同可指定 `expected_runtime_outcome=sanitizer_error` 和明确诊断词；只有工具实际报告该错误才确认。死锁不能用超时证明，一次成功运行不能证明不存在竞态或 UB。
-
-数值答案用安全 AST/Fraction 归一化；符号答案需要 `pip install -e ".[verify]"`。开放题生成 3 个回答再独立评分，在同主题/kind/hardware 桶内按最低分筛选，不使用全局分数阈值。
-
-### 外部知识覆盖
-
-KnowledgeWorker 可以从 allowlisted NVIDIA 文档、Runtime API 文档索引、release notes 和 Nsight 文档生成外部概念清单。清单只用于发现 taxonomy 缺口，不直接授权新 claim：
-
-```text
-external inventory
-→ embedding/lexical coverage gap
-→ taxonomy critic
-→ duplicate/gray 检查
-→ provisional claim
-→ 官方 evidence audit
-→ verified claim（随后可供 Planner 使用）
-```
-
-`external_inventory_enabled` 默认关闭以避免未经配置的网络抓取。开启后，外部 coverage 低于 `taxonomy.manager.external_coverage_threshold` 会触发 critic，即使现有 taxonomy 的普通 health score 已经较高。无法归入已有 L2 的新分类轴只记录在 `new_axes`，不会自动写入 active taxonomy。
-
-也可以显式运行一次 inventory（默认只预览；`--apply` 才发布 provisional claims）：
-
-```bash
-cuda-sft-qgen knowledge inventory --data-dir data/dev
-cuda-sft-qgen knowledge inventory --apply --data-dir data/dev
-```
-
-### 真实 API pilot
-
-FakeLLM 测试只验证协议和错误处理，不能证明 Agent 生成质量。真实 pilot 应使用临时数据目录和项目现有 `.env`：
-
-```bash
-CUDA_SFT_DATA_DIR=/tmp/cuda-sft-pilot \
-CUDA_SFT_PROFILE=dev STRUCTURED_COT=1 ANSWER_CONSISTENCY_ENABLED=1 \
+CUDA_SFT_DATA_DIR=/tmp/cuda-sft-pilot CUDA_SFT_PROFILE=dev \
 cuda-sft-qgen generate --target 8 --batch 4
+
+cuda-sft-qgen agent-pilot --output /tmp/agent-pilot.json \
+  --samples 2 --max-calls 160 --timeout 1800 --groups A B C D
 ```
 
-Pilot 至少记录：JSON 成功率、claim alignment、target consistency、Chair accept/reject/pending、duplicate/gray rate、parent claim coverage、难度单调性、编译/smoke pass rate、token/call 成本和平均延迟。不得把 API key、完整私有 CoT 或敏感请求头写入日志。
+- `agent-pilot` 在隔离的 archive 中用同一份冻结的 taxonomy 快照和同一组题单做 A/B/C/D 对照：A 是旧版 Writer 基线，B 加结构化 CoT，C 再加独立一致性验证，D 再尝试 Mixup。`status=completed` 只表示流程跑完，不代表质量达标。
+- 历史真实评测（记录未纳入本仓库）显示单次 Chair 仍会漏检：在固定的 12 例缺陷集上，默认设置检出 8 个缺陷中的 3 个，medium reasoning 时检出 5 个，4 道对照题全部接受。因此 accept 只是一次运行的操作结果，不能替代官方证据、编译、运行或人工审核。reject 也需要来源复核：官方文档曾纠正过一次审题误判——`cudaMemcpyPeer` 在未开启 peer access 时仍可以经由 host 中转完成，开启 peer access 只是为了走更快的直连路径。
+- 静态难度特征只是可解释的排序先验，最终 1–4 难度标签由独立 Chair 校准；本项目尚未做大规模人工难度标定。
+- 本项目只导出问题。curriculum manifest 为后续答案生成与训练做准备，目前没有运行 SFT、GRPO 或下游 CUDA 模型训练。
 
-Archive 还可以生成 curriculum manifest：
+## CLI 速查
 
-```python
-archive.export_curriculum_manifest(Path("data/curriculum.json"))
-```
-
-`export` 同时生成 `.curriculum.json`，两种导出复用独立审查门槛。manifest 记录父题 family，整个 family 分到同一个 train/validation/test split，并输出分层 10% 人工抽检队列（未执行人工审核，不标已审）。
-
-manifest 的默认训练顺序是 `decomposed → original → hybrid`，但 `mixup_mode` 与 assessed difficulty 是两个独立维度，训练端应按联合 bucket 采样。
-
-### 真实验证记录
-
-汇总结论与验收边界见 [RESULTS.md](docs/validation/RESULTS.md)。
-
-真实验证产物保存在 `docs/validation/`，文件权限为 `0600`，其中只保留公开题干、来源证据、脱敏统计和错误码，不保留 API key、完整请求、私有答案或模型推理：
-
-- `cuda-tools-negative.json`：真实 memcheck 捕获预期的越界全局写错误，验证负向 runtime 合同。
-- `cuda-tools.json`：CUDA 12.6、WSL RTX 3060（sm_86）的真实编译、运行、负编译和 Compute Sanitizer 结果；sm_90 因本机架构不匹配而保持 pending。
-- `knowledge-confirmation.json`：加入 material token/数字覆盖检查与第二次独立审核后的重验记录（以文件中最终状态为准）。
-- `knowledge-pilot.json`：真实 NVIDIA LLM/Embedding 对官方 release notes 的概念发现、critic、provisional claim 和 evidence audit。历史结果中有一条 claim 通过逐字官方证据审计；后续代码还要求完整关键标识/数字覆盖与独立再次确认。
-- `review-quality-reasoning.json`：同一 12 例使用 medium reasoning/8192 tokens 时检出 5/8 个缺陷、仍漏检 3 个，对照题 4/4 接受；不是统计显著性或 CUDA 全域效果证明。
-- `review-quality.json`：12 个 frozen quality cases 的真实 Chair 结果。当前模型在固定缺陷集上检出 3/8 个缺陷、漏检 5 个，4/4 对照题接受；这项结果只能说明单次 Chair 仍有漏检，不能作为数据质量达标证明。
-- `verification-live.json`：真实盲 solver 对受控 scalar 题的 5 票一致性、错误 writer target 的 pending，以及开放题响应不足时的 pending。
-- `agent-pilot-small-abcd.json`：后续受限运行已尝试全部四组，但因 API 延迟、模型合同错误和 deadline 仍为 partial；不能据此宣称质量通过。
-- `agent-pilot.json`：A/B/C/D 真实 Agent 对照运行的增量 checkpoint。`status=completed` 只代表流程结束；`quality_gates` 只衡量样本量条件，不证明质量改善。此轮历史运行是 partial，小样本和预算中断均只用于诊断。
-- `mixup-targeted.json`：两个真实独立 Chair 接受的父题及其真实 Mixup 尝试；没有合格父题时明确记录 `not_evaluated`。
-
-运行新的真实对照需要 NVIDIA API key 和真实 embedding：
+| 命令 | 用途 |
+|---|---|
+| `generate --target N [--batch B] [--rebuild-taxonomy]` | 运行出题流水线 |
+| `resume [--retry-reviews] [--data-dir D]` | 断点续跑；可把延后和 exhausted 的题重新排进审题 |
+| `stats` / `export --output F` | 覆盖统计；导出通过独立审查的训练集 |
+| `knowledge <action>` | 知识图谱：stats、query、audit、impact、export、graph、viz、ingest-pack、expand、relate、inventory、verify、compute-verify、backlog、refine-legacy |
+| `manage-taxonomy --analyze / --tick / --expand / --gap-search / --refine [--apply]` | 知识树体检与扩充 |
+| `taxonomy health` / `taxonomy expand` / `expand-taxonomy` / `rebuild-taxonomy` | 知识树健康报告与批量扩充 |
+| `validate-config [--verbose]` / `estimate-cost --target N` | 配置检查与费用估算 |
+| `probe-concurrency` | 实测 API 并发 |
+| `benchmark` / `gate` / `review-benchmark` / `agent-pilot` | 隔离的基准、吞吐门禁、审题评测、A/B/C/D 对照 |
 
 ```bash
-cuda-sft-qgen agent-pilot \
-  --output docs/validation/agent-pilot.json \
-  --samples 2 --max-calls 160 --timeout 1800 \
-  --groups A B C D
+cuda-sft-qgen manage-taxonomy --tick --max-leaves 12 --apply
+cuda-sft-qgen manage-taxonomy --expand --domain T02 --facet failure --max-leaves 10 --apply   # T02 = 内存
+cuda-sft-qgen knowledge stats
 ```
 
-`--samples` 为每类样本数（默认 8 类），调用预算按组均分，重试与截止退出会记录 partial。生产关闭验证时，带结构化验证合同的题不能被接受/导出；B 因此只可观察 Chair 的 model_action，不宣称已验证。
+## 仓库结构
 
-该命令使用临时 archive、固定 taxonomy 快照和相同 brief 集合。A 是旧 Writer 基线，B 加结构化 CoT，C 再加独立一致性，D 再尝试 Mixup；父题必须在 D 组内独立通过 Chair。`accept` 只表示该次运行的操作结果，不能替代官方证据、编译、运行或人工审核。
+```text
+src/cuda_sft_qgen/
+├── graph/            # LangGraph 图、并发协调器、路由策略、各 Agent 节点、handoff 契约
+├── planner/          # 联合采样、自适应采样、Mixup 配对
+├── prompts/          # writer / evolver / chair / salvage 模板、分层片段、few-shot、taxonomy 提示词
+├── review/           # 指纹、查重、多样性、一致性、自洽门、Verifier、CuTe 形状检查
+├── store/            # questions.sqlite3（Archive）与 knowledge.sqlite3（KnowledgeStore）
+├── knowledge/        # 本地官方文档 BM25 检索
+├── taxonomy_health/  # 知识树体检与叶子扩充
+├── cli/              # 命令行入口
+├── knowledge_worker.py · taxonomy_manager.py · keys.py · llm.py · runtime.py · config.py …
+configs/              # default.yaml、profiles/、配额、角度卡、兼容矩阵、硬件事实、taxonomy、课程包
+asset/                # 手绘结构图、演示文稿配图（slides/）、PPTX、图的源码（diagram-src/）
+docs/implementation/  # 知识审计、导出与注释规范
+tests/                # 单元、集成与 fix_v2 契约测试
+```
 
-CUDA 官方文档曾用于纠正一个真实 reviewer 误判：`cudaMemcpyPeer` 在未启用 peer access 时仍可通过 host staging 工作；启用 peer access 的作用是避免 staging 并获得更快的 peer path。由此可见，reviewer 的 reject 也必须由来源或执行证据复核。
-
-
-### 配置与限制
-
-| 环境变量 | 作用 |
-|---|---|
-| `STRUCTURED_COT=1` | 启用结构化设计摘要和私有验证合同 |
-| `ANSWER_CONSISTENCY_ENABLED=1` | 启用独立求解/开放题评分/工具合同验证 |
-| `CUDA_MIXUP_ENABLED=1` | 开启相关题配对；默认关闭 |
-| `CUDA_EXECUTION_ENABLED=0` | 暂停 CUDA runner；需执行的候选保持 pending |
-| `SOLVER_K` / `SOLVER_HIGH_RISK_K` | 默认 3/5；每题调用还受 `VERIFIER_MAX_CALLS` 与全运行 `VERIFIER_RUN_MAX_CALLS` 限制 |
-| `SOLVER_THINKING_LEVEL` / `SOLVER_MAX_TOKENS` | 紧凑 solver 输出预算 |
-| `LLM_REQUEST_TIMEOUT` / `LLM_MAX_RETRIES` | 单次 HTTP 超时与有限重试（总实验还需 pilot deadline） |
-| `EXTERNAL_INVENTORY_ENABLED=1` | 后台单独调度官方资料 inventory job |
-
-`knowledge inventory` 未指定 `--apply` 时只预览；新 L1/L2、拆分/合并建议持久化供复核，不自动重排知识树。
-静态难度特征是可解释的排序先验，最终 1–4 标签由独立 Chair 校准；未宣称完成大规模人类难度标定或下游训练。
-本项目依然只导出问题，curriculum manifest 为后续答案生成与训练准备；本次没有运行 SFT、GRPO 或下游 CUDA 模型训练。
+注释约定见 [comment-standard.md](docs/implementation/comment-standard.md)。结构图的重新生成方法见 [asset/diagram-src/README.md](asset/diagram-src/README.md)。

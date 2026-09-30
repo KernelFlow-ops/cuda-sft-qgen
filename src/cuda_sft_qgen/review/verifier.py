@@ -518,6 +518,10 @@ def _open_rip(q: Question, reviewer: Any, spec: VerificationSpec, cfg: dict[str,
     except Exception as exc:
         return {"status": "pending", "reason": f"rubric_judge_error:{type(exc).__name__}"}
     rip = min(scores)
+    floor = float(cfg.get("open_min_score", 0.6))
+    if rip < floor:
+        return {"status": "pending", "reason": "open_rubric_below_min",
+                "rip_score": rip, "scores": scores, "rubric_evidence": proofs}
     return {"status": "pass", "reason": "open_rip_score_valid",
             "rip_score": rip, "scores": scores, "rubric_evidence": proofs}
 

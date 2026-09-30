@@ -1,6 +1,8 @@
 """Rendered prompts: invariants I1, I2, I4 (task T20)."""
 import re
 
+import yaml
+
 CONFLICT = "Still return one object with"
 
 
@@ -42,6 +44,13 @@ def test_instance_never_falls_back_to_claim(settings):
 def test_hardware_facts_injected(settings):
     b = _build(settings, arch_target="sm_80", hardware="ampere")
     assert "max_smem_per_sm_kb: 164" in b.system
+
+
+def test_quality_cards_and_taxonomy_prompt_markers(repo_root):
+    prompts = repo_root / "src" / "cuda_sft_qgen" / "prompts"
+    cards = yaml.safe_load((prompts / "quality_cards.yaml").read_text(encoding="utf-8"))
+    assert len(cards["answer_format"]) == 9
+    assert "COMPUTE_EXTRACT_V1" in (prompts / "taxonomy" / "compute_extract.md").read_text(encoding="utf-8")
 
 
 def test_unrendered_placeholder_raises(settings, monkeypatch):

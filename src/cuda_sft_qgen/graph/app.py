@@ -157,6 +157,9 @@ def run_pipeline(
                 initial_state(rebuild_taxonomy=rebuild_taxonomy),
                 {"recursion_limit": recursion_limit},
             )
+        if rt.knowledge_worker is not None:
+            rt.knowledge_worker.stop(timeout=None)
+            rt.knowledge_worker = None
         rt.refresh_knowledge(force=True)
         result["accepted_count"] = rt.store.status_counts()["verified_accepted"]
         result["rejected_count"] = len(rt.store.load_rejected())

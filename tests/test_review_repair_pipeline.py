@@ -14,7 +14,7 @@ from cuda_sft_qgen.runtime import reset_runtime, set_runtime
 REAL_ORIGIN = {"writer_real_api": True, "writer_provider": "openai", "writer_model": "test-model"}
 
 
-def _decision(question, code="hardware"):
+def _decision(question, code="correctness"):
     question.defect_codes = [code]
     return {"action": "reject", "reason": "chair:" + code, "question": question.model_dump()}
 

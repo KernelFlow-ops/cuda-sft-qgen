@@ -250,16 +250,29 @@ def run_concurrent(rt, initial: dict) -> dict:
                     continue
                 if ready:
                     continue
-                # No producer or immediately reviewable work remains. Persist
-                # delayed/exhausted work for resume rather than polling indefinitely.
-                break
+                delayed = [float(q.get("review_next_at") or 0) for q in active
+                           if float(q.get("review_next_at") or 0) > now]
+                if settings.retry_drain_enabled and retry_room > 0:
+                    delayed.extend(float(item.get("next_ok_at") or 0)
+                                   for item in rt.store.load_retry_queue()
+                                   if float(item.get("next_ok_at") or 0) > now)
+                if not delayed:
+                    break
+                # Delayed work remains runnable in this invocation. Keep the
+                # coordinator alive until it is due or a run limit is hit.
+                wake_in = min(delayed) - now
+                if deadline:
+                    wake_in = min(wake_in, max(0.0, deadline - (time.monotonic() - start)))
+                time.sleep(min(0.25, max(0.0, wake_in)))
+                continue
             time.sleep(0.25)
 
     refresh()
     state["done"] = state["accepted_count"] >= settings.target_question_count
     state["status"] = "archived" if state["done"] else (
         "verification_budget_exhausted" if rt.verification_budget_exhausted else
-        "review_pending" if state["pending"] or rt.store.unfinished_review_repairs()
+        "review_pending" if (state["pending"] or rt.store.unfinished_review_repairs()
+                             or (settings.retry_drain_enabled and rt.store.retry_queue_size()))
         else "iteration_limit")
     elapsed = time.monotonic() - start
     get_metrics().observe("pipeline_seconds", elapsed)

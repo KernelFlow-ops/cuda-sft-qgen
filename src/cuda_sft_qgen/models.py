@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from cuda_sft_qgen.enums import ANSWER_FORMATS, ARCH_TARGETS, SCENARIOS, DEFECT_CODES, OPERATORS
+from cuda_sft_qgen.enums import ANSWER_FORMATS, ARCH_TARGETS, CHECK_TO_DEFECT, SCENARIOS, DEFECT_CODES, OPERATORS
 
 
 def _validate_enum(value: str, allowed: tuple[str, ...], name: str, allow_empty: bool = False) -> str:
@@ -42,7 +42,7 @@ Bloom = Literal[
     "create",
 ]
 
-Hardware = Literal["agnostic", "ampere", "hopper", "blackwell"]
+Hardware = Literal["agnostic", "volta", "turing", "ampere", "ada", "hopper", "blackwell"]
 Granularity = Literal["api", "kernel", "pipeline", "system"]
 Language = Literal["zh", "en"]
 Source = Literal["writer", "evolver"]
@@ -58,7 +58,7 @@ class AssessedMetadata(BaseModel):
     question_type: QuestionType
     difficulty: int = Field(ge=1, le=4)
     bloom: Bloom
-    hardware: Hardware
+    hardware: Hardware | None = None
     granularity: Granularity
     language: Language
     arch_target: str | None = None
@@ -220,7 +220,9 @@ class QualityReview(BaseModel):
             if self.assessed_metadata is None:
                 raise ValueError("accept requires independently assessed metadata")
         if self.action == "reject" and "fail" not in results:
-            raise ValueError("reject requires a failed check")
+            non_check_defects = set(DEFECT_CODES) - set(CHECK_TO_DEFECT.values())
+            if not set(self.defect_codes).intersection(non_check_defects):
+                raise ValueError("reject requires a failed check or a non-check defect")
         return self
 
 

@@ -19,6 +19,8 @@ def _setup_logging(verbose: bool) -> None:
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if not verbose:
+        logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def _json_print(payload) -> None:

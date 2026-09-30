@@ -1,0 +1,19 @@
+{
+  "name": "cuda-sft-qgen-diagrams",
+  "private": true,
+  "description": "Hand-drawn architecture diagrams and slide deck for cuda-sft-qgen",
+  "scripts": {
+    "fonts": "sh fetch-fonts.sh",
+    "diagrams": "node build.js",
+    "slides": "node build-slides.js",
+    "deck": "node build-deck.js",
+    "all": "node build.js && node build-slides.js && python quantize.py && node build-deck.js"
+  },
+  "dependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "elkjs": "^0.12.0",
+    "fontkit": "^2.0.4",
+    "pptxgenjs": "^4.0.1",
+    "roughjs": "^4.6.6"
+  }
+}

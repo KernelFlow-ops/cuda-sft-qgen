@@ -78,9 +78,10 @@ Return exactly one JSON object:
   "construction_checks": {"oracle_alignment": "pass"},
   "evidence": ["..."],
   "internal_reference_answer": "your blind answer (required for all actions)",
-  "assessed_metadata": {"question_type": "...", "difficulty": 1, "bloom": "...", "hardware": "agnostic|ampere|hopper|blackwell",
+  "assessed_metadata": {"question_type": "...", "difficulty": 1, "bloom": "...",
                         "arch_target": "sm_XX|any", "granularity": "api|kernel|pipeline|system", "language": "zh|en",
                         "answer_format": "..."}
 }
 defect_codes is [] for accept. assessed_metadata may be null only for reject/pending.
+Hardware bucket is derived from arch_target; assign arch_target rather than a hardware label.
 Set each construction_checks value to pass, fail, or uncertain after checking it; include every name in required_construction_checks.

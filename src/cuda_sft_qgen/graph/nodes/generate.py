@@ -9,10 +9,10 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from concurrent.futures import as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from contextvars import copy_context
 
 from cuda_sft_qgen.errors import GeneratorError
-from cuda_sft_qgen.executor import PriorityExecutor
 from cuda_sft_qgen.graph.nodes.generate_core import (
     GenerateOutcome,
     _safe_generate,
@@ -25,7 +25,6 @@ from cuda_sft_qgen.graph.nodes.generate_core import (
     salvage_item,
 )
 from cuda_sft_qgen.graph.state import PipelineState
-from cuda_sft_qgen.keys import PRI_WRITER
 from cuda_sft_qgen.models import Question, SteeringBrief
 from cuda_sft_qgen.observability import get_metrics, trace_node
 from cuda_sft_qgen.prompts.fewshot import FewshotCorpus
@@ -36,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 @trace_node("generate_batch")
 def generate_batch_node(state: PipelineState) -> dict:
-    """Run the current brief batch in a priority executor; collect salvage items."""
+    """Run the current brief batch on bounded writer workers; collect salvage items."""
     try:
         rt = get_runtime()
         briefs = state.get("batch_briefs") or []
@@ -72,8 +71,8 @@ def generate_batch_node(state: PipelineState) -> dict:
         corpus = FewshotCorpus.from_store(rt.store, anti_k=anti_k)
         batch_t0 = time.monotonic()
 
-        # Use PriorityExecutor instead of ThreadPoolExecutor
-        executor = PriorityExecutor(max_workers=workers, max_queue_size=queue_size)
+        if queue_size < 1:
+            raise ValueError("priority_queue_size must be positive")
 
         # Optional tqdm progress bar
         pbar = None
@@ -125,34 +124,38 @@ def generate_batch_node(state: PipelineState) -> dict:
                 pbar.update(1)
 
         try:
-            futs = []
-            for i, brief in enumerate(briefs):
-                # Backpressure control: check remaining capacity before submitting
-                if rt.pool is not None:
-                    capacity_frac = rt.pool.remaining_capacity_fraction("llm")
-                    if capacity_frac < backpressure_threshold:
-                        logger.debug(
-                            "Backpressure triggered: llm capacity=%.1f%% < %.1f%%, sleeping %.1fs",
-                            capacity_frac * 100,
-                            backpressure_threshold * 100,
-                            backpressure_sleep,
-                        )
-                        time.sleep(backpressure_sleep)
-                if i and stagger_sec > 0:
-                    time.sleep(stagger_sec)
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="writer") as executor:
+                inflight = set()
+                for i, brief in enumerate(briefs):
+                    if len(inflight) >= workers + queue_size:
+                        done, inflight = wait(inflight, return_when=FIRST_COMPLETED)
+                        for fut in done:
+                            try:
+                                fut.result()
+                            except Exception as exc:  # noqa: BLE001
+                                logger.error("Task failed: %s", exc)
 
-                # Submit with Writer priority (0)
-                fut = executor.submit(PRI_WRITER, _one, brief)
-                futs.append(fut)
+                    if rt.pool is not None:
+                        capacity_frac = rt.pool.remaining_capacity_fraction("llm")
+                        if capacity_frac < backpressure_threshold:
+                            logger.debug(
+                                "Backpressure triggered: llm capacity=%.1f%% < %.1f%%, sleeping %.1fs",
+                                capacity_frac * 100,
+                                backpressure_threshold * 100,
+                                backpressure_sleep,
+                            )
+                            time.sleep(backpressure_sleep)
+                    if i and stagger_sec > 0:
+                        time.sleep(stagger_sec)
 
-            # Wait for all tasks to complete
-            for fut in as_completed(futs):
-                try:
-                    fut.result()
-                except Exception as exc:  # noqa: BLE001
-                    logger.error("Task failed: %s", exc)
+                    inflight.add(executor.submit(copy_context().run, _one, brief))
+
+                for fut in as_completed(inflight):
+                    try:
+                        fut.result()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("Task failed: %s", exc)
         finally:
-            executor.shutdown(wait=True)
             if pbar is not None:
                 pbar.close()
 

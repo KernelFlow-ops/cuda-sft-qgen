@@ -426,7 +426,7 @@ def compare_gate_reports(
     failures: list[str] = []
     warnings: list[str] = []
     want = int(target if target is not None else current.get("target") or 10)
-    accepted = int(current.get("accepted") or 0)
+    accepted = int(current.get("exportable", current.get("accepted")) or 0)
     exhausted = int(current.get("exhausted") or 0)
     duration = float(current.get("duration_seconds") or 0)
     rate = float(current.get("accepted_per_hour") or 0)
@@ -434,7 +434,11 @@ def compare_gate_reports(
     if current.get("error"):
         failures.append(f"pipeline_error: {current['error']}")
     if accepted < want:
-        failures.append(f"accepted {accepted} < target {want}")
+        label = "exportable" if "exportable" in current else "accepted"
+        failures.append(f"{label} {accepted} < target {want}")
+    limit = current.get("time_limit_seconds")
+    if limit is not None and duration > float(limit):
+        failures.append(f"duration {duration:.1f}s > limit {float(limit):.1f}s")
     if exhausted:
         failures.append(f"exhausted_reviews={exhausted}")
     if int(current.get("log_errors") or 0) > 0:
@@ -504,7 +508,9 @@ def write_verdict_md(payload: dict[str, Any], path: Path) -> None:
         "",
         f"- verdict: **{compared.get('verdict') or report.get('verdict')}**",
         f"- accepted: {report.get('accepted')}/{report.get('target')}",
+        f"- exportable: {report.get('exportable')}/{report.get('target')}",
         f"- duration_seconds: {report.get('duration_seconds')}",
+        f"- seconds_per_exportable: {report.get('seconds_per_exportable')}",
         f"- accepted_per_hour: {report.get('accepted_per_hour')}",
         f"- pending: {report.get('pending')} exhausted: {report.get('exhausted')}",
         f"- knowledge_jobs_done: {report.get('knowledge_jobs_done')} errors: {report.get('knowledge_job_errors')}",
@@ -543,6 +549,7 @@ def _run_gate_impl(
     baseline_path: Path | None = None,
     allow_fake: bool = False,
     ingest_packs: list[Path] | None = None,
+    started_at: float | None = None,
 ) -> dict[str, Any]:
     """Run a short generate+review in a fresh directory and compare to baseline.
 
@@ -579,7 +586,7 @@ def _run_gate_impl(
         review_batch_size=min(settings.review_batch_size, target),
     )
     get_metrics().reset()
-    started = time.time()
+    started = started_at if started_at is not None else time.time()
     log_path = output / "pipeline.log"
     run_meta = {
         "phase": phase,
@@ -590,6 +597,15 @@ def _run_gate_impl(
         "target": target,
         "fake": bool(fixed.fake_llm),
         "knowledge_enabled": True,
+        "models": {role: api.model for role, api in fixed.agent_apis.items()},
+        "writer_thinking_level": fixed.writer_thinking_level,
+        "review_thinking_level": fixed.review.get("thinking_level"),
+        "solver_thinking_level": fixed.review.get("solver_thinking_level"),
+        "writer_concurrency": fixed.writer_concurrency,
+        "llm_per_key_concurrency": fixed.llm_per_key_concurrency,
+        "chair_max_workers": fixed.review.get("chair_max_workers"),
+        "chair_trigger_count": fixed.review.get("chair_trigger_count"),
+        "min_generate_batch": fixed.min_generate_batch,
     }
     (output / "run.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
 
@@ -598,6 +614,7 @@ def _run_gate_impl(
     logging.getLogger().addHandler(handler)
 
     error = None
+    export_manifest: dict[str, Any] = {}
     result: dict[str, Any] = {"status": "failed", "done": False}
     knowledge_stats: dict[str, Any] = {}
     rt = None
@@ -622,6 +639,9 @@ def _run_gate_impl(
                 pending = rt.store.load_pending()
                 if rt.knowledge is not None:
                     knowledge_stats = rt.knowledge.stats()
+                rt.refresh_knowledge(force=True)
+                export_manifest = rt.store.export_training(
+                    output / "training.jsonl", require_independent_reviewer=True)
             finally:
                 if rt is not None:
                     try:
@@ -638,6 +658,7 @@ def _run_gate_impl(
 
     metrics = get_metrics().snapshot()
     elapsed = time.time() - started
+    exportable = int(export_manifest.get("questions") or 0)
     counters = metrics.get("counters") or {}
     prompt_tokens = sum(v for k, v in counters.items() if k.startswith("llm_prompt_tokens"))
     completion_tokens = sum(v for k, v in counters.items() if k.startswith("llm_completion_tokens"))
@@ -656,11 +677,16 @@ def _run_gate_impl(
         "knowledge_enabled": True,
         "target": target,
         "accepted": len(accepted),
+        "exportable": exportable,
+        "export_manifest": export_manifest,
         "rejected": len(rejected),
         "pending": len(pending),
         "exhausted": exhausted,
         "duration_seconds": elapsed,
-        "accepted_per_hour": len(accepted) * 3600 / max(elapsed, 0.001),
+        "time_limit_seconds": timeout,
+        "seconds_per_exportable": elapsed / exportable if exportable else None,
+        "speed_met": exportable >= target and elapsed <= timeout and error is None,
+        "accepted_per_hour": exportable * 3600 / max(elapsed, 0.001),
         "covered_leaves": len({q.l3_id for q in accepted}),
         "llm_calls": calls,
         "reported_prompt_tokens": prompt_tokens,
@@ -705,6 +731,7 @@ def run_gate(
     baseline_path: Path | None = None,
     allow_fake: bool = False,
     ingest_packs: list[Path] | None = None,
+    started_at: float | None = None,
 ) -> dict[str, Any]:
     """Run the gate with owner-only permissions on its output tree."""
     output = Path(output).resolve()
@@ -723,6 +750,7 @@ def run_gate(
             baseline_path=baseline_path,
             allow_fake=allow_fake,
             ingest_packs=ingest_packs,
+            started_at=started_at,
         )
     finally:
         _secure_output_tree(output)

@@ -75,6 +75,9 @@ class AgentAPI:
     base_url: str
     model: str
     api_keys: list[str] = field(repr=False)
+    # OpenAI-compatible reasoning models often reject temperature/top_p, so they
+    # are sent only when <ROLE>_SAMPLING_PARAMS opts in (NVIDIA always sends them).
+    sampling_params: bool = False
 
 
 AGENT_ROLES = ("writer", "evolver", "review", "salvage", "knowledge")
@@ -97,7 +100,10 @@ def _agent_api(role: str, writer: AgentAPI | None = None, *, fake_llm: bool = Fa
     )
     if changed_connection and not fake_llm and (not base_value or not keys):
         raise ValueError(f"{prefix}_BASE_URL and {prefix}_API_KEY are required when changing provider or base URL")
-    return AgentAPI(provider, base_url, model, keys or (writer.api_keys if writer else []))
+    sampling_value = (os.getenv(f"{prefix}_SAMPLING_PARAMS") or "").strip()
+    sampling_params = (_as_bool(sampling_value) if sampling_value
+                       else (writer.sampling_params if writer else False))
+    return AgentAPI(provider, base_url, model, keys or (writer.api_keys if writer else []), sampling_params)
 
 
 @dataclass
@@ -339,6 +345,36 @@ class Settings:
         return int(self.generation.get("max_parse_retries", 1))
 
 
+# Review thresholds a profile may tighten (prod) and a developer .env may set.
+_PROFILE_REVIEW_ENV = (
+    ("SEMANTIC_DUP_THRESHOLD", "semantic_dup_threshold"),
+    ("SEMANTIC_GRAY_THRESHOLD", "semantic_gray_threshold"),
+    ("TEMPLATE_JACCARD_THRESHOLD", "template_jaccard_threshold"),
+    ("TEMPLATE_GRAY_JACCARD", "template_gray_jaccard"),
+    ("SIMHASH_HAMMING_THRESHOLD", "simhash_hamming_threshold"),
+    ("SIMHASH_GRAY_HAMMING", "simhash_gray_hamming"),
+)
+
+
+def _warn_env_overrides_profile(profile_name: str, profile_review: dict[str, Any]) -> None:
+    """Warn when an environment variable replaces a review threshold the profile set.
+
+    Precedence is unchanged (environment wins); the warning only makes a masked
+    profile value, e.g. prod's stricter thresholds under a developer .env, visible.
+    """
+    for env_name, key in _PROFILE_REVIEW_ENV:
+        raw = (os.getenv(env_name) or "").strip()
+        if not raw or key not in profile_review:
+            continue
+        try:
+            differs = float(raw) != float(profile_review[key])
+        except (TypeError, ValueError):
+            differs = True
+        if differs:
+            logger.warning("config_env_overrides_profile key=review.%s env=%s profile=%s",
+                           key, env_name, profile_name)
+
+
 def _resolve_data_dir(data_dir: Path | None) -> Path | None:
     """CLI data_dir wins, then CUDA_SFT_DATA_DIR, else None (use YAML default)."""
     if data_dir is not None:
@@ -367,7 +403,8 @@ def load_settings(
     profile_path = root / "configs" / "profiles" / f"{profile_name}.yaml"
     if profile_name != "default" and not profile_path.is_file():
         raise ValueError(f"Unknown configuration profile: {profile_name}")
-    default_yaml = _merge_config(default_yaml, _load_yaml(profile_path))
+    profile_yaml = _load_yaml(profile_path)
+    default_yaml = _merge_config(default_yaml, profile_yaml)
     paths = default_yaml.get("paths", {})
     quotas = _load_yaml(root / paths.get("quotas", "configs/quotas.yaml"))
     personas_raw = _load_yaml(root / paths.get("personas", "configs/personas.yaml"))
@@ -497,6 +534,7 @@ def load_settings(
     n_keys = max(1, len(writer_api.api_keys))
     writer_concurrency = max(1, _as_int(os.getenv("WRITER_CONCURRENCY"),
         int(gen_cfg.get("writer_concurrency", n_keys * max(1, llm_per_key)))))
+    _warn_env_overrides_profile(profile_name, profile_yaml.get("review") or {})
 
     settings = Settings(
         root=root,

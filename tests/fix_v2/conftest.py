@@ -3,6 +3,7 @@
 Policy (fix/README.md): every model-dependent test uses the REAL LLM/embedding API configured in the repo .env.
 No FakeLLM, no stub LLMs, no fake embedders. Tests that need a model carry @pytest.mark.llm; when .env is not usable
 they FAIL (not skip). A session-wide request budget (QGEN_LLM_MAX_CALLS) guards against runaway cost.
+The repo .env is loaded by tests/conftest.py only when the session selects llm tests; offline runs never read it.
 """
 from __future__ import annotations
 
@@ -19,12 +20,6 @@ FIX_DIR = REPO_ROOT / "cuda_qgen_fix"
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))                    # `import fixv2_helpers`
-
-try:
-    from dotenv import load_dotenv
-    load_dotenv(REPO_ROOT / ".env", override=False)
-except ImportError:  # pragma: no cover
-    pass
 
 _USAGE: dict[str, dict] = {}
 _TOTAL = {"requests": 0, "total_tokens": 0}
@@ -115,7 +110,7 @@ def fix_dir() -> Path:
 
 @pytest.fixture()
 def settings():
-    """Settings from the real .env/configs (no model call is made by loading settings)."""
+    """Settings from the environment and configs (.env only in llm sessions; no model call is made)."""
     from cuda_sft_qgen.config import load_settings
     return load_settings()
 

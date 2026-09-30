@@ -133,6 +133,7 @@ class AgentConfig(BaseModel):
     base_url: str
     model: str
     api_keys: list[str] = Field(default_factory=list, repr=False)
+    sampling_params: bool = False
 
 
 class AppConfig(BaseModel):
@@ -305,7 +306,8 @@ def load_config_v2(
     config = AppConfig(
         root=settings.root, profile=settings.profile,
         agents={role: AgentConfig(provider=api.provider, base_url=api.base_url,
-                                  model=api.model, api_keys=api.api_keys)
+                                  model=api.model, api_keys=api.api_keys,
+                                  sampling_params=api.sampling_params)
                 for role, api in settings.agent_apis.items()},
         llm=LLMConfig(provider=settings.llm_provider, base_url=settings.llm_base_url, model=settings.llm_model,
                       thinking_level=settings.thinking_level, temperature=settings.temperature,
